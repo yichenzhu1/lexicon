@@ -39,18 +39,17 @@ final class DictSchemeHandler: NSObject, WKURLSchemeHandler {
         self.library = libraryModel.library
     }
 
-    nonisolated func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+    // WKURLSchemeHandler's conformance is main-actor isolated, which matches
+    // how WebKit calls it. Staying on that isolation means the task is never
+    // sent across an isolation boundary — only `token`, `url` and the result
+    // travel to and from the worker queue.
+    @MainActor
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
         let token = ObjectIdentifier(urlSchemeTask)
-        let url = urlSchemeTask.request.url
+        liveTasks[token] = urlSchemeTask
 
-        // WebKit starts and stops tasks on the main thread, so registering the
-        // task is already correctly isolated. The dispatch below must stay
-        // outside this closure: a closure formed inside an actor-isolated one
-        // inherits that isolation and would assert on the worker queue.
-        MainActor.assumeIsolated { liveTasks[token] = urlSchemeTask }
-
-        guard let url else {
-            MainActor.assumeIsolated { deliver(token: token, url: nil, result: nil) }
+        guard let url = urlSchemeTask.request.url else {
+            deliver(token: token, url: nil, result: nil)
             return
         }
 
@@ -63,13 +62,9 @@ final class DictSchemeHandler: NSObject, WKURLSchemeHandler {
         }
     }
 
-    nonisolated func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
-        // Take the token outside the closure so the task itself is never
-        // captured across isolation.
-        let token = ObjectIdentifier(urlSchemeTask)
-        MainActor.assumeIsolated {
-            _ = liveTasks.removeValue(forKey: token)
-        }
+    @MainActor
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
+        liveTasks.removeValue(forKey: ObjectIdentifier(urlSchemeTask))
     }
 
     @MainActor

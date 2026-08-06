@@ -24,7 +24,7 @@ func runConcurrencyTests(_ t: TestHarness) {
         let failures = Locked(0)
         DispatchQueue.concurrentPerform(iterations: iterations) { index in
             do {
-                let results = try library.search(prefix: "app")
+                let results = try library.search(matching: "app")
                 guard results.contains(where: { $0.displayKey == "apple" }) else {
                     failures.mutate { $0 += 1 }
                     return

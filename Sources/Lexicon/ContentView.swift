@@ -9,28 +9,42 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @FocusState private var searchFocused: Bool
     @State private var sidebarMode: SidebarMode = .history
-    @State private var historyExpanded = true
+    /// Filters the history/starred list. Only shown when not searching, so it
+    /// never competes with the lookup field for attention.
+    @State private var listFilter = ""
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var isDropTargeted = false
+
+    /// True while the lookup field holds a query, in which case the sidebar
+    /// shows results rather than one of the saved lists.
+    private var isSearching: Bool {
+        !appState.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
-        VStack(spacing: 0) {
-            browserTabStrip
-            interfaceSeparator.frame(height: 1)
-
-            NavigationSplitView(columnVisibility: $columnVisibility) {
-                sidebar
-                    .navigationSplitViewColumnWidth(min: 200, ideal: 240)
-                    .background {
-                        SplitDividerOverlay(
-                            color: colorScheme == .dark
-                                ? NSColor(white: 0.22, alpha: 1)
-                                : NSColor(white: 0.78, alpha: 1)
-                        )
-                        .allowsHitTesting(false)
-                    }
-            } detail: {
-                detail
-                    .navigationTitle("")
+        // NavigationSplitView claims the whole window on macOS: as a plain
+        // VStack sibling the tab strip was laid out at zero height, which hid
+        // the tab bar and the sidebar toggle entirely. A top safe-area inset
+        // reserves the space the split view then lays out below.
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            sidebar
+                .navigationSplitViewColumnWidth(min: 200, ideal: 240)
+                .background {
+                    SplitDividerOverlay(
+                        color: colorScheme == .dark
+                            ? NSColor(white: 0.22, alpha: 1)
+                            : NSColor(white: 0.78, alpha: 1)
+                    )
+                    .allowsHitTesting(false)
+                }
+        } detail: {
+            detail
+                .navigationTitle("")
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(spacing: 0) {
+                browserTabStrip
+                interfaceSeparator.frame(height: 1)
             }
         }
         .ignoresSafeArea(.container, edges: .top)
@@ -41,6 +55,26 @@ struct ContentView: View {
         .sheet(isPresented: $appState.showDictionaryManager) {
             DictionaryManagerView()
                 .environmentObject(libraryModel)
+        }
+        // Dropping a .mdx on the window imports it, the obvious Mac gesture
+        // for "add this dictionary".
+        .dropDestination(for: URL.self) { urls, _ in
+            let dictionaries = urls.filter { $0.pathExtension.lowercased() == "mdx" }
+            guard !dictionaries.isEmpty else { return false }
+            libraryModel.importDictionaries(at: dictionaries)
+            appState.showDictionaryManager = true
+            return true
+        } isTargeted: { isTargeted in
+            isDropTargeted = isTargeted
+        }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color.accentColor, lineWidth: 3)
+                    .padding(4)
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
         }
         .alert(
             "Lexicon",
@@ -61,6 +95,9 @@ struct ContentView: View {
                     .keyboardShortcut("f", modifiers: .command)
                 Button("") { appState.closeActiveTabOrWindow() }
                     .keyboardShortcut("w", modifiers: .command)
+                // ⌘= is the unshifted twin of ⌘+; browsers accept both.
+                Button("") { libraryModel.zoomIn() }
+                    .keyboardShortcut("=", modifiers: .command)
             }
             .hidden()
         }
@@ -68,13 +105,14 @@ struct ContentView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { focusSearchField() }
         }
-        .onChange(of: appState.searchText) { _, text in
-            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                sidebarMode = .history
-            }
+        .onChange(of: sidebarMode) { _, _ in
+            // The picker chooses which saved list the sidebar shows. Asking for
+            // one while a query is up means the user wants that list, so drop
+            // the query rather than leaving the control looking inert.
+            listFilter = ""
+            if isSearching { appState.searchText = "" }
         }
         .onChange(of: appState.activeTabID) { _, _ in
-            if appState.activeTab?.word == nil { sidebarMode = .history }
             focusSearchField()
         }
     }
@@ -90,13 +128,14 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .help(columnVisibility == .detailOnly ? "Show Sidebar" : "Hide Sidebar")
+            .accessibilityLabel(columnVisibility == .detailOnly ? "Show Sidebar" : "Hide Sidebar")
 
             BrowserTabBar()
                 .frame(maxWidth: 820)
 
             Spacer(minLength: 0)
         }
-        .padding(.leading, 76)
+        .padding(.leading, 88)
         .padding(.trailing, 12)
         .frame(height: 42)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -117,21 +156,14 @@ struct ContentView: View {
                 ForEach(appState.tabs) { tab in
                     EntryWebView(
                         word: tab.word,
-                        contentVersion: libraryModel.contentVersion
+                        contentVersion: libraryModel.contentVersion,
+                        zoom: libraryModel.entryZoom,
+                        collapsedDictionaries: libraryModel.collapsedDictionaries
                     )
                     .opacity(tab.id == appState.activeTabID ? 1 : 0)
                     .allowsHitTesting(tab.id == appState.activeTabID)
                     .accessibilityHidden(tab.id != appState.activeTabID)
                     .zIndex(tab.id == appState.activeTabID ? 1 : 0)
-                }
-
-                if sidebarMode == .starred,
-                   appState.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    StarredWordsView { word in
-                        sidebarMode = .history
-                        appState.selectedWord = word
-                    }
-                    .zIndex(2)
                 }
             }
         }
@@ -148,6 +180,7 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .help("Back")
+            .accessibilityLabel("Back")
             .disabled(!appState.canGoBack)
             .keyboardShortcut("[", modifiers: .command)
 
@@ -159,6 +192,7 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .help("Forward")
+            .accessibilityLabel("Forward")
             .disabled(!appState.canGoForward)
             .keyboardShortcut("]", modifiers: .command)
 
@@ -170,6 +204,7 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .help("Reload Entry")
+            .accessibilityLabel("Reload Entry")
 
             Button {
                 if let word = appState.selectedWord {
@@ -180,8 +215,9 @@ struct ContentView: View {
                     .frame(width: 26, height: 24)
             }
             .buttonStyle(.plain)
-            .help("Star this word")
-            .disabled(appState.selectedWord == nil || sidebarMode == .starred)
+            .help(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
+            .accessibilityLabel(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
+            .disabled(appState.selectedWord == nil)
 
             searchField
 
@@ -193,6 +229,7 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .help("Manage dictionaries")
+            .accessibilityLabel("Manage dictionaries")
         }
         .font(.system(size: 16, weight: .medium))
         .padding(.horizontal, 11)
@@ -259,16 +296,22 @@ struct ContentView: View {
         }
     }
 
-    private var bookmarkIconName: String {
-        guard let word = appState.selectedWord else { return "bookmark" }
-        return libraryModel.isStarred(word) ? "bookmark.fill" : "bookmark"
+    private var isCurrentWordStarred: Bool {
+        guard let word = appState.selectedWord else { return false }
+        return libraryModel.isStarred(word)
     }
 
+    private var bookmarkIconName: String {
+        isCurrentWordStarred ? "bookmark.fill" : "bookmark"
+    }
+
+    /// The sidebar always shows exactly one list, and the header describes the
+    /// list that is actually on screen: results while searching, otherwise the
+    /// saved list the picker selects.
     @ViewBuilder
     private var sidebar: some View {
-        let query = appState.searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         VStack(spacing: 0) {
-            Picker("Sidebar", selection: $sidebarMode) {
+            Picker("Sidebar list", selection: $sidebarMode) {
                 Label("History", systemImage: "clock").tag(SidebarMode.history)
                 Label("Starred", systemImage: "star").tag(SidebarMode.starred)
             }
@@ -278,47 +321,37 @@ struct ContentView: View {
             .padding(.top, 2)
             .padding(.bottom, 5)
 
-            historyHeader
+            sidebarHeader
                 .padding(.leading, 12)
                 .padding(.trailing, 10)
                 .padding(.vertical, 3)
 
+            if !isSearching, !savedWords.isEmpty {
+                listFilterField
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 6)
+            }
+
             List(selection: $appState.selectedWord) {
-                if query.isEmpty {
-                    if historyExpanded {
-                        if !libraryModel.history.isEmpty {
-                            ForEach(libraryModel.history, id: \.self) { word in
-                                Text(libraryModel.displayWord(for: word) ?? word).tag(word)
-                            }
+                if isSearching {
+                    if appState.results.isEmpty {
+                        placeholderRow("No matches")
+                    } else {
+                        if showingSuggestions {
+                            // Nothing matched literally; these are near misses.
+                            Text("Did you mean")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
                         }
-                        if libraryModel.history.isEmpty {
-                            Text(libraryModel.dictionaries.isEmpty
-                                ? "Import dictionaries to get started"
-                                : "Type to search")
-                                .foregroundStyle(.secondary)
-                                .font(.callout)
+                        ForEach(appState.results) { result in
+                            resultRow(result)
                         }
                     }
-                } else if appState.results.isEmpty {
-                    Text("No matches")
-                        .foregroundStyle(.secondary)
-                        .font(.callout)
+                } else if visibleWords.isEmpty {
+                    placeholderRow(emptyListMessage)
                 } else {
-                    ForEach(appState.results) { result in
-                        HStack {
-                            Text(result.displayKey)
-                                .lineLimit(1)
-                            Spacer()
-                            if result.dictionaryCount > 1 {
-                                Text("\(result.dictionaryCount)")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 1)
-                                    .background(Capsule().fill(.quaternary))
-                            }
-                        }
-                        .tag(result.normalizedKey)
+                    ForEach(visibleWords, id: \.self) { word in
+                        savedWordRow(word)
                     }
                 }
             }
@@ -327,32 +360,149 @@ struct ContentView: View {
         }
     }
 
-    private var historyHeader: some View {
-        HStack(spacing: 10) {
-            Text("History")
+    private var sidebarHeader: some View {
+        HStack(spacing: 8) {
+            Text(sidebarTitle)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
-            Spacer(minLength: 8)
-            Button("Clear") { libraryModel.clearHistory() }
-                .buttonStyle(.plain)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize()
-                .disabled(libraryModel.history.isEmpty)
-            Button {
-                withAnimation(.easeInOut(duration: 0.16)) {
-                    historyExpanded.toggle()
-                }
-            } label: {
-                Image(systemName: "chevron.down")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .rotationEffect(.degrees(historyExpanded ? 0 : -90))
-                    .frame(width: 14, height: 18)
+            if let count = sidebarCount {
+                Text("\(count)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .monospacedDigit()
             }
-            .buttonStyle(.plain)
-            .help(historyExpanded ? "Collapse History" : "Expand History")
+            Spacer(minLength: 8)
+            if isSearching {
+                Button("Clear") { appState.searchText = "" }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                    .help("Clear the search")
+            } else if sidebarMode == .history {
+                Button("Clear") { libraryModel.clearHistory() }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                    .disabled(libraryModel.history.isEmpty)
+                    .help("Clear lookup history")
+            }
         }
+    }
+
+    private var listFilterField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "line.3.horizontal.decrease")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            TextField(
+                sidebarMode == .history ? "Filter history" : "Filter starred",
+                text: $listFilter
+            )
+            .textFieldStyle(.plain)
+            .font(.callout)
+            if !listFilter.isEmpty {
+                Button {
+                    listFilter = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear filter")
+            }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(.quaternary.opacity(0.4))
+        }
+    }
+
+    private func resultRow(_ result: SearchResult) -> some View {
+        HStack {
+            Text(result.displayKey)
+                .lineLimit(1)
+            Spacer()
+            if result.dictionaryCount > 1 {
+                Text("\(result.dictionaryCount)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(.quaternary))
+                    .help("In \(result.dictionaryCount) dictionaries")
+            }
+        }
+        .tag(result.normalizedKey)
+    }
+
+    private func savedWordRow(_ word: String) -> some View {
+        Text(libraryModel.displayWord(for: word) ?? word)
+            .lineLimit(1)
+            .tag(word)
+            .contextMenu {
+                Button(libraryModel.isStarred(word) ? "Remove from Starred" : "Add to Starred") {
+                    libraryModel.toggleStar(word)
+                }
+                if sidebarMode == .history {
+                    Button("Remove from History") {
+                        libraryModel.removeFromHistory(word)
+                    }
+                }
+            }
+    }
+
+    private func placeholderRow(_ message: String) -> some View {
+        Text(message)
+            .foregroundStyle(.secondary)
+            .font(.callout)
+    }
+
+    // MARK: - Sidebar list contents
+
+    private var savedWords: [String] {
+        sidebarMode == .history ? libraryModel.history : libraryModel.starred
+    }
+
+    private var visibleWords: [String] {
+        let query = listFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return savedWords }
+        return savedWords.filter { word in
+            (libraryModel.displayWord(for: word) ?? word).localizedStandardContains(query)
+        }
+    }
+
+    /// True when every result is a near miss rather than a literal match.
+    private var showingSuggestions: Bool {
+        !appState.results.isEmpty && appState.results.allSatisfy { $0.matchKind == .fuzzy }
+    }
+
+    private var sidebarTitle: String {
+        if isSearching { return showingSuggestions ? "Suggestions" : "Results" }
+        return sidebarMode == .history ? "History" : "Starred"
+    }
+
+    private var sidebarCount: Int? {
+        if isSearching {
+            return appState.results.isEmpty ? nil : appState.results.count
+        }
+        return visibleWords.isEmpty ? nil : visibleWords.count
+    }
+
+    private var emptyListMessage: String {
+        if !listFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Nothing matches that filter"
+        }
+        if libraryModel.dictionaries.isEmpty {
+            return "Import dictionaries to get started"
+        }
+        return sidebarMode == .history
+            ? "Type to search"
+            : "Star a word to keep it here"
     }
 }
 
@@ -528,6 +678,7 @@ private struct BrowserTabBar: View {
                 }
                 .buttonStyle(.plain)
                 .help("New Tab")
+                .accessibilityLabel("New Tab")
 
                 Spacer(minLength: 0)
             }
@@ -567,6 +718,7 @@ private struct BrowserTabBar: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
                 .help("Close Tab")
+                .accessibilityLabel("Close Tab")
             }
         }
         .padding(.leading, compact ? 6 : 10)
@@ -584,111 +736,6 @@ private struct BrowserTabBar: View {
                     Color(nsColor: .separatorColor).opacity(isActive ? 0.55 : 0),
                     lineWidth: 1
                 )
-        }
-    }
-}
-
-private struct StarredWordsView: View {
-    @EnvironmentObject private var appState: AppState
-    @EnvironmentObject private var libraryModel: LibraryModel
-    @State private var searchText = ""
-
-    let onOpen: (String) -> Void
-
-    private var matchingWords: [String] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return libraryModel.starred }
-        return libraryModel.starred.filter { word in
-            let displayWord = libraryModel.displayWord(for: word) ?? word
-            return displayWord.localizedStandardContains(query)
-        }
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("Search starred words", text: $searchText)
-                    .textFieldStyle(.plain)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .background(.quaternary.opacity(0.35))
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .padding(16)
-
-            if libraryModel.starred.isEmpty {
-                HStack(spacing: 9) {
-                    Image(systemName: "star")
-                        .foregroundStyle(.secondary)
-                    Text("No starred words yet")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                }
-                .padding(12)
-                .background {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(Color(nsColor: .separatorColor).opacity(0.7), lineWidth: 1)
-                }
-                .padding(.horizontal, 16)
-                .frame(maxHeight: .infinity, alignment: .top)
-            } else if matchingWords.isEmpty {
-                ContentUnavailableView.search(text: searchText)
-            } else {
-                ScrollView {
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 190, maximum: 280), spacing: 12)],
-                        spacing: 12
-                    ) {
-                        ForEach(matchingWords, id: \.self) { word in
-                            starredCard(for: word)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 18)
-                }
-            }
-        }
-        .background(Color(nsColor: .windowBackgroundColor))
-    }
-
-    private func starredCard(for word: String) -> some View {
-        HStack(spacing: 8) {
-            Button {
-                onOpen(word)
-            } label: {
-                Text(libraryModel.displayWord(for: word) ?? word)
-                    .font(.headline)
-                    .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-
-            Button {
-                libraryModel.toggleStar(word)
-            } label: {
-                Image(systemName: "star.fill")
-                    .foregroundStyle(.yellow)
-                    .padding(5)
-            }
-            .buttonStyle(.plain)
-            .help("Remove from starred words")
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color(nsColor: .separatorColor).opacity(0.7), lineWidth: 1)
         }
     }
 }

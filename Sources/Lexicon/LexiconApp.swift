@@ -85,6 +85,35 @@ private struct LexiconCommands: Commands {
             .keyboardShortcut("i", modifiers: [.command, .shift])
             .disabled(appState == nil)
         }
+
+        CommandGroup(after: .toolbar) {
+            Button("Zoom In") { appState?.libraryModel.zoomIn() }
+                .keyboardShortcut("+", modifiers: .command)
+                .disabled(appState?.libraryModel.canZoomIn != true)
+
+            Button("Zoom Out") { appState?.libraryModel.zoomOut() }
+                .keyboardShortcut("-", modifiers: .command)
+                .disabled(appState?.libraryModel.canZoomOut != true)
+
+            Button("Actual Size (\(appState?.libraryModel.zoomDescription ?? "100%"))") {
+                appState?.libraryModel.resetZoom()
+            }
+            .keyboardShortcut("0", modifiers: .command)
+            .disabled(appState == nil)
+
+            Divider()
+
+            Toggle(
+                "Look Up on Double-Click",
+                isOn: Binding(
+                    get: { appState?.libraryModel.lookUpOnDoubleClick ?? true },
+                    set: { appState?.libraryModel.lookUpOnDoubleClick = $0 }
+                )
+            )
+            .disabled(appState == nil)
+
+            Divider()
+        }
     }
 }
 

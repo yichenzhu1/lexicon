@@ -10,6 +10,8 @@ struct EntryWebView: NSViewRepresentable {
 
     let word: String?
     let contentVersion: Int
+    let zoom: Double
+    let collapsedDictionaries: Set<String>
 
     func makeCoordinator() -> Coordinator {
         Coordinator(appState: appState, libraryModel: libraryModel)
@@ -26,6 +28,7 @@ struct EntryWebView: NSViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground") // blend with window
+        webView.pageZoom = zoom
         context.coordinator.load(word: word, version: contentVersion, into: webView, force: true)
         return webView
     }
@@ -33,6 +36,7 @@ struct EntryWebView: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.appState = appState
         context.coordinator.libraryModel = libraryModel
+        if webView.pageZoom != zoom { webView.pageZoom = zoom }
         context.coordinator.load(word: word, version: contentVersion, into: webView, force: false)
     }
 
@@ -55,7 +59,11 @@ struct EntryWebView: NSViewRepresentable {
 
             let html: String
             if let word, let library = libraryModel.library {
-                html = EntryPageBuilder.resultsDocument(for: word, library: library)
+                html = EntryPageBuilder.resultsDocument(
+                    for: word,
+                    library: library,
+                    collapsedDictionaries: libraryModel.collapsedDictionaries
+                )
             } else {
                 html = EntryPageBuilder.welcomeDocument(
                     hasDictionaries: !libraryModel.dictionaries.isEmpty
@@ -108,9 +116,28 @@ struct EntryWebView: NSViewRepresentable {
             didReceive message: WKScriptMessage
         ) {
             guard message.name == Self.linkMessageName,
-                  let payload = message.body as? [String: Any],
-                  let href = payload["href"] as? String
+                  let payload = message.body as? [String: Any]
             else { return }
+
+            if payload["kind"] as? String == "collapse" {
+                guard let uuid = payload["dictionaryUUID"] as? String,
+                      let collapsed = payload["collapsed"] as? Bool
+                else { return }
+                libraryModel.setDictionary(uuid, collapsed: collapsed)
+                return
+            }
+
+            if payload["kind"] as? String == "lookup" {
+                // Gated here rather than in the injected script so the
+                // preference applies to already-rendered entries.
+                guard libraryModel.lookUpOnDoubleClick,
+                      let word = payload["word"] as? String
+                else { return }
+                appState.navigate(to: word)
+                return
+            }
+
+            guard let href = payload["href"] as? String else { return }
             routeDictionaryLink(
                 href,
                 dictionaryUUID: payload["dictionaryUUID"] as? String

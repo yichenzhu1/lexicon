@@ -48,7 +48,7 @@ func runDiagnostics(root: String, words: [String]) {
         print("\n### word: \(word)")
         let started = Date()
         do {
-            let results = try library.search(prefix: word, limit: 10)
+            let results = try library.search(matching: word, limit: 10)
             let elapsed = Int(Date().timeIntervalSince(started) * 1000)
             print("  search(\(word)) -> \(results.count) results in \(elapsed)ms: \(results.prefix(6).map(\.displayKey))")
         } catch {

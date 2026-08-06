@@ -80,7 +80,7 @@ final class AppState: ObservableObject {
             return
         }
         do {
-            results = try library.search(prefix: trimmed, limit: 80)
+            results = try library.search(matching: trimmed, limit: 80)
         } catch {
             libraryModel.errorMessage = error.localizedDescription
             results = []

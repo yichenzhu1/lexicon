@@ -19,6 +19,9 @@ final class LibraryModel: ObservableObject {
     @Published private(set) var starred: [String] = []
     @Published var isImporting = false
     @Published var importStatus = ""
+    /// nil while the current stage is not countable, so the UI can fall back to
+    /// an indeterminate spinner.
+    @Published var importFraction: Double?
     @Published var errorMessage: String?
     @Published private(set) var removingDictionaryIDs: Set<Int64> = []
     /// Bumped whenever rendered content may change (dictionary set edited).
@@ -68,17 +71,26 @@ final class LibraryModel: ObservableObject {
         guard let library else { return }
         isImporting = true
         importStatus = "Starting import…"
+        importFraction = nil
         importQueue.async { [weak self] in
             var failures: [String] = []
+            var withoutResources: [String] = []
             for url in urls {
                 let scoped = url.startAccessingSecurityScopedResource()
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                 do {
-                    let name = url.lastPathComponent
-                    try library.importDictionary(from: url) { status in
+                    let name = url.deletingPathExtension().lastPathComponent
+                    let record = try library.importDictionary(from: url) { update in
+                        let text = update.total > 0
+                            ? "\(name): \(update.stage) \(update.completed.formatted()) of \(update.total.formatted())"
+                            : "\(name): \(update.stage)"
                         Task { @MainActor [weak self] in
-                            self?.importStatus = "\(name): \(status)"
+                            self?.importStatus = text
+                            self?.importFraction = update.fraction
                         }
+                    }
+                    if !record.hasResources {
+                        withoutResources.append(record.title)
                     }
                 } catch {
                     failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
@@ -88,12 +100,37 @@ final class LibraryModel: ObservableObject {
                 guard let self else { return }
                 self.isImporting = false
                 self.importStatus = ""
+                self.importFraction = nil
+                var problems: [String] = []
                 if !failures.isEmpty {
-                    self.errorMessage = "Import failed for:\n" + failures.joined(separator: "\n")
+                    problems.append("Import failed for:\n" + failures.joined(separator: "\n"))
+                }
+                if !withoutResources.isEmpty {
+                    // Silent resource loss is the most common import mistake:
+                    // the .mdd sits somewhere else and only images go missing.
+                    problems.append(
+                        "No images, audio or stylesheets were found for "
+                        + withoutResources.map { "“\($0)”" }.joined(separator: ", ")
+                        + ". Keep the .mdd files next to the .mdx and import again "
+                        + "if the entries look incomplete."
+                    )
+                }
+                if !problems.isEmpty {
+                    self.errorMessage = problems.joined(separator: "\n\n")
                 }
                 self.dictionariesChanged()
             }
         }
+    }
+
+    func rename(_ record: DictionaryRecord, to title: String) {
+        guard let library else { return }
+        do {
+            try library.setTitle(title, for: record)
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        dictionariesChanged()
     }
 
     func removeDictionary(_ record: DictionaryRecord) {
@@ -177,6 +214,77 @@ final class LibraryModel: ObservableObject {
         contentVersion += 1
     }
 
+    // MARK: - Reading preferences
+
+    /// Zoom applied to rendered entries, shared by every tab and window and
+    /// remembered across launches.
+    @Published private(set) var entryZoom: Double = LibraryModel.storedZoom()
+    /// Whether double-clicking a word inside an entry looks it up. Off means
+    /// double-click keeps its ordinary select-a-word-to-copy behavior.
+    @Published var lookUpOnDoubleClick: Bool = LibraryModel.storedLookUpOnDoubleClick() {
+        didSet {
+            UserDefaults.standard.set(lookUpOnDoubleClick, forKey: Self.lookUpKey)
+        }
+    }
+
+    /// Dictionaries the user collapsed on a results page. Remembered across
+    /// lookups so a dictionary you always skip stays folded away.
+    ///
+    /// Deliberately does not bump `contentVersion`: collapsing a card must not
+    /// reload the page out from under the click that caused it.
+    @Published private(set) var collapsedDictionaries: Set<String> =
+        Set(UserDefaults.standard.stringArray(forKey: LibraryModel.collapsedKey) ?? [])
+
+    func setDictionary(_ uuid: String, collapsed: Bool) {
+        let changed = collapsed
+            ? collapsedDictionaries.insert(uuid).inserted
+            : collapsedDictionaries.remove(uuid) != nil
+        guard changed else { return }
+        UserDefaults.standard.set(Array(collapsedDictionaries), forKey: Self.collapsedKey)
+    }
+
+    private static let zoomKey = "entryZoom"
+    private static let lookUpKey = "lookUpOnDoubleClick"
+    private static let collapsedKey = "collapsedDictionaries"
+    /// Discrete stops, like a browser's zoom menu.
+    private static let zoomSteps: [Double] = [
+        0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
+    ]
+
+    private static func storedZoom() -> Double {
+        let stored = UserDefaults.standard.double(forKey: zoomKey)
+        guard stored > 0 else { return 1.0 }
+        return min(max(stored, zoomSteps[0]), zoomSteps[zoomSteps.count - 1])
+    }
+
+    private static func storedLookUpOnDoubleClick() -> Bool {
+        // Default on: looking a word up is what this app is for.
+        UserDefaults.standard.object(forKey: lookUpKey) as? Bool ?? true
+    }
+
+    var canZoomIn: Bool { entryZoom < Self.zoomSteps[Self.zoomSteps.count - 1] }
+    var canZoomOut: Bool { entryZoom > Self.zoomSteps[0] }
+    /// "125%" for the View menu.
+    var zoomDescription: String { "\(Int((entryZoom * 100).rounded()))%" }
+
+    func zoomIn() {
+        setZoom(Self.zoomSteps.first { $0 > entryZoom + 0.001 } ?? entryZoom)
+    }
+
+    func zoomOut() {
+        setZoom(Self.zoomSteps.last { $0 < entryZoom - 0.001 } ?? entryZoom)
+    }
+
+    func resetZoom() {
+        setZoom(1.0)
+    }
+
+    private func setZoom(_ value: Double) {
+        guard value != entryZoom else { return }
+        entryZoom = value
+        UserDefaults.standard.set(value, forKey: Self.zoomKey)
+    }
+
     // MARK: - Headword display
 
     /// Headword with original casing/diacritics for a normalized key.
@@ -221,6 +329,11 @@ final class LibraryModel: ObservableObject {
         updated.insert(word, at: 0)
         if updated.count > 200 { updated.removeLast(updated.count - 200) }
         history = updated
+        save(history, to: historyURL)
+    }
+
+    func removeFromHistory(_ word: String) {
+        history.removeAll { $0 == word }
         save(history, to: historyURL)
     }
 

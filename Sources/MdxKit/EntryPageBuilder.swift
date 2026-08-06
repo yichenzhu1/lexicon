@@ -5,7 +5,12 @@ import Foundation
 /// a same-origin iframe (so per-dictionary CSS can't leak between entries).
 public enum EntryPageBuilder {
     /// Outer page listing every enabled dictionary that has the word.
-    public static func resultsDocument(for normalizedKey: String, library: DictionaryLibrary) -> String {
+    /// - Parameter collapsedDictionaries: UUIDs whose cards start folded.
+    public static func resultsDocument(
+        for normalizedKey: String,
+        library: DictionaryLibrary,
+        collapsedDictionaries: Set<String> = []
+    ) -> String {
         let hits = (try? library.entries(forNormalizedKey: normalizedKey)) ?? []
         guard !hits.isEmpty else {
             return messageDocument(
@@ -30,14 +35,28 @@ public enum EntryPageBuilder {
             let encodedUUID = dict.uuid.addingPercentEncoding(
                 withAllowedCharacters: Self.urlPathUnreserved
             ) ?? dict.uuid
+            let isOpen = collapsedDictionaries.contains(dict.uuid) ? "" : " open"
             return """
-            <details open>
+            <details\(isOpen) id="dict-\(escape(dict.uuid))" data-uuid="\(escape(dict.uuid))">
               <summary>\(escape(dict.title))</summary>
               <iframe src="dict://d/\(encodedUUID)/entry?word=\(encodedWord)"
                       scrolling="no"></iframe>
             </details>
             """
         }.joined(separator: "\n")
+
+        // With one dictionary the jump bar is pure chrome.
+        let jumpBar = orderedDictionaries.count > 1
+            ? """
+            <nav class="lexicon-jump" aria-label="Jump to dictionary">
+            \(orderedDictionaries.map { dict in
+                """
+                  <button type="button" data-jump="\(escape(dict.uuid))">\(escape(dict.title))</button>
+                """
+            }.joined(separator: "\n"))
+            </nav>
+            """
+            : ""
 
         return """
         <!DOCTYPE html>
@@ -80,9 +99,48 @@ public enum EntryPageBuilder {
             height: 1px;
             background: transparent;
           }
+          /* Sticky jump bar: with several dictionaries the same card is often
+             several screens down. */
+          .lexicon-jump {
+            position: sticky;
+            top: 0;
+            z-index: 5;
+            display: flex;
+            gap: 6px;
+            overflow-x: auto;
+            scrollbar-width: none;
+            margin: -12px -16px 8px;
+            padding: 8px 16px;
+            background: Canvas;
+            border-bottom: 1px solid rgba(128,128,128,0.22);
+          }
+          .lexicon-jump::-webkit-scrollbar { display: none; }
+          .lexicon-jump button {
+            flex: 0 0 auto;
+            font: inherit;
+            font-size: 11px;
+            font-weight: 600;
+            color: inherit;
+            opacity: 0.65;
+            padding: 3px 9px;
+            border: 1px solid rgba(128,128,128,0.35);
+            border-radius: 999px;
+            background: transparent;
+            cursor: pointer;
+          }
+          .lexicon-jump button:hover { opacity: 1; }
+          .lexicon-jump button[data-current="1"] {
+            opacity: 1;
+            border-color: rgba(128,128,128,0.75);
+            background: rgba(128,128,128,0.16);
+          }
+          @media (prefers-reduced-motion: reduce) {
+            .lexicon-jump button { transition: none; }
+          }
         </style>
         </head>
         <body>
+        \(jumpBar)
         \(cards)
         <script>
           function hookFrame(f) {
@@ -267,6 +325,54 @@ public enum EntryPageBuilder {
             } catch (e) {}
           }
           document.querySelectorAll('iframe').forEach(hookFrame);
+
+          // Report collapse state so the app can restore it next lookup.
+          document.querySelectorAll('details[data-uuid]').forEach(function (card) {
+            card.addEventListener('toggle', function () {
+              if (card.open) {
+                // A freshly revealed frame was measured while hidden.
+                const frame = card.querySelector('iframe');
+                if (frame) frame.dispatchEvent(new Event('load'));
+              }
+              try {
+                window.webkit.messageHandlers.lexiconLink.postMessage({
+                  kind: 'collapse',
+                  dictionaryUUID: card.dataset.uuid,
+                  collapsed: !card.open
+                });
+              } catch (_) {}
+            });
+          });
+
+          // Jump bar: scroll to a dictionary, expanding it if it is folded.
+          (function () {
+            const buttons = Array.from(document.querySelectorAll('.lexicon-jump button'));
+            if (!buttons.length) return;
+            buttons.forEach(function (button) {
+              button.addEventListener('click', function () {
+                const card = document.getElementById('dict-' + button.dataset.jump);
+                if (!card) return;
+                if (!card.open) card.open = true;
+                card.scrollIntoView({ block: 'start', behavior: 'smooth' });
+              });
+            });
+            // Highlight whichever card currently sits at the top.
+            function markCurrent() {
+              const bar = document.querySelector('.lexicon-jump');
+              const cutoff = (bar ? bar.getBoundingClientRect().bottom : 0) + 4;
+              let current = null;
+              document.querySelectorAll('details[data-uuid]').forEach(function (card) {
+                if (card.getBoundingClientRect().top <= cutoff) current = card.dataset.uuid;
+              });
+              if (current === null && buttons.length) current = buttons[0].dataset.jump;
+              buttons.forEach(function (button) {
+                if (button.dataset.jump === current) button.dataset.current = '1';
+                else delete button.dataset.current;
+              });
+            }
+            window.addEventListener('scroll', markCurrent, { passive: true });
+            markCurrent();
+          })();
         </script>
         </body>
         </html>
@@ -347,6 +453,30 @@ public enum EntryPageBuilder {
               try {
                 window.webkit.messageHandlers.lexiconLink.postMessage({
                   href: href,
+                  dictionaryUUID: \(jsStringLiteral(dictionaryUUID))
+                });
+              } catch (_) {}
+            }, true);
+
+            // Double-clicking a word looks it up. The message is always sent;
+            // native code decides whether the preference is on, so toggling it
+            // takes effect without re-rendering the entry.
+            window.addEventListener('dblclick', function (event) {
+              const target = event.target;
+              if (target && target.closest
+                  && target.closest('a[href], input, textarea, select, [contenteditable]')) {
+                return;
+              }
+              const selection = window.getSelection();
+              if (!selection) return;
+              const word = String(selection.toString()).trim();
+              // Only a plain single word: a double-click that extended an
+              // existing selection is the user selecting text to copy.
+              if (!word || word.length > 64 || /\\s/.test(word)) return;
+              try {
+                window.webkit.messageHandlers.lexiconLink.postMessage({
+                  kind: 'lookup',
+                  word: word,
                   dictionaryUUID: \(jsStringLiteral(dictionaryUUID))
                 });
               } catch (_) {}

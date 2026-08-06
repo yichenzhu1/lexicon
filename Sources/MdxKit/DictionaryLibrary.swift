@@ -10,6 +10,44 @@ public struct DictionaryRecord: Identifiable, Hashable, Sendable {
     public var enabled: Bool
     public var sortOrder: Int
     public let entryCount: Int
+    /// Images, audio and stylesheets indexed from the dictionary's .mdd parts.
+    /// Zero means the .mdd companions were not alongside the .mdx at import.
+    public let resourceCount: Int
+
+    public var hasResources: Bool { resourceCount > 0 }
+}
+
+/// Progress of a running import. `fraction` is nil while the work is not
+/// countable (copying files, reading the keyword index).
+public struct ImportProgress: Sendable {
+    public let stage: String
+    public let completed: Int
+    public let total: Int
+
+    public var fraction: Double? {
+        guard total > 0 else { return nil }
+        return min(1, Double(completed) / Double(total))
+    }
+
+    init(stage: String, completed: Int = 0, total: Int = 0) {
+        self.stage = stage
+        self.completed = completed
+        self.total = total
+    }
+}
+
+/// How a headword matched the query. Results are ordered by this, so a word
+/// that starts with what you typed always outranks one that merely contains it.
+public enum SearchMatchKind: Int, Sendable, Comparable {
+    case exact = 0
+    case prefix = 1
+    case substring = 2
+    /// Near miss offered when nothing matched literally.
+    case fuzzy = 3
+
+    public static func < (lhs: SearchMatchKind, rhs: SearchMatchKind) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
 }
 
 /// One headword match from the unified search.
@@ -18,6 +56,19 @@ public struct SearchResult: Identifiable, Hashable, Sendable {
     public let normalizedKey: String
     public let displayKey: String
     public let dictionaryCount: Int
+    public let matchKind: SearchMatchKind
+
+    public init(
+        normalizedKey: String,
+        displayKey: String,
+        dictionaryCount: Int,
+        matchKind: SearchMatchKind = .prefix
+    ) {
+        self.normalizedKey = normalizedKey
+        self.displayKey = displayKey
+        self.dictionaryCount = dictionaryCount
+        self.matchKind = matchKind
+    }
 }
 
 /// A concrete entry (word within one dictionary) ready to be read.
@@ -92,6 +143,19 @@ public final class DictionaryLibrary: @unchecked Sendable {
             );
             CREATE INDEX IF NOT EXISTS idx_resources ON resources(dict, path);
             """)
+
+            // SQLite has no ADD COLUMN IF NOT EXISTS, so check before adding.
+            let columns = try db.query("PRAGMA table_info(dictionaries)") { $0.text(1) }
+            if !columns.contains("resourceCount") {
+                try db.exec(
+                    "ALTER TABLE dictionaries ADD COLUMN resourceCount INTEGER NOT NULL DEFAULT 0"
+                )
+                // Existing libraries: recover the counts already indexed.
+                try db.exec("""
+                    UPDATE dictionaries SET resourceCount =
+                        (SELECT COUNT(*) FROM resources WHERE resources.dict = dictionaries.id)
+                    """)
+            }
         }
     }
 
@@ -121,7 +185,8 @@ public final class DictionaryLibrary: @unchecked Sendable {
         let rows = try pool.read { db in
             try db.query(
                 """
-                SELECT id, uuid, title, folder, mdxFile, enabled, sortOrder, entryCount
+                SELECT id, uuid, title, folder, mdxFile, enabled, sortOrder, entryCount,
+                       resourceCount
                 FROM dictionaries ORDER BY sortOrder, id
                 """
             ) { row in
@@ -133,7 +198,8 @@ public final class DictionaryLibrary: @unchecked Sendable {
                     mdxFileName: row.text(4),
                     enabled: row.int(5) != 0,
                     sortOrder: Int(row.int(6)),
-                    entryCount: Int(row.int(7))
+                    entryCount: Int(row.int(7)),
+                    resourceCount: Int(row.int(8))
                 )
             }
         }
@@ -171,7 +237,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
     @discardableResult
     public func importDictionary(
         from sourceMdxURL: URL,
-        progress: ((String) -> Void)? = nil
+        progress: ((ImportProgress) -> Void)? = nil
     ) throws -> DictionaryRecord {
         let fm = FileManager.default
         let uuid = UUID().uuidString
@@ -179,7 +245,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
 
         do {
-            progress?("Copying files…")
+            progress?(ImportProgress(stage: "Copying files…"))
             let baseName = sourceMdxURL.deletingPathExtension().lastPathComponent
             let sourceDir = sourceMdxURL.deletingLastPathComponent()
             let siblings = (try? fm.contentsOfDirectory(at: sourceDir, includingPropertiesForKeys: nil)) ?? []
@@ -192,7 +258,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
             let mdxFileName = sourceMdxURL.lastPathComponent
             let mdx = try MdictFile(url: folder.appendingPathComponent(mdxFileName))
 
-            progress?("Reading keywords…")
+            progress?(ImportProgress(stage: "Reading keywords…"))
 
             var nextOrder = 0
             let maxOrder = try pool.read { db in
@@ -204,7 +270,9 @@ public final class DictionaryLibrary: @unchecked Sendable {
             // would hold every headword of a large dictionary in memory. The
             // running count is therefore only known as we go, so the row is
             // inserted with a zero count and corrected at the end.
-            progress?("Indexing entries…")
+            // The header's entry count makes this a determinate bar.
+            let expectedEntries = Int(min(mdx.info.entryCount, UInt64(Int.max)))
+            progress?(ImportProgress(stage: "Indexing entries", completed: 0, total: expectedEntries))
             var entryCount = 0
             let dictID: Int64 = try pool.write { db in
                 try db.transaction {
@@ -228,8 +296,12 @@ public final class DictionaryLibrary: @unchecked Sendable {
                         try insert.step()
                         insert.reset()
                         entryCount += 1
-                        if entryCount % 20_000 == 0 {
-                            progress?("Indexing \(entryCount) entries…")
+                        if entryCount % 2_000 == 0 {
+                            progress?(ImportProgress(
+                                stage: "Indexing entries",
+                                completed: entryCount,
+                                total: expectedEntries
+                            ))
                         }
                     }
                     try db.run(
@@ -241,9 +313,10 @@ public final class DictionaryLibrary: @unchecked Sendable {
             }
 
             // Index resources from every .mdd part.
+            var resourceCount = 0
             let mddURLs = mddFiles(in: folder)
             if !mddURLs.isEmpty {
-                progress?("Indexing resources…")
+                progress?(ImportProgress(stage: "Indexing resources…"))
                 try pool.write { db in
                     try db.transaction {
                         let insert = try db.prepare(
@@ -261,9 +334,14 @@ public final class DictionaryLibrary: @unchecked Sendable {
                                 ])
                                 try insert.step()
                                 insert.reset()
+                                resourceCount += 1
                             }
                         }
                     }
+                    try db.run(
+                        "UPDATE dictionaries SET resourceCount = ? WHERE id = ?",
+                        [.int(Int64(resourceCount)), .int(dictID)]
+                    )
                 }
             }
 
@@ -271,7 +349,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
             return DictionaryRecord(
                 id: dictID, uuid: uuid, title: mdx.info.title, folderName: uuid,
                 mdxFileName: mdxFileName, enabled: true, sortOrder: nextOrder,
-                entryCount: entryCount
+                entryCount: entryCount, resourceCount: resourceCount
             )
         } catch {
             try? fm.removeItem(at: folder)
@@ -293,6 +371,20 @@ public final class DictionaryLibrary: @unchecked Sendable {
         stateLock.lock()
         handles.removeValue(forKey: record.uuid)
         stateLock.unlock()
+        invalidateRecordCache()
+    }
+
+    /// Renames a dictionary as shown in the app. The dictionary's own files are
+    /// untouched; only the library's label changes.
+    public func setTitle(_ title: String, for record: DictionaryRecord) throws {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        try pool.write { db in
+            try db.run(
+                "UPDATE dictionaries SET title = ? WHERE id = ?",
+                [.text(trimmed), .int(record.id)]
+            )
+        }
         invalidateRecordCache()
     }
 
@@ -323,10 +415,38 @@ public final class DictionaryLibrary: @unchecked Sendable {
 
     // MARK: - Search
 
-    /// Unified prefix search across all enabled dictionaries.
-    public func search(prefix: String, limit: Int = 60) throws -> [SearchResult] {
-        let normalized = Self.normalizeKey(prefix)
+    /// Unified search across all enabled dictionaries, in tiers: exact and
+    /// prefix matches first (an indexed range scan), then substring matches,
+    /// and — only when nothing matched literally — near misses.
+    ///
+    /// Each tier runs only if the previous ones left room, so the common case
+    /// costs exactly what the old prefix-only search did.
+    public func search(matching query: String, limit: Int = 60) throws -> [SearchResult] {
+        let normalized = Self.normalizeKey(query)
         guard !normalized.isEmpty else { return [] }
+
+        var seen = Set<String>()
+        var results: [SearchResult] = []
+
+        for match in try prefixMatches(normalized, limit: limit)
+        where seen.insert(match.normalizedKey).inserted {
+            results.append(match)
+        }
+        if results.count >= limit { return Array(results.prefix(limit)) }
+
+        for match in try substringMatches(normalized, limit: limit - results.count)
+        where seen.insert(match.normalizedKey).inserted {
+            results.append(match)
+        }
+        if !results.isEmpty { return Array(results.prefix(limit)) }
+
+        // Nothing matched literally, so offer the closest headwords instead of
+        // a dead end.
+        return try fuzzyMatches(normalized, limit: min(limit, 12))
+    }
+
+    /// Exact and prefix matches, served by `idx_entries_nkey` as a range scan.
+    private func prefixMatches(_ normalized: String, limit: Int) throws -> [SearchResult] {
         // SQLite compares TEXT byte-wise, so the upper bound has to sort above
         // every UTF-8 continuation of the prefix. U+FFFF (EF BF BF) does not:
         // it would drop headwords whose next character is astral, such as
@@ -346,13 +466,141 @@ public final class DictionaryLibrary: @unchecked Sendable {
                 """,
                 [.text(normalized), .text(upper), .int(Int64(limit))]
             ) { row in
-                SearchResult(
-                    normalizedKey: row.text(0),
+                let key = row.text(0)
+                return SearchResult(
+                    normalizedKey: key,
                     displayKey: row.text(1),
-                    dictionaryCount: Int(row.int(2))
+                    dictionaryCount: Int(row.int(2)),
+                    matchKind: key == normalized ? .exact : .prefix
                 )
             }
         }
+    }
+
+    /// Headwords containing the query somewhere other than the start.
+    ///
+    /// No index can serve this, so it is only reached when the prefix tier came
+    /// up short, and the LIMIT bounds how much of the scan SQLite performs.
+    private func substringMatches(_ normalized: String, limit: Int) throws -> [SearchResult] {
+        guard limit > 0 else { return [] }
+        let pattern = Self.escapedLikePattern(normalized)
+        return try pool.read { db in
+            try db.query(
+                """
+                SELECT e.nkey, MIN(e.key), COUNT(DISTINCT e.dict)
+                FROM entries e
+                JOIN dictionaries d ON d.id = e.dict AND d.enabled = 1
+                WHERE e.nkey LIKE ? ESCAPE '\\' AND e.nkey NOT LIKE ? ESCAPE '\\'
+                GROUP BY e.nkey
+                ORDER BY length(e.nkey), e.nkey
+                LIMIT ?
+                """,
+                [.text("%" + pattern + "%"), .text(pattern + "%"), .int(Int64(limit))]
+            ) { row in
+                SearchResult(
+                    normalizedKey: row.text(0),
+                    displayKey: row.text(1),
+                    dictionaryCount: Int(row.int(2)),
+                    matchKind: .substring
+                )
+            }
+        }
+    }
+
+    /// Near misses, ranked by edit distance.
+    ///
+    /// Candidates come from an indexed range of headwords sharing the query's
+    /// opening characters, narrowed further by length. Longer queries use a
+    /// two-character bucket: with a one-character bucket a dictionary whose
+    /// headwords share an opening letter degenerates into a full-table scan.
+    ///
+    /// The cost is that a typo inside the bucket prefix is not caught. That is
+    /// the trade for never scanning the whole table to produce a suggestion.
+    private func fuzzyMatches(_ normalized: String, limit: Int) throws -> [SearchResult] {
+        guard !normalized.isEmpty else { return [] }
+        let queryLength = normalized.count
+        let bucketLength = queryLength >= 6 ? 2 : 1
+        let bucket = String(normalized.prefix(bucketLength))
+        let tolerance = queryLength <= 4 ? 1 : 2
+        let candidates = try pool.read { db in
+            try db.query(
+                """
+                SELECT e.nkey, MIN(e.key), COUNT(DISTINCT e.dict)
+                FROM entries e
+                JOIN dictionaries d ON d.id = e.dict AND d.enabled = 1
+                WHERE e.nkey >= ? AND e.nkey < ?
+                  AND length(e.nkey) BETWEEN ? AND ?
+                GROUP BY e.nkey
+                LIMIT 4000
+                """,
+                [
+                    .text(bucket), .text(bucket + "\u{10FFFF}"),
+                    .int(Int64(max(1, queryLength - tolerance))),
+                    .int(Int64(queryLength + tolerance)),
+                ]
+            ) { row in
+                (key: row.text(0), display: row.text(1), count: Int(row.int(2)))
+            }
+        }
+
+        // Fold the query once. Building `[Character]` per candidate dominated
+        // this loop: grapheme breaking is far more expensive than the distance.
+        let queryScalars = Array(normalized.unicodeScalars)
+        let scored = candidates.compactMap { candidate -> (Int, SearchResult)? in
+            let candidateScalars = Array(candidate.key.unicodeScalars)
+            guard abs(candidateScalars.count - queryScalars.count) <= tolerance else { return nil }
+            let distance = Self.editDistance(queryScalars, candidateScalars, limit: tolerance)
+            guard distance <= tolerance else { return nil }
+            return (distance, SearchResult(
+                normalizedKey: candidate.key,
+                displayKey: candidate.display,
+                dictionaryCount: candidate.count,
+                matchKind: .fuzzy
+            ))
+        }
+        return scored
+            .sorted { ($0.0, $0.1.normalizedKey) < ($1.0, $1.1.normalizedKey) }
+            .prefix(limit)
+            .map(\.1)
+    }
+
+    private static func escapedLikePattern(_ value: String) -> String {
+        var escaped = value
+        for (symbol, replacement) in [("\\", "\\\\"), ("%", "\\%"), ("_", "\\_")] {
+            escaped = escaped.replacingOccurrences(of: symbol, with: replacement)
+        }
+        return escaped
+    }
+
+    /// Levenshtein distance, abandoned as soon as it exceeds `limit`.
+    public static func editDistance(_ a: String, _ b: String, limit: Int) -> Int {
+        editDistance(Array(a.unicodeScalars), Array(b.unicodeScalars), limit: limit)
+    }
+
+    /// Scalar-array form, so callers comparing one query against many
+    /// candidates fold each string exactly once.
+    static func editDistance(
+        _ lhs: [Unicode.Scalar], _ rhs: [Unicode.Scalar], limit: Int
+    ) -> Int {
+        if abs(lhs.count - rhs.count) > limit { return limit + 1 }
+        if lhs.isEmpty { return rhs.count }
+        if rhs.isEmpty { return lhs.count }
+
+        var previous = Array(0 ... rhs.count)
+        var current = [Int](repeating: 0, count: rhs.count + 1)
+        for i in 1 ... lhs.count {
+            current[0] = i
+            var rowBest = current[0]
+            for j in 1 ... rhs.count {
+                let substitution = previous[j - 1] + (lhs[i - 1] == rhs[j - 1] ? 0 : 1)
+                current[j] = min(substitution, previous[j] + 1, current[j - 1] + 1)
+                rowBest = min(rowBest, current[j])
+            }
+            // Every later row can only grow, so this row settles the question.
+            if rowBest > limit { return limit + 1 }
+            swap(&previous, &current)
+        }
+        return previous[rhs.count]
     }
 
     /// All entries for a headword, one or more per enabled dictionary,

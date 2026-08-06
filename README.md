@@ -10,14 +10,19 @@ Lexicon ships no dictionary content. You supply `.mdx` files (with their
 
 ## Features
 
-- Unified prefix search across every enabled dictionary (case- and
-  diacritic-insensitive)
+- Unified search across every enabled dictionary (case- and
+  diacritic-insensitive), in tiers: exact and prefix matches first, then
+  substring matches, then near misses when nothing matched literally
 - One collapsible card per dictionary for each looked-up word, rendered with
-  each dictionary's own CSS/images/fonts served straight out of its `.mdd`
+  each dictionary's own CSS/images/fonts served straight out of its `.mdd`.
+  Collapsed dictionaries stay collapsed, and a jump bar appears when several
+  dictionaries have the word
+- Text zoom (⌘+ / ⌘− / ⌘0) and look-up-on-double-click, both remembered
+  between launches (View menu)
 - Cross-reference links (`entry://`, `bword://`) and `@@@LINK=` redirects
 - Pronunciation audio (`sound://` links) played from `.mdd` resources
-- Dictionary manager: import, enable/disable, drag to reorder, remove
-- Lookup history and starred words
+- Dictionary manager: import, enable/disable, drag to reorder, rename, remove
+- Lookup history and starred words, both filterable in the sidebar
 - Supports MDX format v1/v2, zlib/LZO/uncompressed blocks, encrypted keyword
   index (Encrypted=2), UTF-8/UTF-16/GB18030/Big5 encodings, multi-part MDDs
 
@@ -39,10 +44,14 @@ open build/Lexicon.app
 
 ## Import dictionaries
 
-Click the books icon in the toolbar (or ⇧⌘I), choose a `.mdx` file. Any
-sibling files sharing its base name (`Dict.mdd`, `Dict.1.mdd`, `Dict.css`, …)
-are copied along with it and indexed. Everything lives in
-`~/Library/Application Support/Lexicon/`.
+Drag a `.mdx` onto the window, or click the books icon in the toolbar (or
+⇧⌘I) and choose one. Any sibling files sharing its base name (`Dict.mdd`,
+`Dict.1.mdd`, `Dict.css`, …) are copied along with it and indexed. Everything
+lives in `~/Library/Application Support/Lexicon/`.
+
+If the `.mdd` companions were not beside the `.mdx`, the import still
+succeeds but the dictionary has no images, audio or stylesheets. Lexicon says
+so when that happens, and the manager flags the dictionary.
 
 ## Theming (custom.css)
 

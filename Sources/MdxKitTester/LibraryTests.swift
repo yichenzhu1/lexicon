@@ -26,20 +26,136 @@ func runLibraryTests(_ t: TestHarness) {
         )
     }
 
+    t.run("library: import reports progress and counts resources") {
+        let progressRoot = tempRoot.appendingPathComponent("progress")
+        let progressLibrary = try DictionaryLibrary(rootURL: progressRoot)
+
+        var stages: [String] = []
+        var sawDeterminate = false
+        var lastCompleted = 0
+        var monotonic = true
+        let record = try progressLibrary.importDictionary(
+            from: fixturesURL.appendingPathComponent("basic.mdx")
+        ) { update in
+            if stages.last != update.stage { stages.append(update.stage) }
+            if let fraction = update.fraction {
+                sawDeterminate = true
+                if fraction < 0 || fraction > 1 { monotonic = false }
+                if update.completed < lastCompleted { monotonic = false }
+                lastCompleted = update.completed
+            }
+        }
+
+        t.expect(stages.contains("Copying files…"), "reports copying, got \(stages)")
+        t.expect(stages.contains("Indexing entries"), "reports indexing, got \(stages)")
+        t.expect(sawDeterminate, "entry indexing is countable from the header")
+        t.expect(monotonic, "progress never goes backwards or out of range")
+
+        // basic.mdd sits beside basic.mdx, so resources must be indexed.
+        t.expect(record.hasResources, "sibling mdd indexed, got \(record.resourceCount)")
+        t.expectEqual(
+            try progressLibrary.dictionaries().first?.resourceCount, record.resourceCount,
+            "resource count persisted"
+        )
+    }
+
+    t.run("library: a dictionary with no mdd reports having no resources") {
+        // astral.mdx ships without a companion .mdd — the silent-failure case
+        // the import warning exists to catch.
+        let soloRoot = tempRoot.appendingPathComponent("noresources")
+        let soloLibrary = try DictionaryLibrary(rootURL: soloRoot)
+        let record = try soloLibrary.importDictionary(
+            from: fixturesURL.appendingPathComponent("astral.mdx")
+        )
+        t.expect(!record.hasResources, "no resources detected")
+        t.expectEqual(record.resourceCount, 0, "resource count is zero")
+    }
+
+    t.run("library: renaming changes only the library label") {
+        let renameRoot = tempRoot.appendingPathComponent("rename")
+        let renameLibrary = try DictionaryLibrary(rootURL: renameRoot)
+        let record = try renameLibrary.importDictionary(
+            from: fixturesURL.appendingPathComponent("basic.mdx")
+        )
+        try renameLibrary.setTitle("  My Dictionary  ", for: record)
+        t.expectEqual(
+            try renameLibrary.dictionaries().first?.title, "My Dictionary",
+            "renamed and trimmed"
+        )
+
+        // A blank name would leave the row unlabelled, so it is ignored.
+        try renameLibrary.setTitle("   ", for: record)
+        t.expectEqual(
+            try renameLibrary.dictionaries().first?.title, "My Dictionary",
+            "blank rename rejected"
+        )
+
+        // The underlying files keep their own names.
+        t.expectEqual(
+            try renameLibrary.dictionaries().first?.mdxFileName, "basic.mdx",
+            "files untouched"
+        )
+    }
+
     t.run("library: prefix search") {
-        let results = try library.search(prefix: "app")
+        let results = try library.search(matching: "app")
         t.expect(results.contains { $0.displayKey == "apple" }, "apple found by prefix")
 
         // Diacritic-insensitive: plain "nai" finds "naïve".
-        let naive = try library.search(prefix: "nai")
+        let naive = try library.search(matching: "nai")
         t.expect(naive.contains { $0.displayKey == "naïve" }, "diacritic-insensitive search")
 
         // Case-insensitive: "case sen" finds "Case Sensitive".
-        let mixed = try library.search(prefix: "CASE SEN")
+        let mixed = try library.search(matching: "CASE SEN")
         t.expect(mixed.contains { $0.displayKey == "Case Sensitive" }, "case-insensitive search")
 
-        t.expectEqual(try library.search(prefix: "zzzz").count, 0, "no bogus matches")
-        t.expectEqual(try library.search(prefix: "  ").count, 0, "blank query")
+        t.expectEqual(try library.search(matching: "zzzz").count, 0, "no bogus matches")
+        t.expectEqual(try library.search(matching: "  ").count, 0, "blank query")
+    }
+
+    t.run("library: search tiers rank exact over prefix over substring") {
+        let results = try library.search(matching: "apple")
+        t.expectEqual(results.first?.displayKey, "apple", "exact match leads")
+        t.expectEqual(results.first?.matchKind, .exact, "exact match is labelled")
+
+        // "ana" appears inside "banana" but starts nothing, so it can only be
+        // found by the substring tier.
+        let inside = try library.search(matching: "anan")
+        t.expect(
+            inside.contains { $0.displayKey == "banana" && $0.matchKind == .substring },
+            "substring match found, got \(inside.map(\.displayKey))"
+        )
+
+        // Prefix matches must still outrank substring ones.
+        let mixed = try library.search(matching: "an")
+        if let firstSubstring = mixed.firstIndex(where: { $0.matchKind == .substring }),
+           let lastPrefix = mixed.lastIndex(where: { $0.matchKind <= .prefix }) {
+            t.expect(lastPrefix < firstSubstring, "prefix matches sort above substring")
+        }
+    }
+
+    t.run("library: near misses are suggested when nothing matches") {
+        // A typo: one substitution away from "banana".
+        let suggestions = try library.search(matching: "banona")
+        t.expect(
+            suggestions.contains { $0.displayKey == "banana" },
+            "typo suggests the real word, got \(suggestions.map(\.displayKey))"
+        )
+        t.expect(
+            suggestions.allSatisfy { $0.matchKind == .fuzzy },
+            "suggestions are labelled as such"
+        )
+
+        // Gibberish should still come back empty rather than suggesting noise.
+        t.expectEqual(try library.search(matching: "zzzzqqqq").count, 0, "no wild guesses")
+    }
+
+    t.run("library: edit distance abandons past the limit") {
+        t.expectEqual(DictionaryLibrary.editDistance("kitten", "sitting", limit: 5), 3)
+        t.expectEqual(DictionaryLibrary.editDistance("abc", "abc", limit: 2), 0)
+        t.expectEqual(DictionaryLibrary.editDistance("", "abc", limit: 5), 3)
+        // Beyond the limit the exact value does not matter, only that it is over.
+        t.expect(DictionaryLibrary.editDistance("abcdef", "uvwxyz", limit: 2) > 2, "bails out")
     }
 
     t.run("library: prefix search spans the whole Unicode range") {
@@ -52,15 +168,20 @@ func runLibraryTests(_ t: TestHarness) {
             from: fixturesURL.appendingPathComponent("astral.mdx")
         )
 
-        let matches = try astralLibrary.search(prefix: "test")
+        let matches = try astralLibrary.search(matching: "test")
         let keys = Set(matches.map(\.displayKey))
         t.expectEqual(matches.count, 4, "every headword sharing the prefix, got \(keys)")
         t.expect(keys.contains("test\u{1F600}"), "astral emoji headword found")
         t.expect(keys.contains("test\u{20000}"), "CJK Extension B headword found")
         t.expect(keys.contains("testing"), "plain ASCII continuation still found")
 
-        // The bound must still exclude non-matches.
-        t.expectEqual(try astralLibrary.search(prefix: "tesu").count, 0, "prefix stays tight")
+        // The range bound must still exclude non-matches: anything "tesu"
+        // returns can only be a suggestion, never a literal match.
+        let nonMatches = try astralLibrary.search(matching: "tesu")
+        t.expect(
+            nonMatches.allSatisfy { $0.matchKind == .fuzzy },
+            "prefix stays tight, got \(nonMatches.map { "\($0.displayKey):\($0.matchKind)" })"
+        )
     }
 
     t.run("library: entry text and @@@LINK redirect") {
@@ -128,7 +249,7 @@ func runLibraryTests(_ t: TestHarness) {
         let second = try library.importDictionary(
             from: fixturesURL.appendingPathComponent("utf16.mdx")
         )
-        let results = try library.search(prefix: "apple")
+        let results = try library.search(matching: "apple")
         t.expectEqual(results.first?.dictionaryCount, 2, "apple in both dictionaries")
 
         let hits = try library.entries(forNormalizedKey: "apple")

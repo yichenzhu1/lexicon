@@ -65,6 +65,56 @@ func runPageBuilderTests(_ t: TestHarness) {
         t.expect(html.contains("overflow: visible !important"), "inner document does not scroll")
     }
 
+    t.run("page builder: collapsed dictionaries stay folded") {
+        let expanded = EntryPageBuilder.resultsDocument(for: "apple", library: library)
+        t.expect(
+            expanded.contains("<details open id=\"dict-\(basic.uuid)\""),
+            "cards open by default"
+        )
+
+        let collapsed = EntryPageBuilder.resultsDocument(
+            for: "apple", library: library, collapsedDictionaries: [basic.uuid]
+        )
+        t.expect(
+            collapsed.contains("<details id=\"dict-\(basic.uuid)\""),
+            "collapsed dictionary renders folded"
+        )
+        t.expect(
+            collapsed.contains("<details open id=\"dict-"),
+            "other dictionaries stay open"
+        )
+        t.expect(collapsed.contains("kind: 'collapse'"), "toggles are reported back")
+    }
+
+    t.run("page builder: jump bar appears only with several dictionaries") {
+        let html = EntryPageBuilder.resultsDocument(for: "apple", library: library)
+        t.expect(html.contains("<nav class=\"lexicon-jump\""), "jump bar present for two dictionaries")
+        let chips = html.components(separatedBy: "data-jump=").count - 1
+        t.expectEqual(chips, 2, "one chip per dictionary")
+
+        // A single dictionary would make the bar pure chrome.
+        let soloRoot = tempRoot.appendingPathComponent("solo")
+        let solo = try DictionaryLibrary(rootURL: soloRoot)
+        try solo.importDictionary(from: fixturesURL.appendingPathComponent("basic.mdx"))
+        let soloHTML = EntryPageBuilder.resultsDocument(for: "apple", library: solo)
+        t.expect(!soloHTML.contains("<nav class=\"lexicon-jump\""), "no jump bar for one dictionary")
+        t.expect(!soloHTML.contains("data-jump="), "no jump chips for one dictionary")
+    }
+
+    t.run("page builder: double-click lookup bridge is installed and guarded") {
+        let html = EntryPageBuilder.entryDocument(
+            for: "apple", dictionaryUUID: basic.uuid, library: library
+        )
+        t.expect(html.contains("'dblclick'"), "double-click handler installed")
+        t.expect(html.contains("kind: 'lookup'"), "lookup messages are tagged")
+        // Guards that keep double-click-to-select-and-copy working.
+        t.expect(html.contains(#"/\s/.test(word)"#), "multi-word selections ignored")
+        t.expect(
+            html.contains("a[href], input, textarea, select, [contenteditable]"),
+            "links and form fields ignored"
+        )
+    }
+
     t.run("page builder: hostile dictionary uuid cannot inject script") {
         // `URL.path` percent-decodes, so a dictionary's own markup can point an
         // iframe at dict://d/<anything>/entry and choose this string. It is

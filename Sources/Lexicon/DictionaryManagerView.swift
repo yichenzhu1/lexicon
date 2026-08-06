@@ -7,6 +7,8 @@ struct DictionaryManagerView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showImporter = false
     @State private var dictionaryPendingRemoval: DictionaryRecord?
+    @State private var dictionaryPendingRename: DictionaryRecord?
+    @State private var draftTitle = ""
 
     private var mdxType: UTType {
         UTType(filenameExtension: "mdx") ?? .data
@@ -36,9 +38,9 @@ struct DictionaryManagerView: View {
                     "No dictionaries",
                     systemImage: "books.vertical",
                     description: Text(
-                        "Import a .mdx file. Companion files (.mdd resources, .css) "
-                        + "in the same folder are copied automatically. "
-                        + "Drag to set the display order."
+                        "Import a .mdx file, or drag one onto the window. Companion "
+                        + "files (.mdd resources, .css) in the same folder are copied "
+                        + "automatically. Drag to set the display order."
                     )
                 )
                 .frame(maxHeight: .infinity)
@@ -50,6 +52,9 @@ struct DictionaryManagerView: View {
                             isRemoving: libraryModel.removingDictionaryIDs.contains(dictionary.id)
                         ) {
                             dictionaryPendingRemoval = dictionary
+                        } requestRename: {
+                            draftTitle = dictionary.title
+                            dictionaryPendingRename = dictionary
                         }
                     }
                     .onMove { offsets, target in
@@ -61,19 +66,11 @@ struct DictionaryManagerView: View {
 
             if libraryModel.isImporting {
                 Divider()
-                HStack(spacing: 10) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text(libraryModel.importStatus)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Spacer()
-                }
-                .padding()
+                importProgress
+                    .padding()
             }
         }
-        .frame(width: 520, height: 420)
+        .frame(minWidth: 460, idealWidth: 560, minHeight: 360, idealHeight: 460)
         .alert(
             "Move Dictionary to Trash?",
             isPresented: Binding(
@@ -93,6 +90,23 @@ struct DictionaryManagerView: View {
                 + "moved to the macOS Trash. You can recover them from Trash until it is emptied."
             )
         }
+        .alert(
+            "Rename Dictionary",
+            isPresented: Binding(
+                get: { dictionaryPendingRename != nil },
+                set: { if !$0 { dictionaryPendingRename = nil } }
+            ),
+            presenting: dictionaryPendingRename
+        ) { dictionary in
+            TextField("Name", text: $draftTitle)
+            Button("Cancel", role: .cancel) { dictionaryPendingRename = nil }
+            Button("Rename") {
+                libraryModel.rename(dictionary, to: draftTitle)
+                dictionaryPendingRename = nil
+            }
+        } message: { _ in
+            Text("Only the name shown in Lexicon changes; the dictionary files are untouched.")
+        }
         .fileImporter(
             isPresented: $showImporter,
             allowedContentTypes: [mdxType],
@@ -103,6 +117,32 @@ struct DictionaryManagerView: View {
             }
         }
     }
+
+    private var importProgress: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Text(libraryModel.importStatus)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer()
+                if let fraction = libraryModel.importFraction {
+                    Text("\(Int(fraction * 100))%")
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+            }
+            // Determinate once the entry count is known; the header supplies it.
+            if let fraction = libraryModel.importFraction {
+                ProgressView(value: fraction)
+                    .progressViewStyle(.linear)
+            } else {
+                ProgressView()
+                    .progressViewStyle(.linear)
+            }
+        }
+    }
 }
 
 private struct DictionaryRow: View {
@@ -110,6 +150,7 @@ private struct DictionaryRow: View {
     let dictionary: DictionaryRecord
     let isRemoving: Bool
     let requestRemoval: () -> Void
+    let requestRename: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -121,14 +162,32 @@ private struct DictionaryRow: View {
             .controlSize(.mini)
             .labelsHidden()
             .disabled(isRemoving)
+            .accessibilityLabel("Enable \(dictionary.title)")
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(dictionary.title)
                     .fontWeight(.medium)
                     .foregroundStyle(dictionary.enabled ? .primary : .secondary)
-                Text("\(dictionary.entryCount.formatted()) entries")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Text("\(dictionary.entryCount.formatted()) entries")
+                    Text("·")
+                    if dictionary.hasResources {
+                        Text("\(dictionary.resourceCount.formatted()) resources")
+                    } else {
+                        // The usual cause is the .mdd not being beside the .mdx.
+                        Label("No resources", systemImage: "exclamationmark.triangle")
+                            .help(
+                                "No .mdd companion was found at import, so images, "
+                                + "audio and stylesheets are unavailable."
+                            )
+                    }
+                    Text("·")
+                    Text(dictionary.mdxFileName)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
 
             Spacer()
@@ -138,13 +197,25 @@ private struct DictionaryRow: View {
                     .controlSize(.small)
                     .help("Moving dictionary to Trash")
             } else {
+                Button(action: requestRename) {
+                    Image(systemName: "pencil")
+                }
+                .buttonStyle(.borderless)
+                .help("Rename this dictionary")
+                .accessibilityLabel("Rename \(dictionary.title)")
+
                 Button(action: requestRemoval) {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.borderless)
                 .help("Move this dictionary to Trash")
+                .accessibilityLabel("Move \(dictionary.title) to Trash")
             }
         }
         .padding(.vertical, 3)
+        .contextMenu {
+            Button("Rename…", action: requestRename)
+            Button("Move to Trash", role: .destructive, action: requestRemoval)
+        }
     }
 }
