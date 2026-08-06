@@ -4,6 +4,7 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var libraryModel: LibraryModel
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
     @FocusState private var searchFocused: Bool
@@ -39,18 +40,18 @@ struct ContentView: View {
         }
         .sheet(isPresented: $appState.showDictionaryManager) {
             DictionaryManagerView()
-                .environmentObject(appState)
+                .environmentObject(libraryModel)
         }
         .alert(
             "Lexicon",
             isPresented: Binding(
-                get: { appState.errorMessage != nil },
-                set: { if !$0 { appState.errorMessage = nil } }
+                get: { libraryModel.errorMessage != nil },
+                set: { if !$0 { libraryModel.errorMessage = nil } }
             )
         ) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(appState.errorMessage ?? "")
+            Text(libraryModel.errorMessage ?? "")
         }
         .background {
             Group {
@@ -116,7 +117,7 @@ struct ContentView: View {
                 ForEach(appState.tabs) { tab in
                     EntryWebView(
                         word: tab.word,
-                        contentVersion: appState.contentVersion
+                        contentVersion: libraryModel.contentVersion
                     )
                     .opacity(tab.id == appState.activeTabID ? 1 : 0)
                     .allowsHitTesting(tab.id == appState.activeTabID)
@@ -172,7 +173,7 @@ struct ContentView: View {
 
             Button {
                 if let word = appState.selectedWord {
-                    appState.toggleStar(word)
+                    libraryModel.toggleStar(word)
                 }
             } label: {
                 Image(systemName: bookmarkIconName)
@@ -260,7 +261,7 @@ struct ContentView: View {
 
     private var bookmarkIconName: String {
         guard let word = appState.selectedWord else { return "bookmark" }
-        return appState.isStarred(word) ? "bookmark.fill" : "bookmark"
+        return libraryModel.isStarred(word) ? "bookmark.fill" : "bookmark"
     }
 
     @ViewBuilder
@@ -285,13 +286,13 @@ struct ContentView: View {
             List(selection: $appState.selectedWord) {
                 if query.isEmpty {
                     if historyExpanded {
-                        if !appState.history.isEmpty {
-                            ForEach(appState.history, id: \.self) { word in
-                                Text(appState.displayWord(for: word) ?? word).tag(word)
+                        if !libraryModel.history.isEmpty {
+                            ForEach(libraryModel.history, id: \.self) { word in
+                                Text(libraryModel.displayWord(for: word) ?? word).tag(word)
                             }
                         }
-                        if appState.history.isEmpty {
-                            Text(appState.dictionaries.isEmpty
+                        if libraryModel.history.isEmpty {
+                            Text(libraryModel.dictionaries.isEmpty
                                 ? "Import dictionaries to get started"
                                 : "Type to search")
                                 .foregroundStyle(.secondary)
@@ -332,12 +333,12 @@ struct ContentView: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
             Spacer(minLength: 8)
-            Button("Clear") { appState.clearHistory() }
+            Button("Clear") { libraryModel.clearHistory() }
                 .buttonStyle(.plain)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize()
-                .disabled(appState.history.isEmpty)
+                .disabled(libraryModel.history.isEmpty)
             Button {
                 withAnimation(.easeInOut(duration: 0.16)) {
                     historyExpanded.toggle()
@@ -494,6 +495,7 @@ private enum SidebarMode: Hashable {
 
 private struct BrowserTabBar: View {
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var libraryModel: LibraryModel
 
     private let preferredTabWidth: CGFloat = 190
     private let plusWidth: CGFloat = 28
@@ -546,7 +548,7 @@ private struct BrowserTabBar: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    Text(appState.displayWord(for: tab.word) ?? tab.word ?? "New Tab")
+                    Text(libraryModel.displayWord(for: tab.word) ?? tab.word ?? "New Tab")
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -588,15 +590,16 @@ private struct BrowserTabBar: View {
 
 private struct StarredWordsView: View {
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var libraryModel: LibraryModel
     @State private var searchText = ""
 
     let onOpen: (String) -> Void
 
     private var matchingWords: [String] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return appState.starred }
-        return appState.starred.filter { word in
-            let displayWord = appState.displayWord(for: word) ?? word
+        guard !query.isEmpty else { return libraryModel.starred }
+        return libraryModel.starred.filter { word in
+            let displayWord = libraryModel.displayWord(for: word) ?? word
             return displayWord.localizedStandardContains(query)
         }
     }
@@ -615,7 +618,7 @@ private struct StarredWordsView: View {
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
             .padding(16)
 
-            if appState.starred.isEmpty {
+            if libraryModel.starred.isEmpty {
                 HStack(spacing: 9) {
                     Image(systemName: "star")
                         .foregroundStyle(.secondary)
@@ -659,7 +662,7 @@ private struct StarredWordsView: View {
             Button {
                 onOpen(word)
             } label: {
-                Text(appState.displayWord(for: word) ?? word)
+                Text(libraryModel.displayWord(for: word) ?? word)
                     .font(.headline)
                     .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -668,7 +671,7 @@ private struct StarredWordsView: View {
             .buttonStyle(.plain)
 
             Button {
-                appState.toggleStar(word)
+                libraryModel.toggleStar(word)
             } label: {
                 Image(systemName: "star.fill")
                     .foregroundStyle(.yellow)

@@ -5,6 +5,10 @@ import Foundation
 /// record blocks) shares the same framing:
 ///   4 bytes compression type | 4 bytes adler32 of the plain data | payload
 enum BlockCompression {
+    /// Ceiling on a single decompressed block, so a corrupt size field cannot
+    /// request an unbounded allocation. Real blocks are far below this.
+    static let maxDecompressedBlockSize = 1 << 30 // 1 GiB
+
     /// Decompresses one framed block.
     /// - Parameters:
     ///   - block: the full framed block (including the 8-byte header).
@@ -16,6 +20,11 @@ enum BlockCompression {
         encryptedIndex: Bool = false
     ) throws -> Data {
         guard block.count >= 8 else { throw MdxError.truncatedFile("compressed block") }
+        // `decompressedSize` originates in the file's section tables; callers
+        // bound it, and this backstops the buffer allocations below.
+        guard decompressedSize >= 0, decompressedSize <= maxDecompressedBlockSize else {
+            throw MdxError.corruptData("implausible decompressed block size \(decompressedSize)")
+        }
         let base = block.startIndex
         let compType = block.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) } // stored little-endian on disk
         let checksumBytes = block.subdata(in: base + 4 ..< base + 8)

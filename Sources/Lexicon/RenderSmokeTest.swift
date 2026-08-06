@@ -38,8 +38,8 @@ enum RenderSmokeTest {
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
 
-        let state = AppState()
-        guard let library = state.library else {
+        let libraryModel = LibraryModel()
+        guard let library = libraryModel.library else {
             print("SMOKE FAIL: library unavailable")
             exit(1)
         }
@@ -50,7 +50,7 @@ enum RenderSmokeTest {
 
         let configuration = WKWebViewConfiguration()
         configuration.setURLSchemeHandler(
-            DictSchemeHandler(appState: state), forURLScheme: DictSchemeHandler.scheme
+            DictSchemeHandler(libraryModel: libraryModel), forURLScheme: DictSchemeHandler.scheme
         )
         // Collect JS errors in every frame for reporting.
         let errorCollector = WKUserScript(

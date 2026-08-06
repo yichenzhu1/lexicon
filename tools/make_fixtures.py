@@ -94,6 +94,21 @@ def main():
         block_size=256, compression_type=0,
     ))
 
+    # Headwords whose distinguishing character lives outside the Basic
+    # Multilingual Plane. Prefix search bounds the key range byte-wise, so
+    # these catch an upper bound that sorts below astral UTF-8 sequences.
+    write("astral.mdx", MDictWriter(
+        {
+            "test": "<div>plain ASCII headword</div>",
+            "test\U0001F600": "<div>headword with an astral emoji</div>",
+            "test\U00020000": "<div>headword with CJK Extension B</div>",
+            "testing": "<div>longer ASCII headword</div>",
+        },
+        title="Astral Plane Dictionary",
+        description="Headwords above U+FFFF",
+        block_size=256,
+    ))
+
     resources = {
         "\\style.css": CSS,
         "\\apple.png": TINY_PNG,

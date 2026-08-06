@@ -6,12 +6,13 @@ import WebKit
 /// selected word, and routes entry://, sound:// and external links.
 struct EntryWebView: NSViewRepresentable {
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var libraryModel: LibraryModel
 
     let word: String?
     let contentVersion: Int
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(appState: appState)
+        Coordinator(appState: appState, libraryModel: libraryModel)
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -20,7 +21,7 @@ struct EntryWebView: NSViewRepresentable {
             context.coordinator, name: Coordinator.linkMessageName
         )
         configuration.setURLSchemeHandler(
-            DictSchemeHandler(appState: appState), forURLScheme: DictSchemeHandler.scheme
+            DictSchemeHandler(libraryModel: libraryModel), forURLScheme: DictSchemeHandler.scheme
         )
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
@@ -31,6 +32,7 @@ struct EntryWebView: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.appState = appState
+        context.coordinator.libraryModel = libraryModel
         context.coordinator.load(word: word, version: contentVersion, into: webView, force: false)
     }
 
@@ -38,10 +40,12 @@ struct EntryWebView: NSViewRepresentable {
         static let linkMessageName = "lexiconLink"
 
         var appState: AppState
+        var libraryModel: LibraryModel
         private var loadedToken: String?
 
-        init(appState: AppState) {
+        init(appState: AppState, libraryModel: LibraryModel) {
             self.appState = appState
+            self.libraryModel = libraryModel
         }
 
         func load(word: String?, version: Int, into webView: WKWebView, force: Bool) {
@@ -50,11 +54,11 @@ struct EntryWebView: NSViewRepresentable {
             loadedToken = token
 
             let html: String
-            if let word, let library = appState.library {
+            if let word, let library = libraryModel.library {
                 html = EntryPageBuilder.resultsDocument(for: word, library: library)
             } else {
                 html = EntryPageBuilder.welcomeDocument(
-                    hasDictionaries: !appState.dictionaries.isEmpty
+                    hasDictionaries: !libraryModel.dictionaries.isEmpty
                 )
             }
             // Host "d" keeps the outer page same-origin with entry iframes.
@@ -64,7 +68,7 @@ struct EntryWebView: NSViewRepresentable {
         func webView(
             _ webView: WKWebView,
             decidePolicyFor navigationAction: WKNavigationAction,
-            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+            decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void
         ) {
             guard let url = navigationAction.request.url else {
                 decisionHandler(.allow)
@@ -129,7 +133,7 @@ struct EntryWebView: NSViewRepresentable {
                 // with a literal '#' (e.g. "_apple#_gbs_2.mp3").
                 let path = referencedName(in: trimmed, keepFragment: true)
                 if !path.isEmpty {
-                    appState.playAudio(path: path, dictionaryUUID: dictionaryUUID)
+                    libraryModel.playAudio(path: path, dictionaryUUID: dictionaryUUID)
                 }
 
             case "http", "https", "mailto":

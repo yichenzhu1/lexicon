@@ -42,6 +42,27 @@ func runLibraryTests(_ t: TestHarness) {
         t.expectEqual(try library.search(prefix: "  ").count, 0, "blank query")
     }
 
+    t.run("library: prefix search spans the whole Unicode range") {
+        // The key range's upper bound is compared byte-wise by SQLite. A bound
+        // of U+FFFF sorts below astral UTF-8 sequences and silently hides
+        // emoji and CJK Extension B headwords.
+        let astralRoot = tempRoot.appendingPathComponent("astral")
+        let astralLibrary = try DictionaryLibrary(rootURL: astralRoot)
+        try astralLibrary.importDictionary(
+            from: fixturesURL.appendingPathComponent("astral.mdx")
+        )
+
+        let matches = try astralLibrary.search(prefix: "test")
+        let keys = Set(matches.map(\.displayKey))
+        t.expectEqual(matches.count, 4, "every headword sharing the prefix, got \(keys)")
+        t.expect(keys.contains("test\u{1F600}"), "astral emoji headword found")
+        t.expect(keys.contains("test\u{20000}"), "CJK Extension B headword found")
+        t.expect(keys.contains("testing"), "plain ASCII continuation still found")
+
+        // The bound must still exclude non-matches.
+        t.expectEqual(try astralLibrary.search(prefix: "tesu").count, 0, "prefix stays tight")
+    }
+
     t.run("library: entry text and @@@LINK redirect") {
         let hits = try library.entries(forNormalizedKey: "colour")
         t.expectEqual(hits.count, 1)

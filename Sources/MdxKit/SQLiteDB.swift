@@ -21,14 +21,23 @@ public final class SQLiteDB {
 
     private var handle: OpaquePointer?
 
-    public init(path: String) throws {
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+    /// - Parameter readOnly: opens a reader connection. WAL lets readers run
+    ///   while a writer holds a transaction, but only across separate
+    ///   connections, so `SQLitePool` opens several of these.
+    public init(path: String, readOnly: Bool = false) throws {
+        let flags = readOnly
+            ? SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+            : SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         guard sqlite3_open_v2(path, &handle, flags, nil) == SQLITE_OK else {
             let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
             throw SQLiteError.open(message)
         }
-        try exec("PRAGMA journal_mode = WAL")
-        try exec("PRAGMA synchronous = NORMAL")
+        try exec("PRAGMA busy_timeout = 5000")
+        if !readOnly {
+            // Journal mode persists in the database file; readers inherit it.
+            try exec("PRAGMA journal_mode = WAL")
+            try exec("PRAGMA synchronous = NORMAL")
+        }
     }
 
     deinit {

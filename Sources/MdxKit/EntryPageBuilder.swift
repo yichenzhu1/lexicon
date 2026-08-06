@@ -27,10 +27,13 @@ public enum EntryPageBuilder {
         ) ?? normalizedKey
 
         let cards = orderedDictionaries.map { dict in
-            """
+            let encodedUUID = dict.uuid.addingPercentEncoding(
+                withAllowedCharacters: Self.urlPathUnreserved
+            ) ?? dict.uuid
+            return """
             <details open>
               <summary>\(escape(dict.title))</summary>
-              <iframe src="dict://d/\(dict.uuid)/entry?word=\(encodedWord)"
+              <iframe src="dict://d/\(encodedUUID)/entry?word=\(encodedWord)"
                       scrolling="no"></iframe>
             </details>
             """
@@ -257,8 +260,8 @@ public enum EntryPageBuilder {
               settle();
             }
             f.addEventListener('load', attach);
-            // The frame may already be loaded before this script runs
-            // (the dict:// handler responds synchronously).
+            // A cached frame can finish loading before this script runs, so
+            // the load event alone is not enough.
             try {
               if (f.contentDocument && f.contentDocument.readyState !== 'loading') attach();
             } catch (e) {}
@@ -344,7 +347,7 @@ public enum EntryPageBuilder {
               try {
                 window.webkit.messageHandlers.lexiconLink.postMessage({
                   href: href,
-                  dictionaryUUID: '\(dictionaryUUID)'
+                  dictionaryUUID: \(jsStringLiteral(dictionaryUUID))
                 });
               } catch (_) {}
             }, true);
@@ -409,10 +412,44 @@ public enum EntryPageBuilder {
         )
     }
 
+    /// RFC 3986 unreserved characters. A generated UUID passes through
+    /// untouched, while a path separator or quote is escaped.
+    private static let urlPathUnreserved = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    )
+
     private static func escape(_ s: String) -> String {
         s.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
+    }
+
+    /// Renders a quoted JavaScript string literal. `dict://` path components
+    /// are percent-decoded by `URL.path`, so a dictionary's own markup can
+    /// request a UUID containing quotes; interpolating one raw would let it
+    /// close the literal and inject script into the entry frame.
+    private static func jsStringLiteral(_ value: String) -> String {
+        var out = "\""
+        for character in value.unicodeScalars {
+            switch character {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\u{2028}": out += "\\u2028" // JS line terminators
+            case "\u{2029}": out += "\\u2029"
+            case "<": out += "\\u003C" // never close the enclosing <script>
+            case "&": out += "\\u0026"
+            default:
+                if character.value < 0x20 {
+                    out += String(format: "\\u%04X", character.value)
+                } else {
+                    out.unicodeScalars.append(character)
+                }
+            }
+        }
+        return out + "\""
     }
 }

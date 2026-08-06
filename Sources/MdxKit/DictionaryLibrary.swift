@@ -30,11 +30,19 @@ public struct EntryHit: Sendable {
 }
 
 /// Owns the on-disk library: imported dictionary folders plus the SQLite
-/// keyword index. Not thread-safe by itself; the app confines it to one queue.
-public final class DictionaryLibrary {
+/// keyword index.
+///
+/// Safe to use from several threads at once. Reads run on pooled SQLite
+/// connections so an import cannot block them; `stateLock` guards the open-file
+/// handles and the cached dictionary table.
+public final class DictionaryLibrary: @unchecked Sendable {
     public let rootURL: URL
-    private let db: SQLiteDB
+    private let pool: SQLitePool
+
+    private let stateLock = NSLock()
     private var handles: [String: OpenDictionary] = [:]
+    private var cachedRecords: [DictionaryRecord]?
+    private var cachedRecordsByUUID: [String: DictionaryRecord] = [:]
 
     private struct OpenDictionary {
         let mdx: MdictFile
@@ -53,8 +61,9 @@ public final class DictionaryLibrary {
             at: rootURL.appendingPathComponent("Dictionaries", isDirectory: true),
             withIntermediateDirectories: true
         )
-        db = try SQLiteDB(path: rootURL.appendingPathComponent("index.sqlite").path)
-        try db.exec("""
+        pool = try SQLitePool(path: rootURL.appendingPathComponent("index.sqlite").path)
+        try pool.write { db in
+            try db.exec("""
             CREATE TABLE IF NOT EXISTS dictionaries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 uuid TEXT UNIQUE NOT NULL,
@@ -83,6 +92,7 @@ public final class DictionaryLibrary {
             );
             CREATE INDEX IF NOT EXISTS idx_resources ON resources(dict, path);
             """)
+        }
     }
 
     // MARK: - Normalization
@@ -95,24 +105,59 @@ public final class DictionaryLibrary {
 
     // MARK: - Records
 
+    /// The registered dictionaries, in the user's order.
+    ///
+    /// Cached: every resource request resolves a UUID against this table, so
+    /// an entry page with a dozen images used to run a dozen full scans.
+    /// Invalidated by each mutation below.
     public func dictionaries() throws -> [DictionaryRecord] {
-        try db.query(
-            """
-            SELECT id, uuid, title, folder, mdxFile, enabled, sortOrder, entryCount
-            FROM dictionaries ORDER BY sortOrder, id
-            """
-        ) { row in
-            DictionaryRecord(
-                id: row.int(0),
-                uuid: row.text(1),
-                title: row.text(2),
-                folderName: row.text(3),
-                mdxFileName: row.text(4),
-                enabled: row.int(5) != 0,
-                sortOrder: Int(row.int(6)),
-                entryCount: Int(row.int(7))
-            )
+        stateLock.lock()
+        if let cached = cachedRecords {
+            stateLock.unlock()
+            return cached
         }
+        stateLock.unlock()
+
+        let rows = try pool.read { db in
+            try db.query(
+                """
+                SELECT id, uuid, title, folder, mdxFile, enabled, sortOrder, entryCount
+                FROM dictionaries ORDER BY sortOrder, id
+                """
+            ) { row in
+                DictionaryRecord(
+                    id: row.int(0),
+                    uuid: row.text(1),
+                    title: row.text(2),
+                    folderName: row.text(3),
+                    mdxFileName: row.text(4),
+                    enabled: row.int(5) != 0,
+                    sortOrder: Int(row.int(6)),
+                    entryCount: Int(row.int(7))
+                )
+            }
+        }
+
+        stateLock.lock()
+        cachedRecords = rows
+        cachedRecordsByUUID = Dictionary(rows.map { ($0.uuid, $0) }, uniquingKeysWith: { first, _ in first })
+        stateLock.unlock()
+        return rows
+    }
+
+    /// One dictionary by UUID, served from the same cache.
+    private func record(uuid: String) throws -> DictionaryRecord? {
+        _ = try dictionaries()
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return cachedRecordsByUUID[uuid]
+    }
+
+    private func invalidateRecordCache() {
+        stateLock.lock()
+        cachedRecords = nil
+        cachedRecordsByUUID = [:]
+        stateLock.unlock()
     }
 
     public func folderURL(for record: DictionaryRecord) -> URL {
@@ -148,70 +193,89 @@ public final class DictionaryLibrary {
             let mdx = try MdictFile(url: folder.appendingPathComponent(mdxFileName))
 
             progress?("Reading keywords…")
-            let entries = try mdx.indexedEntries()
 
             var nextOrder = 0
-            if let maxOrder = try db.query("SELECT MAX(sortOrder) FROM dictionaries", row: { $0.int(0) }).first {
-                nextOrder = Int(maxOrder) + 1
+            let maxOrder = try pool.read { db in
+                try db.query("SELECT MAX(sortOrder) FROM dictionaries", row: { $0.int(0) }).first
             }
+            if let maxOrder { nextOrder = Int(maxOrder) + 1 }
 
-            progress?("Indexing \(entries.count) entries…")
-            let dictID: Int64 = try db.transaction {
-                try db.run(
-                    "INSERT INTO dictionaries (uuid, title, folder, mdxFile, enabled, sortOrder, entryCount) VALUES (?,?,?,?,1,?,?)",
-                    [.text(uuid), .text(mdx.info.title), .text(uuid), .text(mdxFileName),
-                     .int(Int64(nextOrder)), .int(Int64(entries.count))]
-                )
-                let dictID = db.lastInsertRowID
-                let insert = try db.prepare(
-                    "INSERT INTO entries (dict, key, nkey, offset, length) VALUES (?,?,?,?,?)"
-                )
-                for entry in entries {
-                    try insert.bind([
-                        .int(dictID),
-                        .text(entry.key),
-                        .text(Self.normalizeKey(entry.key)),
-                        .int(Int64(bitPattern: entry.recordOffset)),
-                        .int(Int64(entry.recordLength)),
-                    ])
-                    try insert.step()
-                    insert.reset()
+            // Entries stream straight into SQLite; materializing them first
+            // would hold every headword of a large dictionary in memory. The
+            // running count is therefore only known as we go, so the row is
+            // inserted with a zero count and corrected at the end.
+            progress?("Indexing entries…")
+            var entryCount = 0
+            let dictID: Int64 = try pool.write { db in
+                try db.transaction {
+                    try db.run(
+                        "INSERT INTO dictionaries (uuid, title, folder, mdxFile, enabled, sortOrder, entryCount) VALUES (?,?,?,?,1,?,0)",
+                        [.text(uuid), .text(mdx.info.title), .text(uuid), .text(mdxFileName),
+                         .int(Int64(nextOrder))]
+                    )
+                    let dictID = db.lastInsertRowID
+                    let insert = try db.prepare(
+                        "INSERT INTO entries (dict, key, nkey, offset, length) VALUES (?,?,?,?,?)"
+                    )
+                    try mdx.forEachIndexedEntry { entry in
+                        try insert.bind([
+                            .int(dictID),
+                            .text(entry.key),
+                            .text(Self.normalizeKey(entry.key)),
+                            .int(Int64(bitPattern: entry.recordOffset)),
+                            .int(Int64(entry.recordLength)),
+                        ])
+                        try insert.step()
+                        insert.reset()
+                        entryCount += 1
+                        if entryCount % 20_000 == 0 {
+                            progress?("Indexing \(entryCount) entries…")
+                        }
+                    }
+                    try db.run(
+                        "UPDATE dictionaries SET entryCount = ? WHERE id = ?",
+                        [.int(Int64(entryCount)), .int(dictID)]
+                    )
+                    return dictID
                 }
-                return dictID
             }
 
             // Index resources from every .mdd part.
             let mddURLs = mddFiles(in: folder)
             if !mddURLs.isEmpty {
                 progress?("Indexing resources…")
-                try db.transaction {
-                    let insert = try db.prepare(
-                        "INSERT INTO resources (dict, part, path, offset, length) VALUES (?,?,?,?,?)"
-                    )
-                    for (part, mddURL) in mddURLs.enumerated() {
-                        let mdd = try MdictFile(url: mddURL)
-                        for entry in try mdd.indexedEntries() {
-                            try insert.bind([
-                                .int(dictID),
-                                .int(Int64(part)),
-                                .text(MdictFile.normalizeResourcePath(entry.key)),
-                                .int(Int64(bitPattern: entry.recordOffset)),
-                                .int(Int64(entry.recordLength)),
-                            ])
-                            try insert.step()
-                            insert.reset()
+                try pool.write { db in
+                    try db.transaction {
+                        let insert = try db.prepare(
+                            "INSERT INTO resources (dict, part, path, offset, length) VALUES (?,?,?,?,?)"
+                        )
+                        for (part, mddURL) in mddURLs.enumerated() {
+                            let mdd = try MdictFile(url: mddURL)
+                            try mdd.forEachIndexedEntry { entry in
+                                try insert.bind([
+                                    .int(dictID),
+                                    .int(Int64(part)),
+                                    .text(MdictFile.normalizeResourcePath(entry.key)),
+                                    .int(Int64(bitPattern: entry.recordOffset)),
+                                    .int(Int64(entry.recordLength)),
+                                ])
+                                try insert.step()
+                                insert.reset()
+                            }
                         }
                     }
                 }
             }
 
+            invalidateRecordCache()
             return DictionaryRecord(
                 id: dictID, uuid: uuid, title: mdx.info.title, folderName: uuid,
                 mdxFileName: mdxFileName, enabled: true, sortOrder: nextOrder,
-                entryCount: entries.count
+                entryCount: entryCount
             )
         } catch {
             try? fm.removeItem(at: folder)
+            invalidateRecordCache()
             throw error
         }
     }
@@ -219,31 +283,42 @@ public final class DictionaryLibrary {
     /// Removes a dictionary from Lexicon's index without touching its files.
     /// The app is responsible for moving the folder to the system Trash first.
     public func unregisterDictionary(_ record: DictionaryRecord) throws {
-        try db.transaction {
-            try db.run("DELETE FROM entries WHERE dict = ?", [.int(record.id)])
-            try db.run("DELETE FROM resources WHERE dict = ?", [.int(record.id)])
-            try db.run("DELETE FROM dictionaries WHERE id = ?", [.int(record.id)])
+        try pool.write { db in
+            try db.transaction {
+                try db.run("DELETE FROM entries WHERE dict = ?", [.int(record.id)])
+                try db.run("DELETE FROM resources WHERE dict = ?", [.int(record.id)])
+                try db.run("DELETE FROM dictionaries WHERE id = ?", [.int(record.id)])
+            }
         }
+        stateLock.lock()
         handles.removeValue(forKey: record.uuid)
+        stateLock.unlock()
+        invalidateRecordCache()
     }
 
     public func setEnabled(_ enabled: Bool, for record: DictionaryRecord) throws {
-        try db.run(
-            "UPDATE dictionaries SET enabled = ? WHERE id = ?",
-            [.int(enabled ? 1 : 0), .int(record.id)]
-        )
+        try pool.write { db in
+            try db.run(
+                "UPDATE dictionaries SET enabled = ? WHERE id = ?",
+                [.int(enabled ? 1 : 0), .int(record.id)]
+            )
+        }
+        invalidateRecordCache()
     }
 
     /// Persists a full reordering (array of records in the desired order).
     public func reorder(_ records: [DictionaryRecord]) throws {
-        try db.transaction {
-            for (index, record) in records.enumerated() {
-                try db.run(
-                    "UPDATE dictionaries SET sortOrder = ? WHERE id = ?",
-                    [.int(Int64(index)), .int(record.id)]
-                )
+        try pool.write { db in
+            try db.transaction {
+                for (index, record) in records.enumerated() {
+                    try db.run(
+                        "UPDATE dictionaries SET sortOrder = ? WHERE id = ?",
+                        [.int(Int64(index)), .int(record.id)]
+                    )
+                }
             }
         }
+        invalidateRecordCache()
     }
 
     // MARK: - Search
@@ -252,62 +327,82 @@ public final class DictionaryLibrary {
     public func search(prefix: String, limit: Int = 60) throws -> [SearchResult] {
         let normalized = Self.normalizeKey(prefix)
         guard !normalized.isEmpty else { return [] }
-        let upper = normalized + "\u{FFFF}"
-        let rows = try db.query(
-            """
-            SELECT e.nkey, MIN(e.key), COUNT(DISTINCT e.dict)
-            FROM entries e
-            JOIN dictionaries d ON d.id = e.dict AND d.enabled = 1
-            WHERE e.nkey >= ? AND e.nkey < ?
-            GROUP BY e.nkey
-            ORDER BY e.nkey
-            LIMIT ?
-            """,
-            [.text(normalized), .text(upper), .int(Int64(limit))]
-        ) { row in
-            SearchResult(
-                normalizedKey: row.text(0),
-                displayKey: row.text(1),
-                dictionaryCount: Int(row.int(2))
-            )
+        // SQLite compares TEXT byte-wise, so the upper bound has to sort above
+        // every UTF-8 continuation of the prefix. U+FFFF (EF BF BF) does not:
+        // it would drop headwords whose next character is astral, such as
+        // emoji or CJK Extension B. U+10FFFF (F4 8F BF BF) is the maximum
+        // scalar and therefore the maximum encoding.
+        let upper = normalized + "\u{10FFFF}"
+        return try pool.read { db in
+            try db.query(
+                """
+                SELECT e.nkey, MIN(e.key), COUNT(DISTINCT e.dict)
+                FROM entries e
+                JOIN dictionaries d ON d.id = e.dict AND d.enabled = 1
+                WHERE e.nkey >= ? AND e.nkey < ?
+                GROUP BY e.nkey
+                ORDER BY e.nkey
+                LIMIT ?
+                """,
+                [.text(normalized), .text(upper), .int(Int64(limit))]
+            ) { row in
+                SearchResult(
+                    normalizedKey: row.text(0),
+                    displayKey: row.text(1),
+                    dictionaryCount: Int(row.int(2))
+                )
+            }
         }
-        return rows
     }
 
     /// All entries for a headword, one or more per enabled dictionary,
     /// ordered by the user's dictionary order.
     public func entries(forNormalizedKey nkey: String) throws -> [EntryHit] {
-        try db.query(
-            """
-            SELECT d.uuid, d.title, e.key, e.offset, e.length
-            FROM entries e
-            JOIN dictionaries d ON d.id = e.dict AND d.enabled = 1
-            WHERE e.nkey = ?
-            ORDER BY d.sortOrder, d.id, e.offset
-            """,
-            [.text(nkey)]
-        ) { row in
-            EntryHit(
-                dictionaryUUID: row.text(0),
-                dictionaryTitle: row.text(1),
-                key: row.text(2),
-                recordOffset: UInt64(bitPattern: row.int(3)),
-                recordLength: Int(row.int(4))
-            )
+        try pool.read { db in
+            try db.query(
+                """
+                SELECT d.uuid, d.title, e.key, e.offset, e.length
+                FROM entries e
+                JOIN dictionaries d ON d.id = e.dict AND d.enabled = 1
+                WHERE e.nkey = ?
+                ORDER BY d.sortOrder, d.id, e.offset
+                """,
+                [.text(nkey)]
+            ) { row in
+                EntryHit(
+                    dictionaryUUID: row.text(0),
+                    dictionaryTitle: row.text(1),
+                    key: row.text(2),
+                    recordOffset: UInt64(bitPattern: row.int(3)),
+                    recordLength: Int(row.int(4))
+                )
+            }
         }
     }
 
     // MARK: - Content access
 
     private func openDictionary(uuid: String) throws -> OpenDictionary {
-        if let open = handles[uuid] { return open }
-        guard let record = try dictionaries().first(where: { $0.uuid == uuid }) else {
+        stateLock.lock()
+        if let open = handles[uuid] {
+            stateLock.unlock()
+            return open
+        }
+        stateLock.unlock()
+
+        guard let record = try record(uuid: uuid) else {
             throw MdxError.corruptData("unknown dictionary \(uuid)")
         }
         let folder = folderURL(for: record)
         let mdx = try MdictFile(url: folder.appendingPathComponent(record.mdxFileName))
         let mdds = try mddFiles(in: folder).map { try MdictFile(url: $0) }
         let open = OpenDictionary(mdx: mdx, mdds: mdds)
+
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        // Another thread may have opened the same dictionary meanwhile. Keep a
+        // single instance so its decompressed-block cache stays shared.
+        if let existing = handles[uuid] { return existing }
         handles[uuid] = open
         return open
     }
@@ -346,7 +441,7 @@ public final class DictionaryLibrary {
     /// the dictionary folder.
     public func resource(path: String, dictionaryUUID: String) throws -> Data? {
         let normalized = MdictFile.normalizeResourcePath(path)
-        guard let record = try dictionaries().first(where: { $0.uuid == dictionaryUUID }) else {
+        guard let record = try record(uuid: dictionaryUUID) else {
             return nil
         }
 
@@ -420,16 +515,43 @@ public final class DictionaryLibrary {
     }
 
     public func isKnownDictionaryUUID(_ uuid: String) -> Bool {
-        (try? dictionaries().contains { $0.uuid == uuid }) ?? false
+        do {
+            return try record(uuid: uuid) != nil
+        } catch {
+            return false
+        }
+    }
+
+    /// Location of one resource: which .mdd part, and where inside it.
+    private struct ResourceLocation {
+        let part: Int64
+        let offset: Int64
+        let length: Int64
+    }
+
+    /// Single-row resource lookup. Written against `prepare`/`step` rather than
+    /// the generic `query` helper: nesting two generic closures here costs the
+    /// type checker more than it is worth.
+    private func resourceLocation(
+        sql: String, bindings: [SQLiteDB.Binding]
+    ) throws -> ResourceLocation? {
+        try pool.read { db -> ResourceLocation? in
+            let statement = try db.prepare(sql)
+            try statement.bind(bindings)
+            guard try statement.step() else { return nil }
+            return ResourceLocation(
+                part: statement.int(0), offset: statement.int(1), length: statement.int(2)
+            )
+        }
     }
 
     private func indexedResource(exactPath: String, record: DictionaryRecord) throws -> Data? {
-        let rows = try db.query(
-            "SELECT part, offset, length FROM resources WHERE dict = ? AND path = ? LIMIT 1",
-            [.int(record.id), .text(exactPath)]
-        ) { ($0.int(0), $0.int(1), $0.int(2)) }
-        guard let (part, offset, length) = rows.first else { return nil }
-        return try readResource(part: part, offset: offset, length: length, uuid: record.uuid)
+        let location = try resourceLocation(
+            sql: "SELECT part, offset, length FROM resources WHERE dict = ? AND path = ? LIMIT 1",
+            bindings: [.int(record.id), .text(exactPath)]
+        )
+        guard let location else { return nil }
+        return try readResource(location, uuid: record.uuid)
     }
 
     /// First resource whose path starts with `prefix` followed by '#' or '.'
@@ -439,23 +561,24 @@ public final class DictionaryLibrary {
         for (symbol, replacement) in [("\\", "\\\\"), ("%", "\\%"), ("_", "\\_")] {
             escaped = escaped.replacingOccurrences(of: symbol, with: replacement)
         }
-        let rows = try db.query(
-            """
-            SELECT part, offset, length FROM resources
-            WHERE dict = ? AND (path LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\')
-            ORDER BY path LIMIT 1
-            """,
-            [.int(record.id), .text(escaped + "#%"), .text(escaped + ".%")]
-        ) { ($0.int(0), $0.int(1), $0.int(2)) }
-        guard let (part, offset, length) = rows.first else { return nil }
-        return try readResource(part: part, offset: offset, length: length, uuid: record.uuid)
+        let location = try resourceLocation(
+            sql: """
+                SELECT part, offset, length FROM resources
+                WHERE dict = ? AND (path LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\')
+                ORDER BY path LIMIT 1
+                """,
+            bindings: [.int(record.id), .text(escaped + "#%"), .text(escaped + ".%")]
+        )
+        guard let location else { return nil }
+        return try readResource(location, uuid: record.uuid)
     }
 
-    private func readResource(part: Int64, offset: Int64, length: Int64, uuid: String) throws -> Data? {
+    private func readResource(_ location: ResourceLocation, uuid: String) throws -> Data? {
         let open = try openDictionary(uuid: uuid)
-        guard Int(part) < open.mdds.count else { return nil }
-        return try open.mdds[Int(part)].recordData(
-            at: UInt64(bitPattern: offset), length: Int(length)
+        let part = Int(location.part)
+        guard part >= 0, part < open.mdds.count else { return nil }
+        return try open.mdds[part].recordData(
+            at: UInt64(bitPattern: location.offset), length: Int(location.length)
         )
     }
 }

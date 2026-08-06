@@ -14,10 +14,12 @@ enum Entry {
 
 struct LexiconApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    /// One library for the whole app; every window shares it.
+    @StateObject private var libraryModel = LibraryModel()
 
     var body: some Scene {
         WindowGroup(id: "dictionary") {
-            LexiconWindowRoot()
+            LexiconWindowRoot(libraryModel: libraryModel)
         }
         .defaultSize(width: 1000, height: 680)
         .windowStyle(.hiddenTitleBar)
@@ -28,10 +30,18 @@ struct LexiconApp: App {
 }
 
 private struct LexiconWindowRoot: View {
-    @StateObject private var appState = AppState()
+    private let libraryModel: LibraryModel
+    /// Search field, results and tabs are per window.
+    @StateObject private var appState: AppState
+
+    init(libraryModel: LibraryModel) {
+        self.libraryModel = libraryModel
+        _appState = StateObject(wrappedValue: AppState(libraryModel: libraryModel))
+    }
 
     var body: some View {
         ContentView()
+            .environmentObject(libraryModel)
             .environmentObject(appState)
             .focusedSceneValue(\.lexiconAppState, appState)
             .frame(minWidth: 760, minHeight: 480)

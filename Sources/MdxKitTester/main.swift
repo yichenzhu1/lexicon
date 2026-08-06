@@ -127,9 +127,17 @@ t.run("lzo truncated stream throws") {
 
 runParserTests(t)
 
+// MARK: - Parser robustness against damaged files
+
+runCorruptFileTests(t)
+
 // MARK: - Library: import, index, search
 
 runLibraryTests(t)
+
+// MARK: - Library under concurrent access
+
+runConcurrencyTests(t)
 
 // MARK: - HTML page generation
 

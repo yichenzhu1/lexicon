@@ -3,7 +3,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct DictionaryManagerView: View {
-    @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var libraryModel: LibraryModel
     @Environment(\.dismiss) private var dismiss
     @State private var showImporter = false
     @State private var dictionaryPendingRemoval: DictionaryRecord?
@@ -23,7 +23,7 @@ struct DictionaryManagerView: View {
                 } label: {
                     Label("Import .mdx…", systemImage: "plus")
                 }
-                .disabled(appState.isImporting)
+                .disabled(libraryModel.isImporting)
                 Button("Done") { dismiss() }
                     .keyboardShortcut(.defaultAction)
             }
@@ -31,7 +31,7 @@ struct DictionaryManagerView: View {
 
             Divider()
 
-            if appState.dictionaries.isEmpty && !appState.isImporting {
+            if libraryModel.dictionaries.isEmpty && !libraryModel.isImporting {
                 ContentUnavailableView(
                     "No dictionaries",
                     systemImage: "books.vertical",
@@ -44,27 +44,27 @@ struct DictionaryManagerView: View {
                 .frame(maxHeight: .infinity)
             } else {
                 List {
-                    ForEach(appState.dictionaries) { dictionary in
+                    ForEach(libraryModel.dictionaries) { dictionary in
                         DictionaryRow(
                             dictionary: dictionary,
-                            isRemoving: appState.removingDictionaryIDs.contains(dictionary.id)
+                            isRemoving: libraryModel.removingDictionaryIDs.contains(dictionary.id)
                         ) {
                             dictionaryPendingRemoval = dictionary
                         }
                     }
                     .onMove { offsets, target in
-                        appState.moveDictionaries(fromOffsets: offsets, toOffset: target)
+                        libraryModel.moveDictionaries(fromOffsets: offsets, toOffset: target)
                     }
                 }
                 .listStyle(.inset)
             }
 
-            if appState.isImporting {
+            if libraryModel.isImporting {
                 Divider()
                 HStack(spacing: 10) {
                     ProgressView()
                         .controlSize(.small)
-                    Text(appState.importStatus)
+                    Text(libraryModel.importStatus)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -85,7 +85,7 @@ struct DictionaryManagerView: View {
             Button("Cancel", role: .cancel) {}
             Button("Move to Trash", role: .destructive) {
                 dictionaryPendingRemoval = nil
-                appState.removeDictionary(dictionary)
+                libraryModel.removeDictionary(dictionary)
             }
         } message: { dictionary in
             Text(
@@ -99,14 +99,14 @@ struct DictionaryManagerView: View {
             allowsMultipleSelection: true
         ) { result in
             if case .success(let urls) = result {
-                appState.importDictionaries(at: urls)
+                libraryModel.importDictionaries(at: urls)
             }
         }
     }
 }
 
 private struct DictionaryRow: View {
-    @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var libraryModel: LibraryModel
     let dictionary: DictionaryRecord
     let isRemoving: Bool
     let requestRemoval: () -> Void
@@ -115,7 +115,7 @@ private struct DictionaryRow: View {
         HStack(spacing: 12) {
             Toggle("", isOn: Binding(
                 get: { dictionary.enabled },
-                set: { appState.setEnabled($0, for: dictionary) }
+                set: { libraryModel.setEnabled($0, for: dictionary) }
             ))
             .toggleStyle(.switch)
             .controlSize(.mini)

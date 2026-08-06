@@ -65,6 +65,50 @@ func runPageBuilderTests(_ t: TestHarness) {
         t.expect(html.contains("overflow: visible !important"), "inner document does not scroll")
     }
 
+    t.run("page builder: hostile dictionary uuid cannot inject script") {
+        // `URL.path` percent-decodes, so a dictionary's own markup can point an
+        // iframe at dict://d/<anything>/entry and choose this string. It is
+        // interpolated into a JS string literal, which must stay closed.
+
+        /// The `dictionaryUUID:` literal the bridge emits.
+        func emittedLiteral(_ uuid: String) -> String {
+            let html = EntryPageBuilder.entryDocument(
+                for: "apple", dictionaryUUID: uuid, library: library
+            )
+            guard let start = html.range(of: "dictionaryUUID: "),
+                  let end = html.range(
+                      of: "\n", range: start.upperBound ..< html.endIndex
+                  )
+            else { return "" }
+            return String(html[start.upperBound ..< end.lowerBound])
+        }
+
+        // A single quote is inert inside the double-quoted literal we emit.
+        t.expectEqual(
+            emittedLiteral("x');alert(1)//"),
+            #""x');alert(1)//""#,
+            "single quotes stay inside the literal"
+        )
+        // A double quote would close it, so it must be escaped.
+        t.expectEqual(
+            emittedLiteral(#"x");alert(1)//"#),
+            #""x\");alert(1)//""#,
+            "double quote escaped"
+        )
+        // '<' must never survive, or the payload could close the <script>.
+        let closingTag = emittedLiteral("a</script><script>alert(1)</script>")
+        t.expect(!closingTag.contains("<"), "no raw '<' in the literal, got \(closingTag)")
+        t.expect(closingTag.contains("\\u003C"), "'<' escaped as a unicode escape")
+
+        let fullPage = EntryPageBuilder.entryDocument(
+            for: "apple", dictionaryUUID: "a</script><script>alert(1)</script>", library: library
+        )
+        t.expect(
+            !fullPage.contains("<script>alert(1)"),
+            "cannot break out of the script element"
+        )
+    }
+
     t.run("page builder: redirect entry renders target") {
         let html = EntryPageBuilder.entryDocument(
             for: "colour", dictionaryUUID: basic.uuid, library: library
