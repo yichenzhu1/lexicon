@@ -33,7 +33,9 @@ final class AppState: ObservableObject {
     @Published var selectedWord: String? {
         didSet {
             if let word = selectedWord, word != oldValue, !isSyncingTabSelection {
-                libraryModel.recordHistory(word)
+                if !suppressHistoryRecording {
+                    libraryModel.recordHistory(word)
+                }
                 updateActiveTab(to: word)
             }
         }
@@ -45,6 +47,7 @@ final class AppState: ObservableObject {
     let libraryModel: LibraryModel
     private var searchTask: Task<Void, Never>?
     private var isSyncingTabSelection = false
+    private var suppressHistoryRecording = false
 
     var library: DictionaryLibrary? { libraryModel.library }
 
@@ -100,6 +103,15 @@ final class AppState: ObservableObject {
         selectedWord = normalized
     }
 
+    /// Opens a saved word without treating that click as a new lookup. A row
+    /// selected inside History therefore stays where it is instead of moving
+    /// to the top immediately.
+    func selectSavedWord(_ word: String) {
+        suppressHistoryRecording = true
+        selectedWord = word
+        suppressHistoryRecording = false
+    }
+
     // MARK: - Browser tabs
 
     var activeTab: EntryTab? {
@@ -116,15 +128,19 @@ final class AppState: ObservableObject {
 
     func openNewTab() {
         let tab = EntryTab()
-        tabs.append(tab)
-        activeTabID = tab.id
+        withAnimation(.smooth(duration: 0.2)) {
+            tabs.append(tab)
+            activeTabID = tab.id
+        }
         synchronizeSelection(to: nil)
         searchText = ""
     }
 
     func activateTab(_ id: UUID) {
         guard let tab = tabs.first(where: { $0.id == id }), id != activeTabID else { return }
-        activeTabID = id
+        withAnimation(.smooth(duration: 0.18)) {
+            activeTabID = id
+        }
         synchronizeSelection(to: tab.word)
         synchronizeSearchText(to: tab.word)
     }
@@ -139,10 +155,14 @@ final class AppState: ObservableObject {
         }
 
         let wasActive = id == activeTabID
-        tabs.remove(at: index)
+        withAnimation(.smooth(duration: 0.2)) {
+            _ = tabs.remove(at: index)
+        }
         guard wasActive else { return }
         let nextIndex = min(index, tabs.count - 1)
-        activeTabID = tabs[nextIndex].id
+        withAnimation(.smooth(duration: 0.18)) {
+            activeTabID = tabs[nextIndex].id
+        }
         synchronizeSelection(to: tabs[nextIndex].word)
         synchronizeSearchText(to: tabs[nextIndex].word)
     }

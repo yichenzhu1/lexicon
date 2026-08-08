@@ -18,11 +18,12 @@ Lexicon ships no dictionary content. You supply `.mdx` files (with their
   Collapsed dictionaries stay collapsed, and a jump bar appears when several
   dictionaries have the word
 - Text zoom (⌘+ / ⌘− / ⌘0) and look-up-on-double-click, both remembered
-  between launches (View menu)
+  between launches and customizable in Settings (⌘,)
 - Cross-reference links (`entry://`, `bword://`) and `@@@LINK=` redirects
 - Pronunciation audio (`sound://` links) played from `.mdd` resources
 - Dictionary manager: import, enable/disable, drag to reorder, rename, remove
-- Lookup history and starred words, both filterable in the sidebar
+- Stable, unique lookup history with a configurable record limit, plus starred
+  words in the sidebar
 - Supports MDX format v1/v2, zlib/LZO/uncompressed blocks, encrypted keyword
   index (Encrypted=2), UTF-8/UTF-16/GB18030/Big5 encodings, multi-part MDDs
 

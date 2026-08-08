@@ -26,6 +26,11 @@ struct LexiconApp: App {
         .commands {
             LexiconCommands()
         }
+
+        Settings {
+            SettingsView()
+                .environmentObject(libraryModel)
+        }
     }
 }
 

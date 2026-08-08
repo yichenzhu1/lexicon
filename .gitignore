@@ -4,3 +4,5 @@ build/
 *.xcodeproj
 .swiftpm/
 __pycache__/
+skills-lock.json
+.agents/

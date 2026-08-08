@@ -228,7 +228,7 @@ final class LibraryModel: ObservableObject {
         // already live in Application Support/Lexicon and need no migration.
         if !current.bool(forKey: settingsMigrationKey),
            let legacy = UserDefaults(suiteName: "org.lexicon.Lexicon.settings") {
-            for key in [zoomKey, lookUpKey, collapsedKey]
+            for key in [zoomKey, lookUpKey, collapsedKey, historyLimitKey]
             where current.object(forKey: key) == nil {
                 if let value = legacy.object(forKey: key) {
                     current.set(value, forKey: key)
@@ -250,6 +250,9 @@ final class LibraryModel: ObservableObject {
         }
     }
 
+    /// Maximum number of unique lookup records kept in browser-style history.
+    @Published private(set) var historyLimit: Int = LibraryModel.storedHistoryLimit()
+
     /// Dictionaries the user collapsed on a results page. Remembered across
     /// lookups so a dictionary you always skip stays folded away.
     ///
@@ -269,9 +272,12 @@ final class LibraryModel: ObservableObject {
     private static let zoomKey = "entryZoom"
     private static let lookUpKey = "lookUpOnDoubleClick"
     private static let collapsedKey = "collapsedDictionaries"
+    private static let historyLimitKey = "historyLimit"
     private static let settingsMigrationKey = "migratedFromOrgLexiconSettings"
+    static let defaultHistoryLimit = 100
+    static let historyLimitOptions = [25, 50, 100, 200, 500]
     /// Discrete stops, like a browser's zoom menu.
-    private static let zoomSteps: [Double] = [
+    static let zoomSteps: [Double] = [
         0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
     ]
 
@@ -284,6 +290,11 @@ final class LibraryModel: ObservableObject {
     private static func storedLookUpOnDoubleClick() -> Bool {
         // Default on: looking a word up is what this app is for.
         settings.object(forKey: lookUpKey) as? Bool ?? true
+    }
+
+    private static func storedHistoryLimit() -> Int {
+        let stored = settings.integer(forKey: historyLimitKey)
+        return historyLimitOptions.contains(stored) ? stored : defaultHistoryLimit
     }
 
     var canZoomIn: Bool { entryZoom < Self.zoomSteps[Self.zoomSteps.count - 1] }
@@ -303,10 +314,27 @@ final class LibraryModel: ObservableObject {
         setZoom(1.0)
     }
 
-    private func setZoom(_ value: Double) {
+    func setZoom(_ value: Double) {
         guard value != entryZoom else { return }
         entryZoom = value
         Self.settings.set(value, forKey: Self.zoomKey)
+    }
+
+    func setHistoryLimit(_ value: Int) {
+        guard Self.historyLimitOptions.contains(value), value != historyLimit else { return }
+        historyLimit = value
+        Self.settings.set(value, forKey: Self.historyLimitKey)
+        trimHistoryToLimit()
+    }
+
+    func restoreDefaultSettings() {
+        setZoom(1.0)
+        lookUpOnDoubleClick = true
+        setHistoryLimit(Self.defaultHistoryLimit)
+        if !collapsedDictionaries.isEmpty {
+            collapsedDictionaries.removeAll()
+            Self.settings.removeObject(forKey: Self.collapsedKey)
+        }
     }
 
     // MARK: - Headword display
@@ -339,7 +367,13 @@ final class LibraryModel: ObservableObject {
             else { return [] }
             return list
         }
-        history = load(historyURL)
+        let storedHistory = load(historyURL)
+        var seenHistory = Set<String>()
+        let uniqueHistory = storedHistory.filter { seenHistory.insert($0).inserted }
+        history = Array(uniqueHistory.prefix(historyLimit))
+        if history != storedHistory {
+            save(history, to: historyURL)
+        }
         starred = load(starredURL)
     }
 
@@ -349,10 +383,17 @@ final class LibraryModel: ObservableObject {
     }
 
     func recordHistory(_ word: String) {
-        var updated = history.filter { $0 != word }
-        updated.insert(word, at: 0)
-        if updated.count > 200 { updated.removeLast(updated.count - 200) }
-        history = updated
+        // Browser-style history: new unique lookups stack at the top, while
+        // revisiting an existing entry never changes its established position.
+        guard !history.contains(word) else { return }
+        history.insert(word, at: 0)
+        trimHistoryToLimit()
+        save(history, to: historyURL)
+    }
+
+    private func trimHistoryToLimit() {
+        guard history.count > historyLimit else { return }
+        history.removeLast(history.count - historyLimit)
         save(history, to: historyURL)
     }
 
