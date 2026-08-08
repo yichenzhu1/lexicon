@@ -10,7 +10,13 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "CLzokay",
+            path: "Sources/CLzokay",
+            publicHeadersPath: "lzokay-c"
+        ),
+        .target(
             name: "MdxKit",
+            dependencies: ["CLzokay"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .executableTarget(

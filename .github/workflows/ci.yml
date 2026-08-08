@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build with warnings as errors
+        run: swift build -Xswiftc -warnings-as-errors
+
+      - name: Run regression suite
+        run: swift run -Xswiftc -warnings-as-errors MdxKitTester
+
+      - name: Build and validate app bundle
+        run: |
+          scripts/make_app.sh release
+          plutil -lint build/Lexicon.app/Contents/Info.plist
+          test -s build/Lexicon.app/Contents/Resources/Lexicon.icns
+          test -s build/Lexicon.app/Contents/Resources/LICENSE.txt
+          test -s build/Lexicon.app/Contents/Resources/THIRD-PARTY-NOTICES.txt
+          codesign --verify --deep --strict --verbose=2 build/Lexicon.app

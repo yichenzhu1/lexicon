@@ -8,6 +8,21 @@ them at once, fully offline.
 Lexicon ships no dictionary content. You supply `.mdx` files (with their
 `.mdd` resource companions) that you have obtained yourself.
 
+## Install
+
+Lexicon requires macOS 14 or later. Download the ZIP for your Mac from the
+[GitHub Releases](https://github.com/yichenzhu1/lexicon/releases) page, unzip
+it, and move `Lexicon.app` to `/Applications`.
+
+Release filenames include their supported architecture. The current build is
+for Apple Silicon (`arm64`).
+
+Files whose names end in `-unsigned.zip` are ad-hoc signed and have not been
+notarized by Apple. macOS will normally block the first launch. Only if you
+trust the download, try opening it once and then use **System Settings →
+Privacy & Security → Open Anyway**. Apple explains this process and its risks
+in [Open a Mac app from an unknown developer](https://support.apple.com/guide/mac-help/mh40616/mac).
+
 ## Features
 
 - Unified search across every enabled dictionary (case- and
@@ -30,18 +45,118 @@ Lexicon ships no dictionary content. You supply `.mdx` files (with their
 MDX v3 files (produced by MdxBuilder 4.x) are not supported; rebuild those
 with MdxBuilder 3.x.
 
-## Build and run
+## Internal builds
 
 Requires macOS 14+ and the Xcode Command Line Tools (full Xcode not needed).
 
 ```sh
-# Run directly
-swift run -c release Lexicon
+# Fast, unoptimized developer build
+scripts/make_app.sh debug
+open build/Lexicon.app
 
-# Or build a proper app bundle at build/Lexicon.app
-scripts/make_app.sh
+# Optimized internal build
+scripts/make_app.sh release
 open build/Lexicon.app
 ```
+
+The version is stored in `VERSION`. Local builds are ad-hoc signed and are for
+development or trusted internal testing only. Override the version or build
+number when needed:
+
+```sh
+LEXICON_VERSION=0.1.0 LEXICON_BUILD_NUMBER=2 scripts/make_app.sh release
+```
+
+To make a ZIP for internal testers, first commit the source so the working
+tree is clean, then run:
+
+```sh
+scripts/release.sh --unsigned 0.1.0 2
+```
+
+This writes an architecture-labelled ZIP and SHA-256 checksum to `dist/`.
+
+## Public release without Developer ID
+
+An unsigned public preview can be published immediately, but macOS cannot
+verify its developer or notarization status. Users will see the warning
+described in the Install section.
+
+1. Update `VERSION` and `CHANGELOG.md`.
+2. Run `swift run MdxKitTester` and `scripts/make_app.sh release`.
+3. Commit all release changes and push `main`.
+4. Create the unsigned ZIP from that clean commit:
+
+   ```sh
+   scripts/release.sh --unsigned 0.1.0 1
+   ```
+
+5. Tag the exact commit and publish the ZIP plus checksum:
+
+   ```sh
+   git tag -a v0.1.0 -m "Lexicon 0.1.0"
+   git push origin main
+   git push origin v0.1.0
+   gh auth login
+   gh release create v0.1.0 \
+     dist/Lexicon-0.1.0-macOS-arm64-unsigned.zip \
+     dist/Lexicon-0.1.0-macOS-arm64-unsigned.zip.sha256 \
+     --title "Lexicon 0.1.0" \
+     --generate-notes
+   ```
+
+6. On the GitHub release page, clearly state that this preview is not
+   Developer ID signed or notarized and is Apple Silicon only.
+
+## Signed public release
+
+Public downloads should be signed with a **Developer ID Application**
+certificate and notarized by Apple. First store notarization credentials in
+your login keychain (use an app-specific password, not your Apple Account
+password):
+
+```sh
+xcrun notarytool store-credentials "lexicon-notary" \
+  --apple-id "you@example.com" \
+  --team-id "YOUR_TEAM_ID"
+```
+
+`notarytool` securely prompts for the app-specific password instead of placing
+it in the command or shell history.
+
+Update `VERSION` and `CHANGELOG.md`, commit those changes, and make sure the
+working tree is clean. Then build, sign, notarize, staple, package, and
+checksum the release:
+
+```sh
+export LEXICON_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+export LEXICON_NOTARY_PROFILE="lexicon-notary"
+scripts/release.sh 0.1.0 1
+```
+
+The finished ZIP and SHA-256 checksum are written to `dist/`. Tag the exact
+commit that produced them and attach both files to GitHub:
+
+```sh
+git tag -a v0.1.0 -m "Lexicon 0.1.0"
+git push origin main
+git push origin v0.1.0
+gh release create v0.1.0 \
+  dist/Lexicon-0.1.0-macOS-arm64.zip \
+  dist/Lexicon-0.1.0-macOS-arm64.zip.sha256 \
+  --title "Lexicon 0.1.0" \
+  --generate-notes
+```
+
+Never commit signing certificates, private keys, Apple credentials, or
+notarization passwords.
+
+## License
+
+Lexicon is licensed under the
+[Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). See
+`LICENSE` for the full terms and `THIRD-PARTY-NOTICES.txt` for bundled
+MIT-licensed components and test tooling.
 
 ## Import dictionaries
 
@@ -110,5 +225,6 @@ LEXICON_ROOT=/tmp/lexicon-smoke swift run -c release Lexicon --smoke-test
 
 - MDX format documentation: [writemdict fileformat.md](https://github.com/zhansliu/writemdict/blob/master/fileformat.md)
   and [mdict-analysis](https://bitbucket.org/xwang/mdict-analysis)
-- LZO1X decompressor ported from [rasky/go-lzo](https://github.com/rasky/go-lzo)
+- LZO1X decompression provided by the MIT-licensed
+  [lzokay](https://github.com/AxioDL/lzokay) implementation
 - Test fixtures generated with [zhansliu/writemdict](https://github.com/zhansliu/writemdict)
