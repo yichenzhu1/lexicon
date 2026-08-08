@@ -13,10 +13,16 @@ swift build -c "$CONFIGURATION"
 
 BINARY=".build/$CONFIGURATION/Lexicon"
 APP="build/Lexicon.app"
+ICON="Assets/Lexicon.icns"
+
+if [[ ! -f "$ICON" || "Assets/AppIcon.png" -nt "$ICON" ]]; then
+    scripts/make_icon.sh
+fi
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/Lexicon"
+cp "$ICON" "$APP/Contents/Resources/Lexicon.icns"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -26,6 +32,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key>              <string>Lexicon</string>
     <key>CFBundleIdentifier</key>        <string>com.yichenzhu.Lexicon</string>
     <key>CFBundleExecutable</key>        <string>Lexicon</string>
+    <key>CFBundlePackageType</key>       <string>APPL</string>
+    <key>CFBundleIconFile</key>          <string>Lexicon.icns</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key>           <string>1</string>
     <key>LSMinimumSystemVersion</key>    <string>14.0</string>
