@@ -1,4 +1,8 @@
-# Lexicon
+<p align="center">
+  <img src="Assets/AppIcon.png" alt="Lexicon app icon" width="128">
+</p>
+
+<h1 align="center">Lexicon</h1>
 
 A native macOS dictionary app that reads **MDX/MDD** dictionary files — the
 format used by MDict, GoldenDict, Eudic and friends. Import your own
@@ -7,6 +11,10 @@ them at once, fully offline.
 
 Lexicon ships no dictionary content. You supply `.mdx` files (with their
 `.mdd` resource companions) that you have obtained yourself.
+
+<p align="center">
+  <img src="docs/images/lexicon-preview.png" alt="Lexicon displaying an entry on macOS">
+</p>
 
 ## Install
 
