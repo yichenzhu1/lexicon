@@ -29,5 +29,5 @@ jobs:
           plutil -lint build/Lexicon.app/Contents/Info.plist
           test -s build/Lexicon.app/Contents/Resources/Lexicon.icns
           test -s build/Lexicon.app/Contents/Resources/LICENSE.txt
-          test -s build/Lexicon.app/Contents/Resources/THIRD-PARTY-NOTICES.txt
+          test -s build/Lexicon.app/Contents/Resources/lzokay-LICENSE.txt
           codesign --verify --deep --strict --verbose=2 build/Lexicon.app

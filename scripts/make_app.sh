@@ -3,7 +3,7 @@
 # Usage: scripts/make_app.sh [debug|release]   (default: release)
 #
 # Optional environment variables:
-#   LEXICON_VERSION           User-facing version (defaults to ./VERSION)
+#   LEXICON_VERSION           User-facing version (defaults to 0.1.0)
 #   LEXICON_BUILD_NUMBER      Monotonically increasing integer (defaults to 1)
 #   LEXICON_SIGNING_IDENTITY  Developer ID identity; unset uses ad-hoc signing
 #
@@ -14,7 +14,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CONFIGURATION="${1:-release}"
-VERSION="${LEXICON_VERSION:-$(tr -d '[:space:]' < VERSION)}"
+VERSION="${LEXICON_VERSION:-0.1.0}"
 BUILD_NUMBER="${LEXICON_BUILD_NUMBER:-1}"
 SIGNING_IDENTITY="${LEXICON_SIGNING_IDENTITY:--}"
 
@@ -48,7 +48,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/Lexicon"
 cp "$ICON" "$APP/Contents/Resources/Lexicon.icns"
 cp "LICENSE" "$APP/Contents/Resources/LICENSE.txt"
-cp "THIRD-PARTY-NOTICES.txt" "$APP/Contents/Resources/THIRD-PARTY-NOTICES.txt"
+cp "Sources/CLzokay/LICENSE" "$APP/Contents/Resources/lzokay-LICENSE.txt"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
