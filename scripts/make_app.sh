@@ -1,6 +1,10 @@
 #!/bin/bash
 # Builds Lexicon.app into ./build from the SwiftPM executable.
 # Usage: scripts/make_app.sh [debug|release]   (default: release)
+#
+# CFBundleIdentifier below is how macOS identifies the app (preferences,
+# permissions). Forks should change it, along with the matching suite name in
+# LibraryModel.settings.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,16 +24,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>              <string>Lexicon</string>
-    <key>CFBundleDisplayName</key>       <string>Lexicon</string>
-    <key>CFBundleIdentifier</key>        <string>fun.diane.lexicon</string>
+    <key>CFBundleIdentifier</key>        <string>com.yichenzhu.Lexicon</string>
     <key>CFBundleExecutable</key>        <string>Lexicon</string>
-    <key>CFBundlePackageType</key>       <string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key>           <string>1</string>
     <key>LSMinimumSystemVersion</key>    <string>14.0</string>
     <key>NSPrincipalClass</key>          <string>NSApplication</string>
-    <key>NSHighResolutionCapable</key>   <true/>
-    <key>LSApplicationCategoryType</key> <string>public.app-category.reference</string>
 </dict>
 </plist>
 PLIST

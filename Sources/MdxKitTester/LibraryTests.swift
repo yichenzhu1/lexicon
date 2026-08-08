@@ -71,6 +71,31 @@ func runLibraryTests(_ t: TestHarness) {
         t.expectEqual(record.resourceCount, 0, "resource count is zero")
     }
 
+    t.run("library: failed resource indexing rolls back the whole import") {
+        let source = tempRoot.appendingPathComponent("broken-source")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: fixturesURL.appendingPathComponent("basic.mdx"),
+            to: source.appendingPathComponent("broken.mdx")
+        )
+        try Data("not an mdd".utf8).write(to: source.appendingPathComponent("broken.mdd"))
+
+        let rollbackRoot = tempRoot.appendingPathComponent("rollback")
+        let rollbackLibrary = try DictionaryLibrary(rootURL: rollbackRoot)
+        t.expectThrows("corrupt sibling mdd rejects import") {
+            try rollbackLibrary.importDictionary(from: source.appendingPathComponent("broken.mdx"))
+        }
+        t.expectEqual(
+            try rollbackLibrary.dictionaries().count, 0,
+            "failed import leaves no dictionary row"
+        )
+        let copiedFolders = try FileManager.default.contentsOfDirectory(
+            at: rollbackLibrary.dictionariesURL,
+            includingPropertiesForKeys: nil
+        )
+        t.expectEqual(copiedFolders.count, 0, "failed import leaves no copied folder")
+    }
+
     t.run("library: renaming changes only the library label") {
         let renameRoot = tempRoot.appendingPathComponent("rename")
         let renameLibrary = try DictionaryLibrary(rootURL: renameRoot)
@@ -243,6 +268,24 @@ func runLibraryTests(_ t: TestHarness) {
 
         t.expect(!library.isKnownDictionaryUUID("apple.png"), "uuid check")
         t.expect(library.isKnownDictionaryUUID(basic.uuid), "uuid check positive")
+    }
+
+    t.run("library: loose resources cannot escape through a symbolic link") {
+        let folder = library.folderURL(for: basic)
+        let outside = tempRoot.appendingPathComponent("outside.bin")
+        try Data("private outside file".utf8).write(to: outside)
+        try FileManager.default.createSymbolicLink(
+            at: folder.appendingPathComponent("escape.bin"),
+            withDestinationURL: outside
+        )
+        t.expectEqual(
+            try library.resource(path: "escape.bin", dictionaryUUID: basic.uuid), nil,
+            "symlink outside dictionary folder is rejected"
+        )
+        t.expectEqual(
+            try library.resource(path: "../outside.bin", dictionaryUUID: basic.uuid), nil,
+            "parent traversal is rejected"
+        )
     }
 
     t.run("library: second dictionary and unified search") {

@@ -216,6 +216,29 @@ final class LibraryModel: ObservableObject {
 
     // MARK: - Reading preferences
 
+    /// Settings live in a named suite so they are the same whether the app runs
+    /// as `build/Lexicon.app` or as the bare `swift build` executable, which
+    /// has no bundle identifier and would otherwise get its own domain.
+    /// The suite is derived from `CFBundleIdentifier` in `scripts/make_app.sh`.
+    static let settings: UserDefaults = {
+        let current = UserDefaults(suiteName: "com.yichenzhu.Lexicon.settings") ?? .standard
+
+        // Preserve preferences created before the app adopted its permanent
+        // reverse-DNS identifier. Dictionary files, history and starred words
+        // already live in Application Support/Lexicon and need no migration.
+        if !current.bool(forKey: settingsMigrationKey),
+           let legacy = UserDefaults(suiteName: "org.lexicon.Lexicon.settings") {
+            for key in [zoomKey, lookUpKey, collapsedKey]
+            where current.object(forKey: key) == nil {
+                if let value = legacy.object(forKey: key) {
+                    current.set(value, forKey: key)
+                }
+            }
+            current.set(true, forKey: settingsMigrationKey)
+        }
+        return current
+    }()
+
     /// Zoom applied to rendered entries, shared by every tab and window and
     /// remembered across launches.
     @Published private(set) var entryZoom: Double = LibraryModel.storedZoom()
@@ -223,7 +246,7 @@ final class LibraryModel: ObservableObject {
     /// double-click keeps its ordinary select-a-word-to-copy behavior.
     @Published var lookUpOnDoubleClick: Bool = LibraryModel.storedLookUpOnDoubleClick() {
         didSet {
-            UserDefaults.standard.set(lookUpOnDoubleClick, forKey: Self.lookUpKey)
+            Self.settings.set(lookUpOnDoubleClick, forKey: Self.lookUpKey)
         }
     }
 
@@ -233,33 +256,34 @@ final class LibraryModel: ObservableObject {
     /// Deliberately does not bump `contentVersion`: collapsing a card must not
     /// reload the page out from under the click that caused it.
     @Published private(set) var collapsedDictionaries: Set<String> =
-        Set(UserDefaults.standard.stringArray(forKey: LibraryModel.collapsedKey) ?? [])
+        Set(LibraryModel.settings.stringArray(forKey: LibraryModel.collapsedKey) ?? [])
 
     func setDictionary(_ uuid: String, collapsed: Bool) {
         let changed = collapsed
             ? collapsedDictionaries.insert(uuid).inserted
             : collapsedDictionaries.remove(uuid) != nil
         guard changed else { return }
-        UserDefaults.standard.set(Array(collapsedDictionaries), forKey: Self.collapsedKey)
+        Self.settings.set(Array(collapsedDictionaries), forKey: Self.collapsedKey)
     }
 
     private static let zoomKey = "entryZoom"
     private static let lookUpKey = "lookUpOnDoubleClick"
     private static let collapsedKey = "collapsedDictionaries"
+    private static let settingsMigrationKey = "migratedFromOrgLexiconSettings"
     /// Discrete stops, like a browser's zoom menu.
     private static let zoomSteps: [Double] = [
         0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
     ]
 
     private static func storedZoom() -> Double {
-        let stored = UserDefaults.standard.double(forKey: zoomKey)
+        let stored = settings.double(forKey: zoomKey)
         guard stored > 0 else { return 1.0 }
         return min(max(stored, zoomSteps[0]), zoomSteps[zoomSteps.count - 1])
     }
 
     private static func storedLookUpOnDoubleClick() -> Bool {
         // Default on: looking a word up is what this app is for.
-        UserDefaults.standard.object(forKey: lookUpKey) as? Bool ?? true
+        settings.object(forKey: lookUpKey) as? Bool ?? true
     }
 
     var canZoomIn: Bool { entryZoom < Self.zoomSteps[Self.zoomSteps.count - 1] }
@@ -282,7 +306,7 @@ final class LibraryModel: ObservableObject {
     private func setZoom(_ value: Double) {
         guard value != entryZoom else { return }
         entryZoom = value
-        UserDefaults.standard.set(value, forKey: Self.zoomKey)
+        Self.settings.set(value, forKey: Self.zoomKey)
     }
 
     // MARK: - Headword display

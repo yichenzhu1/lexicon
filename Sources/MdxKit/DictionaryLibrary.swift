@@ -242,6 +242,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
         let fm = FileManager.default
         let uuid = UUID().uuidString
         let folder = dictionariesURL.appendingPathComponent(uuid, isDirectory: true)
+        var registeredDictionaryID: Int64?
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
 
         do {
@@ -311,6 +312,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
                     return dictID
                 }
             }
+            registeredDictionaryID = dictID
 
             // Index resources from every .mdd part.
             var resourceCount = 0
@@ -352,6 +354,12 @@ public final class DictionaryLibrary: @unchecked Sendable {
                 entryCount: entryCount, resourceCount: resourceCount
             )
         } catch {
+            // Entry indexing commits before resource indexing begins. If a
+            // damaged sibling MDD fails later, remove that already-committed
+            // row and its entries as well as the copied folder.
+            if let registeredDictionaryID {
+                try? deleteIndexRows(forDictionaryID: registeredDictionaryID)
+            }
             try? fm.removeItem(at: folder)
             invalidateRecordCache()
             throw error
@@ -361,17 +369,21 @@ public final class DictionaryLibrary: @unchecked Sendable {
     /// Removes a dictionary from Lexicon's index without touching its files.
     /// The app is responsible for moving the folder to the system Trash first.
     public func unregisterDictionary(_ record: DictionaryRecord) throws {
-        try pool.write { db in
-            try db.transaction {
-                try db.run("DELETE FROM entries WHERE dict = ?", [.int(record.id)])
-                try db.run("DELETE FROM resources WHERE dict = ?", [.int(record.id)])
-                try db.run("DELETE FROM dictionaries WHERE id = ?", [.int(record.id)])
-            }
-        }
+        try deleteIndexRows(forDictionaryID: record.id)
         stateLock.lock()
         handles.removeValue(forKey: record.uuid)
         stateLock.unlock()
         invalidateRecordCache()
+    }
+
+    private func deleteIndexRows(forDictionaryID id: Int64) throws {
+        try pool.write { db in
+            try db.transaction {
+                try db.run("DELETE FROM entries WHERE dict = ?", [.int(id)])
+                try db.run("DELETE FROM resources WHERE dict = ?", [.int(id)])
+                try db.run("DELETE FROM dictionaries WHERE id = ?", [.int(id)])
+            }
+        }
     }
 
     /// Renames a dictionary as shown in the app. The dictionary's own files are
@@ -743,11 +755,14 @@ public final class DictionaryLibrary: @unchecked Sendable {
 
     private func looseFile(named name: String, in folder: URL) -> Data? {
         let fileURL = folder.appendingPathComponent(name)
-        // Prevent path traversal outside the dictionary folder.
-        guard fileURL.standardizedFileURL.path.hasPrefix(folder.standardizedFileURL.path + "/") else {
+        // Prevent both `..` traversal and a copied symbolic link from escaping
+        // the dictionary folder.
+        let resolvedFolder = folder.resolvingSymlinksInPath().standardizedFileURL
+        let resolvedFile = fileURL.resolvingSymlinksInPath().standardizedFileURL
+        guard resolvedFile.path.hasPrefix(resolvedFolder.path + "/") else {
             return nil
         }
-        return try? Data(contentsOf: fileURL)
+        return try? Data(contentsOf: resolvedFile)
     }
 
     /// Last-resort lookup for requests that lost their dictionary context
