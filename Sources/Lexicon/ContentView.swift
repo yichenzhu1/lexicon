@@ -210,8 +210,10 @@ struct ContentView: View {
             browserNavigationBar
             interfaceSeparator.frame(height: 1)
             ZStack {
-                if let tab = appState.activeTab {
+                ForEach(appState.residentTabs) { tab in
+                    let isActive = tab.id == appState.activeTabID
                     EntryWebView(
+                        tabID: tab.id,
                         word: tab.word,
                         anchor: tab.location?.anchor,
                         preferredDictionaryUUID: tab.location?.preferredDictionaryUUID,
@@ -220,7 +222,10 @@ struct ContentView: View {
                         zoom: libraryModel.entryZoom,
                         collapsedDictionaries: libraryModel.collapsedDictionaries
                     )
-                    .id(tab.id)
+                    .opacity(isActive ? 1 : 0)
+                    .allowsHitTesting(isActive)
+                    .accessibilityHidden(!isActive)
+                    .zIndex(isActive ? 1 : 0)
                 }
             }
         }

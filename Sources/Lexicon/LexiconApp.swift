@@ -4,7 +4,11 @@ import SwiftUI
 @main
 enum Entry {
     static func main() {
-        if CommandLine.arguments.contains("--smoke-test") {
+        if CommandLine.arguments.contains("--tab-state-test") {
+            exit(TabStateTests.run() ? 0 : 1)
+        } else if CommandLine.arguments.contains("--tab-webview-test") {
+            TabWebViewSmokeTest.run() // never returns
+        } else if CommandLine.arguments.contains("--smoke-test") {
             RenderSmokeTest.run() // never returns
         } else {
             LexiconApp.main()

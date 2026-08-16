@@ -10,6 +10,7 @@ struct EntryWebView: NSViewRepresentable {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var libraryModel: LibraryModel
 
+    let tabID: UUID
     let word: String?
     let anchor: String?
     let preferredDictionaryUUID: String?
@@ -19,7 +20,7 @@ struct EntryWebView: NSViewRepresentable {
     let collapsedDictionaries: Set<String>
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(appState: appState, libraryModel: libraryModel)
+        Coordinator(tabID: tabID, appState: appState, libraryModel: libraryModel)
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -42,6 +43,7 @@ struct EntryWebView: NSViewRepresentable {
         context.coordinator.schemeHandler = schemeHandler
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.identifier = NSUserInterfaceItemIdentifier(tabID.uuidString)
         webView.navigationDelegate = context.coordinator
         webView.setValue(false, forKey: "drawsBackground")
         webView.pageZoom = zoom
@@ -66,11 +68,23 @@ struct EntryWebView: NSViewRepresentable {
         )
     }
 
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.stopLoading()
+        webView.navigationDelegate = nil
+        webView.configuration.userContentController.removeScriptMessageHandler(
+            forName: Coordinator.bridgeMessageName,
+            contentWorld: Coordinator.bridgeWorld
+        )
+        coordinator.schemeHandler = nil
+        coordinator.diagnosticHandler = nil
+    }
+
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         static let bridgeMessageName = "lexiconBridge"
         static let bridgeWorld = WKContentWorld.world(name: "LexiconBridge")
 
+        let tabID: UUID
         var appState: AppState
         var libraryModel: LibraryModel
         var schemeHandler: DictSchemeHandler?
@@ -80,7 +94,8 @@ struct EntryWebView: NSViewRepresentable {
         var diagnosticHandler: ((String, [String: Any]) -> Void)?
         private var loadedToken: String?
 
-        init(appState: AppState, libraryModel: LibraryModel) {
+        init(tabID: UUID, appState: AppState, libraryModel: LibraryModel) {
+            self.tabID = tabID
             self.appState = appState
             self.libraryModel = libraryModel
         }
@@ -126,8 +141,9 @@ struct EntryWebView: NSViewRepresentable {
 
             if host == "page" {
                 if kind == "pageScroll", let offset = payload["offset"] as? Double {
-                    appState.setActiveTabScrollOffset(offset)
+                    recordPageScroll(offset)
                 } else if kind == "collapse",
+                          appState.isActiveTab(tabID),
                           let uuid = payload["dictionaryUUID"] as? String,
                           let collapsed = payload["collapsed"] as? Bool,
                           libraryModel.library?.isKnownDictionaryUUID(uuid) == true {
@@ -163,11 +179,14 @@ struct EntryWebView: NSViewRepresentable {
                 }
 
             case "link":
-                guard let href = payload["href"] as? String else { return }
+                guard appState.isActiveTab(tabID),
+                      let href = payload["href"] as? String
+                else { return }
                 routeDictionaryLink(href, dictionaryUUID: host, webView: message.webView)
 
             case "lookup":
-                guard libraryModel.lookUpOnDoubleClick,
+                guard appState.isActiveTab(tabID),
+                      libraryModel.lookUpOnDoubleClick,
                       let word = payload["word"] as? String
                 else { return }
                 appState.navigate(to: word)
@@ -175,6 +194,12 @@ struct EntryWebView: NSViewRepresentable {
             default:
                 break
             }
+        }
+
+        /// Kept separate from WebKit message decoding so tab ownership can be
+        /// regression-tested without manufacturing a WKScriptMessage.
+        func recordPageScroll(_ offset: Double) {
+            appState.setTabScrollOffset(offset, for: tabID)
         }
 
         func webView(
@@ -191,7 +216,8 @@ struct EntryWebView: NSViewRepresentable {
                 decisionHandler(.allow)
             case "entry", "bword", "sound":
                 decisionHandler(.cancel)
-                if navigationAction.navigationType == .linkActivated {
+                if navigationAction.navigationType == .linkActivated,
+                   appState.isActiveTab(tabID) {
                     routeDictionaryLink(
                         url.absoluteString,
                         dictionaryUUID: navigationAction.sourceFrame.request.url?.host,
@@ -201,7 +227,7 @@ struct EntryWebView: NSViewRepresentable {
             case "https":
                 if navigationAction.navigationType == .linkActivated {
                     decisionHandler(.cancel)
-                    NSWorkspace.shared.open(url)
+                    if appState.isActiveTab(tabID) { NSWorkspace.shared.open(url) }
                 } else if navigationAction.targetFrame == nil
                             || navigationAction.targetFrame?.isMainFrame == true {
                     decisionHandler(.cancel)
@@ -211,7 +237,10 @@ struct EntryWebView: NSViewRepresentable {
                 }
             case "mailto":
                 decisionHandler(.cancel)
-                if navigationAction.navigationType == .linkActivated { NSWorkspace.shared.open(url) }
+                if navigationAction.navigationType == .linkActivated,
+                   appState.isActiveTab(tabID) {
+                    NSWorkspace.shared.open(url)
+                }
             default:
                 decisionHandler(.cancel)
             }

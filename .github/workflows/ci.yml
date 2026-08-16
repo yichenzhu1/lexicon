@@ -28,6 +28,11 @@ jobs:
       - name: Run regression suite
         run: swift run -Xswiftc -warnings-as-errors MdxKitTester
 
+      - name: Run tab residency regression suite
+        run: |
+          swift run -Xswiftc -warnings-as-errors Lexicon --tab-state-test
+          swift run -Xswiftc -warnings-as-errors Lexicon --tab-webview-test
+
       - name: Build and validate app bundle
         run: |
           scripts/make_app.sh release

@@ -37,6 +37,8 @@ struct EntryTab: Identifiable, Equatable {
 /// from the main actor so a substring scan cannot stall typing or animation.
 @MainActor
 final class AppState: ObservableObject {
+    static let maximumResidentTabCount = 3
+
     @Published var searchText = "" { didSet { scheduleSearch() } }
     @Published private(set) var results: [SearchResult] = []
     @Published var selectedWord: String? {
@@ -51,6 +53,8 @@ final class AppState: ObservableObject {
     }
     @Published private(set) var tabs: [EntryTab]
     @Published private(set) var activeTabID: UUID
+    /// Oldest-to-newest list of tabs whose WebKit views should stay mounted.
+    @Published private(set) var residentTabIDs: [UUID]
     @Published var showDictionaryManager = false
 
     let libraryModel: LibraryModel
@@ -68,6 +72,7 @@ final class AppState: ObservableObject {
         let initialTab = EntryTab()
         tabs = [initialTab]
         activeTabID = initialTab.id
+        residentTabIDs = [initialTab.id]
     }
 
     // MARK: - Search
@@ -162,14 +167,20 @@ final class AppState: ObservableObject {
     // MARK: - Browser tabs
 
     var activeTab: EntryTab? { tabs.first { $0.id == activeTabID } }
+    var residentTabs: [EntryTab] {
+        residentTabIDs.compactMap { id in tabs.first { $0.id == id } }
+    }
     var canGoBack: Bool { !(activeTab?.backStack.isEmpty ?? true) }
     var canGoForward: Bool { !(activeTab?.forwardStack.isEmpty ?? true) }
+
+    func isActiveTab(_ id: UUID) -> Bool { activeTabID == id }
 
     func openNewTab() {
         let tab = EntryTab()
         withAnimation(.smooth(duration: 0.2)) {
             tabs.append(tab)
             activeTabID = tab.id
+            touchResidentTab(tab.id)
         }
         synchronizeSelection(to: nil)
         searchText = ""
@@ -177,7 +188,10 @@ final class AppState: ObservableObject {
 
     func activateTab(_ id: UUID) {
         guard let tab = tabs.first(where: { $0.id == id }), id != activeTabID else { return }
-        withAnimation(.smooth(duration: 0.18)) { activeTabID = id }
+        withAnimation(.smooth(duration: 0.18)) {
+            activeTabID = id
+            touchResidentTab(id)
+        }
         synchronizeSelection(to: tab.location?.word)
         synchronizeSearchText(to: tab.location?.word)
     }
@@ -189,10 +203,16 @@ final class AppState: ObservableObject {
             return
         }
         let wasActive = id == activeTabID
-        withAnimation(.smooth(duration: 0.2)) { _ = tabs.remove(at: index) }
+        withAnimation(.smooth(duration: 0.2)) {
+            _ = tabs.remove(at: index)
+            residentTabIDs.removeAll { $0 == id }
+        }
         guard wasActive else { return }
         let next = min(index, tabs.count - 1)
-        withAnimation(.smooth(duration: 0.18)) { activeTabID = tabs[next].id }
+        withAnimation(.smooth(duration: 0.18)) {
+            activeTabID = tabs[next].id
+            touchResidentTab(tabs[next].id)
+        }
         synchronizeSelection(to: tabs[next].location?.word)
         synchronizeSearchText(to: tabs[next].location?.word)
     }
@@ -223,10 +243,19 @@ final class AppState: ObservableObject {
 
     func reloadActiveEntry() { libraryModel.reloadRenderedContent() }
 
-    func setActiveTabScrollOffset(_ offset: Double) {
-        guard let index = tabs.firstIndex(where: { $0.id == activeTabID }) else { return }
+    func setTabScrollOffset(_ offset: Double, for tabID: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
         tabs[index].scrollOffset = max(0, offset)
         tabs[index].location?.scrollOffset = max(0, offset)
+    }
+
+    private func touchResidentTab(_ id: UUID) {
+        guard tabs.contains(where: { $0.id == id }) else { return }
+        residentTabIDs.removeAll { $0 == id }
+        residentTabIDs.append(id)
+        if residentTabIDs.count > Self.maximumResidentTabCount {
+            residentTabIDs.removeFirst(residentTabIDs.count - Self.maximumResidentTabCount)
+        }
     }
 
     private func updateActiveTab(to location: EntryLocation) {

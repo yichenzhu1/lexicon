@@ -141,6 +141,8 @@ the Longman 6 look (palette lifted from `lm6.css`, including dark mode).
 
 ```sh
 swift run MdxKitTester
+swift run Lexicon --tab-state-test
+swift run Lexicon --tab-webview-test
 ```
 
 The Command Line Tools ship neither XCTest nor swift-testing, so tests run
@@ -163,6 +165,8 @@ The suite also covers several things worth knowing about:
 - **Rendering compatibility.** Page tests cover per-dictionary origins,
   structural-tag neutralization, URL/CSS normalization, lazy frames, anchors,
   network policy, and native-bridge isolation.
+- **Tab isolation.** The app-state test checks the three-view MRU limit,
+  eviction and closure, per-tab history, and delayed WebKit scroll messages.
 - **Recovery.** Imports use a staging directory and one index transaction;
   cancellation and startup-reconciliation tests require partial work to be
   removed or moved to the recoverable `Dictionaries/Recovery` directory.

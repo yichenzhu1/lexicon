@@ -26,7 +26,9 @@ enum RenderSmokeTest {
             exit(1)
         }
         let state = AppState(libraryModel: model)
-        let bridge = EntryWebView.Coordinator(appState: state, libraryModel: model)
+        let bridge = EntryWebView.Coordinator(
+            tabID: state.activeTabID, appState: state, libraryModel: model
+        )
         // Installed dictionaries may contain arbitrary remote scripts. The
         // smoke test only needs to prove local loading/execution, so never let
         // it make an outbound request regardless of the user's saved policy.
