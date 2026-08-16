@@ -69,6 +69,34 @@ enum TabStateTests {
             "resident view limit was exceeded"
         )
 
+        // Drag reorder: move the last tab to the front, then back to the end.
+        let remainingIDs = state.tabs.map(\.id)
+        state.moveTab(id: destinationTabID, before: remainingIDs[0])
+        expect(state.tabs.first?.id == destinationTabID, "reorder did not move tab to front")
+        expect(state.tabs.count == remainingIDs.count, "reorder changed the tab count")
+        state.moveTab(id: destinationTabID, before: nil)
+        expect(state.tabs.last?.id == destinationTabID, "reorder did not append at the end")
+
+        // Browser-style positional activation (⌘1 / ⌘9).
+        state.activateTab(at: 0)
+        expect(state.activeTabID == state.tabs.first?.id, "positional activation failed")
+        state.activateLastTab()
+        expect(state.activeTabID == destinationTabID, "last-tab activation failed")
+
+        // Close tabs to the right; the active tab is among them, so the tab at
+        // the boundary takes over.
+        let keeper = state.tabs[0].id
+        let survivor = state.tabs[1].id
+        state.closeTabsToTheRight(of: survivor)
+        expect(state.tabs.map(\.id) == [keeper, survivor], "close-to-the-right kept the wrong tabs")
+        expect(state.activeTabID == survivor, "close-to-the-right did not activate the boundary tab")
+
+        // Close other tabs; only the kept tab survives and becomes active.
+        state.closeOtherTabs(of: keeper)
+        expect(state.tabs.map(\.id) == [keeper], "close-other-tabs kept the wrong tabs")
+        expect(state.activeTabID == keeper, "close-other-tabs did not activate the kept tab")
+        expect(state.residentTabIDs == [keeper], "close-other-tabs left stale resident views")
+
         if failures.isEmpty {
             print("TAB STATE OK")
             return true

@@ -321,6 +321,32 @@ final class LibraryModel: ObservableObject {
     private static let historyLimitKey = "historyLimit"
     private static let networkPolicyKey = "dictionaryNetworkPolicy"
     private static let settingsMigrationKey = "migratedFromOrgLexiconSettings"
+    private static let sidebarWidthKey = "sidebarWidth"
+    private static let sidebarVisibleKey = "sidebarVisible"
+    private static let sidebarModeKey = "sidebarMode"
+    static let defaultSidebarWidth: Double = 248
+
+    /// Sidebar layout is window chrome, not library state, so it lives in the
+    /// settings suite and applies app-wide, like a browser remembering its
+    /// sidebar. Reads are one-shot at window creation; writes happen on change.
+    static var storedSidebarWidth: Double {
+        let stored = settings.double(forKey: sidebarWidthKey)
+        return stored >= 200 && stored <= 380 ? stored : defaultSidebarWidth
+    }
+
+    static var storedSidebarVisible: Bool {
+        settings.object(forKey: sidebarVisibleKey) as? Bool ?? true
+    }
+
+    static var storedSidebarMode: String {
+        settings.string(forKey: sidebarModeKey) ?? "lexicon"
+    }
+
+    static func storeSidebarLayout(width: Double, visible: Bool, mode: String) {
+        settings.set(width, forKey: sidebarWidthKey)
+        settings.set(visible, forKey: sidebarVisibleKey)
+        settings.set(mode, forKey: sidebarModeKey)
+    }
     static let defaultHistoryLimit = 100
     static let historyLimitOptions = [25, 50, 100, 200, 500]
     /// Discrete stops, like a browser's zoom menu.

@@ -219,6 +219,65 @@ final class AppState: ObservableObject {
 
     func closeActiveTabOrWindow() { closeTab(activeTabID) }
 
+    /// Moves a tab in front of `targetID`, or to the end when it is nil.
+    func moveTab(id: UUID, before targetID: UUID?) {
+        guard let from = tabs.firstIndex(where: { $0.id == id }) else { return }
+        var to = targetID.flatMap { target in tabs.firstIndex { $0.id == target } } ?? tabs.count
+        guard to != from, to != from + 1 else { return }
+        withAnimation(.smooth(duration: 0.2)) {
+            let tab = tabs.remove(at: from)
+            if to > from { to -= 1 }
+            tabs.insert(tab, at: to)
+        }
+    }
+
+    /// Keeps the given tab and closes everything else, matching Safari's
+    /// "Close Other Tabs": the kept tab becomes active.
+    func closeOtherTabs(of id: UUID) {
+        guard tabs.count > 1, tabs.contains(where: { $0.id == id }) else { return }
+        withAnimation(.smooth(duration: 0.2)) {
+            tabs.removeAll { $0.id != id }
+            residentTabIDs.removeAll { $0 != id }
+        }
+        guard activeTabID != id else { return }
+        withAnimation(.smooth(duration: 0.18)) {
+            activeTabID = id
+            touchResidentTab(id)
+        }
+        synchronizeSelection(to: tabs.first?.location?.word)
+        synchronizeSearchText(to: tabs.first?.location?.word)
+    }
+
+    func closeTabsToTheRight(of id: UUID) {
+        guard let index = tabs.firstIndex(where: { $0.id == id }),
+              index < tabs.count - 1
+        else { return }
+        let closedActive = tabs[(index + 1)...].contains { $0.id == activeTabID }
+        withAnimation(.smooth(duration: 0.2)) {
+            let removed = tabs[(index + 1)...]
+            tabs.removeSubrange((index + 1)...)
+            residentTabIDs.removeAll { resident in removed.contains { $0.id == resident } }
+        }
+        guard closedActive else { return }
+        withAnimation(.smooth(duration: 0.18)) {
+            activeTabID = id
+            touchResidentTab(id)
+        }
+        synchronizeSelection(to: tabs[index].location?.word)
+        synchronizeSearchText(to: tabs[index].location?.word)
+    }
+
+    /// Browser-style ⌘1…⌘8: activates the tab at a position, if it exists.
+    func activateTab(at index: Int) {
+        guard tabs.indices.contains(index) else { return }
+        activateTab(tabs[index].id)
+    }
+
+    /// Browser-style ⌘9: activates the last tab.
+    func activateLastTab() {
+        if let last = tabs.last { activateTab(last.id) }
+    }
+
     func goBack() {
         guard let index = tabs.firstIndex(where: { $0.id == activeTabID }),
               let destination = tabs[index].backStack.popLast()

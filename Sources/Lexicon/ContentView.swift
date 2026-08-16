@@ -8,12 +8,21 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.colorScheme) private var colorScheme
     @FocusState private var searchFocused: Bool
-    @State private var sidebarMode: SidebarMode = .lexicon
-    @State private var sidebarVisible = true
-    @State private var sidebarWidth: CGFloat = 248
+    @State private var sidebarMode: SidebarMode =
+        SidebarMode(rawValue: LibraryModel.storedSidebarMode) ?? .lexicon
+    /// The section the user was browsing before a query pulled the sidebar
+    /// into results; restored when the search field is cleared.
+    @State private var modeBeforeSearch: SidebarMode?
+    @State private var sidebarVisible = LibraryModel.storedSidebarVisible
+    @State private var sidebarWidth: CGFloat = LibraryModel.storedSidebarWidth
     @State private var sidebarDragStartWidth: CGFloat?
+    /// Two clicks on the divider within a beat reset the sidebar width.
+    @State private var lastDividerTap: Date?
     @State private var windowIsFullScreen = false
     @State private var isDropTargeted = false
+    @State private var zoomHUDVisible = false
+    @State private var zoomHUDTask: Task<Void, Never>?
+    @State private var starPulse = false
 
     /// True while the lookup field holds a query, in which case the sidebar
     /// shows results rather than one of the saved lists.
@@ -102,6 +111,13 @@ struct ContentView: View {
                 // ⌘= is the unshifted twin of ⌘+; browsers accept both.
                 Button("") { libraryModel.zoomIn() }
                     .keyboardShortcut("=", modifiers: .command)
+                // Browser-style tab switching: ⌘1…⌘8 by position, ⌘9 = last.
+                ForEach(1 ... 8, id: \.self) { number in
+                    Button("") { appState.activateTab(at: number - 1) }
+                        .keyboardShortcut(KeyEquivalent(Character("\(number)")), modifiers: .command)
+                }
+                Button("") { appState.activateLastTab() }
+                    .keyboardShortcut("9", modifiers: .command)
             }
             .hidden()
         }
@@ -110,14 +126,48 @@ struct ContentView: View {
             if phase == .active { focusSearchField() }
         }
         .onChange(of: appState.searchText) { _, text in
-            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                withAnimation(.smooth(duration: 0.18)) {
+            let searching = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            withAnimation(.smooth(duration: 0.18)) {
+                if searching {
+                    if sidebarMode != .lexicon { modeBeforeSearch = sidebarMode }
                     sidebarMode = .lexicon
+                } else if let previous = modeBeforeSearch {
+                    sidebarMode = previous
+                    modeBeforeSearch = nil
                 }
             }
         }
         .onChange(of: appState.activeTabID) { _, _ in
             focusSearchField()
+        }
+        .onChange(of: sidebarVisible) { _, _ in persistSidebarLayout() }
+        .onChange(of: sidebarMode) { _, _ in persistSidebarLayout() }
+        .onChange(of: libraryModel.entryZoom) { _, _ in showZoomHUD() }
+        .onChange(of: isCurrentWordStarred) { _, starred in
+            guard starred else { return }
+            withAnimation(.easeOut(duration: 0.12)) { starPulse = true } completion: {
+                withAnimation(.easeOut(duration: 0.18)) { starPulse = false }
+            }
+        }
+    }
+
+    private func persistSidebarLayout() {
+        LibraryModel.storeSidebarLayout(
+            width: Double(sidebarWidth),
+            visible: sidebarVisible,
+            mode: sidebarMode.rawValue
+        )
+    }
+
+    /// Briefly surfaces the new entry text size so ⌘+/⌘-/⌘0 have visible
+    /// feedback; a plain fade, so Reduce Motion needs no special case.
+    private func showZoomHUD() {
+        zoomHUDTask?.cancel()
+        withAnimation(.easeOut(duration: 0.15)) { zoomHUDVisible = true }
+        zoomHUDTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(800))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.3)) { zoomHUDVisible = false }
         }
     }
 
@@ -194,7 +244,25 @@ struct ContentView: View {
                         380
                     )
                 }
-                .onEnded { _ in sidebarDragStartWidth = nil }
+                .onEnded { value in
+                    sidebarDragStartWidth = nil
+                    defer { persistSidebarLayout() }
+                    // A double-tap on the divider restores the default width,
+                    // the standard Mac splitter gesture.
+                    guard abs(value.translation.width) < 2 else {
+                        lastDividerTap = nil
+                        return
+                    }
+                    let now = Date()
+                    if let last = lastDividerTap, now.timeIntervalSince(last) < 0.35 {
+                        withAnimation(.smooth(duration: 0.2)) {
+                            sidebarWidth = CGFloat(LibraryModel.defaultSidebarWidth)
+                        }
+                        lastDividerTap = nil
+                    } else {
+                        lastDividerTap = now
+                    }
+                }
         )
     }
 
@@ -226,6 +294,24 @@ struct ContentView: View {
                     .allowsHitTesting(isActive)
                     .accessibilityHidden(!isActive)
                     .zIndex(isActive ? 1 : 0)
+                }
+            }
+            .overlay {
+                if zoomHUDVisible {
+                    Text("\(Int((libraryModel.entryZoom * 100).rounded()))%")
+                        .font(.system(size: 13, weight: .semibold))
+                        .monospacedDigit()
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(
+                            .regularMaterial,
+                            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        )
+                        .padding(14)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .accessibilityLabel(
+                            "Entry text size \(Int((libraryModel.entryZoom * 100).rounded())) percent"
+                        )
                 }
             }
         }
@@ -266,6 +352,7 @@ struct ContentView: View {
                 }
             } label: {
                 Image(systemName: bookmarkIconName)
+                    .scaleEffect(starPulse ? 1.22 : 1)
                     .frame(width: 28, height: 28)
                     .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             }
@@ -301,7 +388,7 @@ struct ContentView: View {
             TextField(
                 "",
                 text: $appState.searchText,
-                prompt: searchFocused ? nil : Text("Search all dictionaries…")
+                prompt: Text("Search all dictionaries…")
             )
                 .textFieldStyle(.plain)
                 .focused($searchFocused)
@@ -309,6 +396,11 @@ struct ContentView: View {
                     if let first = appState.results.first {
                         appState.selectedWord = first.normalizedKey
                     }
+                }
+                .onKeyPress(.escape) {
+                    guard !appState.searchText.isEmpty else { return .ignored }
+                    appState.searchText = ""
+                    return .handled
                 }
                 .onKeyPress(.downArrow) {
                     moveSelection(by: 1)
@@ -370,11 +462,10 @@ struct ContentView: View {
     @ViewBuilder
     private var sidebar: some View {
         VStack(spacing: 0) {
-            sidebarModeMenu
-                .padding(.leading, 13)
-                .padding(.trailing, 8)
+            sidebarModePicker
+                .padding(.horizontal, 12)
                 .padding(.top, 11)
-                .padding(.bottom, 4)
+                .padding(.bottom, 6)
 
             sidebarStatusBar
 
@@ -382,7 +473,7 @@ struct ContentView: View {
                 LazyVStack(alignment: .leading, spacing: 2) {
                     if sidebarMode == .lexicon {
                         if !isSearching {
-                            EmptyView()
+                            placeholderRow(emptyListMessage)
                         } else if appState.results.isEmpty {
                             placeholderRow("No matches")
                         } else {
@@ -414,45 +505,14 @@ struct ContentView: View {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
-    private var sidebarModeMenu: some View {
-        Menu {
-            Button {
-                sidebarMode = .lexicon
-            } label: {
-                Label("Lexicon", systemImage: sidebarMode == .lexicon ? "checkmark" : "text.book.closed")
+    private var sidebarModePicker: some View {
+        Picker("Sidebar section", selection: $sidebarMode) {
+            ForEach(SidebarMode.allCases, id: \.self) { mode in
+                Text(mode.title).tag(mode)
             }
-            Button {
-                sidebarMode = .history
-            } label: {
-                Label("History", systemImage: sidebarMode == .history ? "checkmark" : "clock")
-            }
-            Button {
-                sidebarMode = .starred
-            } label: {
-                Label("Starred", systemImage: sidebarMode == .starred ? "checkmark" : "star")
-            }
-        } label: {
-            HStack(spacing: 7) {
-                Image(systemName: sidebarMode.iconName)
-                    .font(.system(size: 14, weight: .medium))
-                    .frame(width: 18)
-                Text(sidebarMode.title)
-                    .font(.system(size: 14, weight: .semibold))
-                Spacer(minLength: 8)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 9)
-            .frame(height: 36)
-            .background {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(Color.primary.opacity(0.055))
-            }
-            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
-        .menuStyle(.borderlessButton)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .pickerStyle(.segmented)
+        .labelsHidden()
         .accessibilityLabel("Sidebar section")
         .accessibilityValue(sidebarMode.title)
     }
@@ -736,7 +796,7 @@ private final class WindowChromeProbeView: NSView {
     }
 }
 
-private enum SidebarMode: Hashable {
+private enum SidebarMode: String, CaseIterable {
     case lexicon
     case history
     case starred
@@ -746,14 +806,6 @@ private enum SidebarMode: Hashable {
         case .lexicon: "Lexicon"
         case .history: "History"
         case .starred: "Starred"
-        }
-    }
-
-    var iconName: String {
-        switch self {
-        case .lexicon: "text.book.closed"
-        case .history: "clock"
-        case .starred: "star"
         }
     }
 }
@@ -770,6 +822,8 @@ private struct BrowserTabBar: View {
     private let spacing: CGFloat = 2
     @Namespace private var activeTabBackground
     @State private var hoveredTabIDs: Set<UUID> = []
+    /// The tab a reorder drag is hovering over; drives the insertion indicator.
+    @State private var dropTargetTabID: UUID?
 
     var body: some View {
         GeometryReader { proxy in
@@ -802,6 +856,28 @@ private struct BrowserTabBar: View {
                                 removal: .opacity.combined(with: .scale(scale: 0.96))
                             )
                         )
+                        // Drag to reorder, like a browser tab strip. Dropping
+                        // on a tab inserts before it; the strip tail appends.
+                        .draggable(tab.id.uuidString)
+                        .dropDestination(for: String.self) { items, _ in
+                            guard let first = items.first,
+                                  let uuid = UUID(uuidString: first)
+                            else { return false }
+                            appState.moveTab(id: uuid, before: tab.id)
+                            return true
+                        } isTargeted: { targeted in
+                            withAnimation(.easeOut(duration: 0.12)) {
+                                dropTargetTabID = targeted ? tab.id : nil
+                            }
+                        }
+                        .overlay(alignment: .leading) {
+                            if dropTargetTabID == tab.id {
+                                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                                    .fill(Color.accentColor)
+                                    .frame(width: 3, height: 20)
+                                    .accessibilityLabel("Move tab here")
+                            }
+                        }
                 }
 
                 Button {
@@ -815,8 +891,22 @@ private struct BrowserTabBar: View {
                 .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
                 .help("New Tab")
                 .accessibilityLabel("New Tab")
+                .dropDestination(for: String.self) { items, _ in
+                    guard let first = items.first,
+                          let uuid = UUID(uuidString: first)
+                    else { return false }
+                    appState.moveTab(id: uuid, before: nil)
+                    return true
+                } isTargeted: { _ in }
 
                 Spacer(minLength: 0)
+                    .dropDestination(for: String.self) { items, _ in
+                        guard let first = items.first,
+                              let uuid = UUID(uuidString: first)
+                        else { return false }
+                        appState.moveTab(id: uuid, before: nil)
+                        return true
+                    } isTargeted: { _ in }
             }
             .animation(.smooth(duration: 0.2), value: appState.tabs.map(\.id))
         }
@@ -900,8 +990,54 @@ private struct BrowserTabBar: View {
                 hoveredTabIDs.remove(tab.id)
             }
         }
+        .overlay {
+            MiddleClickClose { appState.closeTab(tab.id) }
+        }
+        .contextMenu {
+            Button("Close Tab") { appState.closeTab(tab.id) }
+            Button("Close Other Tabs") { appState.closeOtherTabs(of: tab.id) }
+                .disabled(appState.tabs.count <= 1)
+            Button("Close Tabs to the Right") { appState.closeTabsToTheRight(of: tab.id) }
+                .disabled(appState.tabs.last?.id == tab.id)
+        }
         .animation(.smooth(duration: 0.18), value: isActive)
         .animation(.easeOut(duration: 0.12), value: isHovered)
+    }
+}
+
+/// SwiftUI has no middle-click API, so tab middle-click close is forwarded
+/// from AppKit. The view is transparent to every other event, including
+/// left-clicks, which keeps the tab's own buttons fully functional.
+private struct MiddleClickClose: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> MiddleClickView {
+        let view = MiddleClickView()
+        view.action = action
+        return view
+    }
+
+    func updateNSView(_ nsView: MiddleClickView, context: Context) {
+        nsView.action = action
+    }
+}
+
+private final class MiddleClickView: NSView {
+    var action: () -> Void = {}
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard NSApp.currentEvent?.type == .otherMouseDown,
+              NSApp.currentEvent?.buttonNumber == 2
+        else { return nil }
+        return super.hitTest(point)
+    }
+
+    override func otherMouseDown(with event: NSEvent) {
+        if event.buttonNumber == 2 {
+            action()
+        } else {
+            super.otherMouseDown(with: event)
+        }
     }
 }
 

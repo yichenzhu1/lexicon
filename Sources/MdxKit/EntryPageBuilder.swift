@@ -51,6 +51,8 @@ public enum EntryPageBuilder {
             let uuid = dictionary.uuid.lowercased()
             return "<button type=\"button\" data-jump=\"\(escape(uuid))\">\(escape(dictionary.title))</button>"
         }.joined(separator: "\n"))
+        <span class="lexicon-jump-spacer"></span>
+        <button type="button" class="lexicon-toggle-all" aria-label="Collapse all dictionaries">Collapse all</button>
         </nav>
         """ : ""
 
@@ -61,9 +63,13 @@ public enum EntryPageBuilder {
           :root { color-scheme:light dark; }
           html { overflow-y:auto; overscroll-behavior:contain; }
           body { font-family:-apple-system,"Helvetica Neue",sans-serif; margin:0; padding:12px 16px 24px; }
-          details { margin:0; background:transparent; }
-          details + details { border-top:1px solid rgba(128,128,128,.28); margin-top:12px; padding-top:12px; }
-          summary { cursor:pointer; padding:7px 2px 9px; font-weight:600; font-size:13px; user-select:none; }
+          h1.lexicon-headword { font-size:20px; font-weight:700; letter-spacing:-0.02em; margin:2px 2px 10px; }
+          details { margin:0 0 10px; padding:4px 10px 10px; background:rgba(128,128,128,.08);
+            border:1px solid rgba(128,128,128,.22); border-radius:10px; }
+          details:not([open]) { padding-bottom:4px; }
+          summary { cursor:pointer; padding:6px; font-weight:600; font-size:13px; user-select:none;
+            border-radius:7px; }
+          summary:hover { background:rgba(128,128,128,.10); }
           iframe { display:block; width:100%; border:0; height:44px; background:transparent; }
           details:not([open]) iframe { display:none; }
           .lexicon-jump { position:sticky; top:0; z-index:5; display:flex; gap:6px; overflow-x:auto;
@@ -75,8 +81,13 @@ public enum EntryPageBuilder {
             background:transparent; cursor:pointer; }
           .lexicon-jump button:hover,.lexicon-jump button[data-current="1"] { opacity:1; }
           .lexicon-jump button[data-current="1"] { background:rgba(128,128,128,.16); }
+          .lexicon-jump-spacer { flex:1 0 auto; }
+          .lexicon-jump .lexicon-toggle-all { border-style:none; text-decoration:none; }
+          .lexicon-jump .lexicon-toggle-all:hover { background:rgba(128,128,128,.16); }
           @media (prefers-reduced-motion:reduce) { * { scroll-behavior:auto!important; } }
-        </style></head><body>\(jumpBar)\(cards)
+        </style></head><body>
+        <h1 class="lexicon-headword">\(escape(normalizedKey))</h1>
+        \(jumpBar)\(cards)
         <script>
         (() => {
           const frames = new Map(Array.from(document.querySelectorAll('iframe[data-uuid]'))
@@ -116,13 +127,35 @@ public enum EntryPageBuilder {
             scrollTo({ top:Math.max(0, top - 8), behavior:behavior === 'smooth' ? 'smooth' : 'auto' });
           };
 
-          const buttons = Array.from(document.querySelectorAll('.lexicon-jump button'));
+          const buttons = Array.from(document.querySelectorAll('.lexicon-jump button[data-jump]'));
           buttons.forEach(button => button.addEventListener('click', () => {
             const card = document.getElementById('dict-' + button.dataset.jump);
             if (!card) return;
             card.open = true; load(card.querySelector('iframe'));
             card.scrollIntoView({ block:'start', behavior:'smooth' });
           }));
+
+          // Expand/collapse every card at once. Programmatic `open` changes
+          // fire toggle events, so lazy loading and the native collapse-state
+          // bridge stay in sync without extra work.
+          const toggleAll = document.querySelector('.lexicon-toggle-all');
+          function refreshToggleAll() {
+            if (!toggleAll) return;
+            const anyOpen = Array.from(document.querySelectorAll('details[data-uuid]'))
+              .some(card => card.open);
+            const label = anyOpen ? 'Collapse all' : 'Expand all';
+            toggleAll.textContent = label;
+            toggleAll.setAttribute('aria-label', label + ' dictionaries');
+          }
+          toggleAll?.addEventListener('click', () => {
+            const cards = Array.from(document.querySelectorAll('details[data-uuid]'));
+            const open = !cards.some(card => card.open);
+            cards.forEach(card => { card.open = open; });
+            refreshToggleAll();
+          });
+          document.querySelectorAll('details[data-uuid]').forEach(card =>
+            card.addEventListener('toggle', refreshToggleAll));
+          refreshToggleAll();
           function markCurrent() {
             const bar = document.querySelector('.lexicon-jump');
             const cutoff = (bar?.getBoundingClientRect().bottom || 0) + 4;
@@ -187,10 +220,18 @@ public enum EntryPageBuilder {
     }
 
     public static func welcomeDocument(hasDictionaries: Bool) -> String {
-        let message = hasDictionaries
-            ? "Type a word in the search field to look it up in all enabled dictionaries at once."
-            : "No dictionaries yet. Open <b>Dictionaries</b> and import an .mdx file with its companions."
-        return messageDocument(title: "Lexicon", message: message)
+        if hasDictionaries {
+            return messageDocument(
+                title: "Lexicon",
+                message: "Type a word in the search field to look it up in all enabled dictionaries at once.",
+                hint: "Press ⌘F to jump to the search field."
+            )
+        }
+        return messageDocument(
+            title: "Welcome to Lexicon",
+            message: "No dictionaries yet. Open <b>Dictionaries</b> and import an .mdx file with its companions.",
+            hint: "You can also drag an .mdx file onto this window."
+        )
     }
 
     public static func normalizeEntryHTML(_ html: String) -> String {
@@ -309,13 +350,16 @@ public enum EntryPageBuilder {
             + "connect-src 'self'\(connections); " + frame
     }
 
-    private static func messageDocument(title: String, message: String) -> String {
-        """
+    private static func messageDocument(title: String, message: String, hint: String? = nil) -> String {
+        let hintHTML = hint.map { "<p class=\"hint\">\($0)</p>" } ?? ""
+        return """
         <!doctype html><html><head><meta charset="utf-8"><style>
         :root{color-scheme:light dark} body{font-family:-apple-system,sans-serif;display:flex;align-items:center;
-        justify-content:center;height:90vh;margin:0}.box{max-width:400px;text-align:center;opacity:.75}
-        h1{font-size:20px;font-weight:600}p{font-size:14px;line-height:1.5}</style></head>
-        <body><div class="box"><h1>\(title)</h1><p>\(message)</p></div></body></html>
+        justify-content:center;height:90vh;margin:0}.box{max-width:400px;text-align:center}
+        h1{font-size:22px;font-weight:700;letter-spacing:-.02em;margin:0 0 8px}
+        p{font-size:14px;line-height:1.5;color:GrayText;margin:0}
+        p.hint{font-size:12px;margin-top:16px}</style></head>
+        <body><div class="box"><h1>\(title)</h1><p>\(message)</p>\(hintHTML)</div></body></html>
         """
     }
 
