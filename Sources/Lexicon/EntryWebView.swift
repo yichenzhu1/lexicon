@@ -1,14 +1,19 @@
+import AppKit
 import MdxKit
 import SwiftUI
 import WebKit
 
-/// The detail web view: shows the stacked per-dictionary cards for the
-/// selected word, and routes entry://, sound:// and external links.
+/// Renders the app-owned results page and isolated dictionary frames. The
+/// bridge lives in a named WKContentWorld, so page scripts cannot invoke the
+/// native message handler or inspect sibling dictionaries.
 struct EntryWebView: NSViewRepresentable {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var libraryModel: LibraryModel
 
     let word: String?
+    let anchor: String?
+    let preferredDictionaryUUID: String?
+    let initialScrollOffset: Double
     let contentVersion: Int
     let zoom: Double
     let collapsedDictionaries: Set<String>
@@ -19,32 +24,60 @@ struct EntryWebView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        configuration.userContentController.add(
-            context.coordinator, name: Coordinator.linkMessageName
+        let controller = configuration.userContentController
+        controller.add(
+            context.coordinator,
+            contentWorld: Coordinator.bridgeWorld,
+            name: Coordinator.bridgeMessageName
         )
-        configuration.setURLSchemeHandler(
-            DictSchemeHandler(libraryModel: libraryModel), forURLScheme: DictSchemeHandler.scheme
-        )
+        controller.addUserScript(WKUserScript(
+            source: Coordinator.bridgeScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false,
+            in: Coordinator.bridgeWorld
+        ))
+
+        let schemeHandler = DictSchemeHandler(libraryModel: libraryModel)
+        configuration.setURLSchemeHandler(schemeHandler, forURLScheme: DictSchemeHandler.scheme)
+        context.coordinator.schemeHandler = schemeHandler
+
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
-        webView.setValue(false, forKey: "drawsBackground") // blend with window
+        webView.setValue(false, forKey: "drawsBackground")
         webView.pageZoom = zoom
-        context.coordinator.load(word: word, version: contentVersion, into: webView, force: true)
+        context.coordinator.load(
+            word: word, anchor: anchor, preferredDictionaryUUID: preferredDictionaryUUID,
+            initialScrollOffset: initialScrollOffset,
+            version: contentVersion, into: webView, force: true
+        )
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.appState = appState
         context.coordinator.libraryModel = libraryModel
+        context.coordinator.schemeHandler?.allowHTTPS =
+            libraryModel.dictionaryNetworkPolicy == .allowHTTPS
         if webView.pageZoom != zoom { webView.pageZoom = zoom }
-        context.coordinator.load(word: word, version: contentVersion, into: webView, force: false)
+        context.coordinator.load(
+            word: word, anchor: anchor, preferredDictionaryUUID: preferredDictionaryUUID,
+            initialScrollOffset: initialScrollOffset,
+            version: contentVersion, into: webView, force: false
+        )
     }
 
+    @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
-        static let linkMessageName = "lexiconLink"
+        static let bridgeMessageName = "lexiconBridge"
+        static let bridgeWorld = WKContentWorld.world(name: "LexiconBridge")
 
         var appState: AppState
         var libraryModel: LibraryModel
+        var schemeHandler: DictSchemeHandler?
+        var networkPolicyOverride: LibraryModel.DictionaryNetworkPolicy?
+        /// Test-only observer used by the offscreen WebKit harness. Production
+        /// pages never receive the diagnostic user script that emits it.
+        var diagnosticHandler: ((String, [String: Any]) -> Void)?
         private var loadedToken: String?
 
         init(appState: AppState, libraryModel: LibraryModel) {
@@ -52,25 +85,96 @@ struct EntryWebView: NSViewRepresentable {
             self.libraryModel = libraryModel
         }
 
-        func load(word: String?, version: Int, into webView: WKWebView, force: Bool) {
-            let token = "\(version)|\(word ?? "")"
+        func load(
+            word: String?, anchor: String?, preferredDictionaryUUID: String?,
+            initialScrollOffset: Double,
+            version: Int, into webView: WKWebView, force: Bool
+        ) {
+            let token = "\(version)|\(word ?? "")|\(anchor ?? "")|\(preferredDictionaryUUID ?? "")"
             guard force || token != loadedToken else { return }
             loadedToken = token
-
+            let allowHTTPS = (networkPolicyOverride ?? libraryModel.dictionaryNetworkPolicy) == .allowHTTPS
             let html: String
             if let word, let library = libraryModel.library {
                 html = EntryPageBuilder.resultsDocument(
-                    for: word,
-                    library: library,
-                    collapsedDictionaries: libraryModel.collapsedDictionaries
+                    for: word, library: library,
+                    collapsedDictionaries: libraryModel.collapsedDictionaries,
+                    anchor: anchor,
+                    preferredDictionaryUUID: preferredDictionaryUUID,
+                    initialScrollOffset: initialScrollOffset,
+                    allowHTTPS: allowHTTPS
                 )
             } else {
                 html = EntryPageBuilder.welcomeDocument(
                     hasDictionaries: !libraryModel.dictionaries.isEmpty
                 )
             }
-            // Host "d" keeps the outer page same-origin with entry iframes.
-            webView.loadHTMLString(html, baseURL: URL(string: "dict://d/page"))
+            webView.loadHTMLString(html, baseURL: URL(string: "dict://page/results"))
+        }
+
+        func userContentController(
+            _ userContentController: WKUserContentController,
+            didReceive message: WKScriptMessage
+        ) {
+            guard message.name == Self.bridgeMessageName,
+                  let payload = message.body as? [String: Any],
+                  let kind = payload["kind"] as? String,
+                  let frameURL = message.frameInfo.request.url,
+                  frameURL.scheme?.lowercased() == DictSchemeHandler.scheme,
+                  let host = frameURL.host?.lowercased()
+            else { return }
+
+            if host == "page" {
+                if kind == "pageScroll", let offset = payload["offset"] as? Double {
+                    appState.setActiveTabScrollOffset(offset)
+                } else if kind == "collapse",
+                          let uuid = payload["dictionaryUUID"] as? String,
+                          let collapsed = payload["collapsed"] as? Bool,
+                          libraryModel.library?.isKnownDictionaryUUID(uuid) == true {
+                    libraryModel.setDictionary(uuid, collapsed: collapsed)
+                }
+                return
+            }
+            guard libraryModel.library?.isKnownDictionaryUUID(host) == true else { return }
+
+            switch kind {
+            case "diagnostic":
+                diagnosticHandler?(host, payload)
+
+            case "height":
+                guard let height = payload["height"] as? Double else { return }
+                let script = "window.__lexiconSetFrameHeight?.('\(host)',\(height));"
+                message.webView?.evaluateJavaScript(script)
+
+            case "scroll":
+                let offset = payload["offset"] as? Double ?? 0
+                let behavior = payload["behavior"] as? String == "smooth" ? "smooth" : "auto"
+                let mode = payload["mode"] as? String ?? "element"
+                if mode == "by" {
+                    message.webView?.evaluateJavaScript("window.scrollBy(0,\(offset));")
+                } else if mode == "home" {
+                    message.webView?.evaluateJavaScript("window.scrollTo(0,0);")
+                } else if mode == "end" {
+                    message.webView?.evaluateJavaScript("window.scrollTo(0,document.documentElement.scrollHeight);")
+                } else {
+                    message.webView?.evaluateJavaScript(
+                        "window.__lexiconScrollFrame?.('\(host)',\(offset),'\(behavior)');"
+                    )
+                }
+
+            case "link":
+                guard let href = payload["href"] as? String else { return }
+                routeDictionaryLink(href, dictionaryUUID: host, webView: message.webView)
+
+            case "lookup":
+                guard libraryModel.lookUpOnDoubleClick,
+                      let word = payload["word"] as? String
+                else { return }
+                appState.navigate(to: word)
+
+            default:
+                break
+            }
         }
 
         func webView(
@@ -79,126 +183,213 @@ struct EntryWebView: NSViewRepresentable {
             decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void
         ) {
             guard let url = navigationAction.request.url else {
-                decisionHandler(.allow)
-                return
+                decisionHandler(.cancel); return
             }
-
-            switch url.scheme?.lowercased() {
+            let scheme = url.scheme?.lowercased()
+            switch scheme {
             case "dict", "about", "blob", "data", nil:
                 decisionHandler(.allow)
-
-            case "entry", "bword":
-                // Cross-reference link to another headword.
+            case "entry", "bword", "sound":
                 decisionHandler(.cancel)
-                routeDictionaryLink(
-                    url.absoluteString,
-                    dictionaryUUID: dictionaryUUID(for: navigationAction)
-                )
-
-            case "sound":
+                if navigationAction.navigationType == .linkActivated {
+                    routeDictionaryLink(
+                        url.absoluteString,
+                        dictionaryUUID: navigationAction.sourceFrame.request.url?.host,
+                        webView: webView
+                    )
+                }
+            case "https":
+                if navigationAction.navigationType == .linkActivated {
+                    decisionHandler(.cancel)
+                    NSWorkspace.shared.open(url)
+                } else if navigationAction.targetFrame == nil
+                            || navigationAction.targetFrame?.isMainFrame == true {
+                    decisionHandler(.cancel)
+                } else {
+                    let policy = networkPolicyOverride ?? libraryModel.dictionaryNetworkPolicy
+                    decisionHandler(policy == .allowHTTPS ? .allow : .cancel)
+                }
+            case "mailto":
                 decisionHandler(.cancel)
-                routeDictionaryLink(
-                    url.absoluteString,
-                    dictionaryUUID: dictionaryUUID(for: navigationAction)
-                )
-
-            case "http", "https", "mailto":
-                decisionHandler(.cancel)
-                NSWorkspace.shared.open(url)
-
+                if navigationAction.navigationType == .linkActivated { NSWorkspace.shared.open(url) }
             default:
                 decisionHandler(.cancel)
             }
         }
 
-        func userContentController(
-            _ userContentController: WKUserContentController,
-            didReceive message: WKScriptMessage
+        private func routeDictionaryLink(
+            _ rawLink: String, dictionaryUUID: String?, webView: WKWebView? = nil
         ) {
-            guard message.name == Self.linkMessageName,
-                  let payload = message.body as? [String: Any]
-            else { return }
-
-            if payload["kind"] as? String == "collapse" {
-                guard let uuid = payload["dictionaryUUID"] as? String,
-                      let collapsed = payload["collapsed"] as? Bool
-                else { return }
-                libraryModel.setDictionary(uuid, collapsed: collapsed)
-                return
-            }
-
-            if payload["kind"] as? String == "lookup" {
-                // Gated here rather than in the injected script so the
-                // preference applies to already-rendered entries.
-                guard libraryModel.lookUpOnDoubleClick,
-                      let word = payload["word"] as? String
-                else { return }
-                appState.navigate(to: word)
-                return
-            }
-
-            guard let href = payload["href"] as? String else { return }
-            routeDictionaryLink(
-                href,
-                dictionaryUUID: payload["dictionaryUUID"] as? String
-            )
-        }
-
-        private func routeDictionaryLink(_ rawLink: String, dictionaryUUID: String?) {
             let trimmed = rawLink.trimmingCharacters(in: .whitespacesAndNewlines)
-            let scheme = trimmed.split(separator: ":", maxSplits: 1)
-                .first.map { $0.lowercased() } ?? ""
-
+            let scheme = trimmed.split(separator: ":", maxSplits: 1).first?.lowercased() ?? ""
             switch scheme {
             case "entry", "bword":
-                let word = referencedName(in: trimmed, keepFragment: false)
-                if !word.isEmpty { appState.navigate(to: word) }
-
+                let target = referencedName(in: trimmed, keepFragment: true)
+                let pieces = target.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)
+                let word = pieces.first.map(String.init) ?? ""
+                let anchor = pieces.count > 1 ? String(pieces[1]) : nil
+                if word.isEmpty, let anchor, let dictionaryUUID {
+                    scrollToAnchor(anchor, dictionaryUUID: dictionaryUUID, webView: webView)
+                } else if !word.isEmpty {
+                    appState.navigate(to: word, anchor: anchor, preferredDictionaryUUID: dictionaryUUID)
+                }
             case "sound":
                 guard let dictionaryUUID else { return }
-                // Keep the fragment: OALD-style MDDs name their audio files
-                // with a literal '#' (e.g. "_apple#_gbs_2.mp3").
                 let path = referencedName(in: trimmed, keepFragment: true)
-                if !path.isEmpty {
-                    libraryModel.playAudio(path: path, dictionaryUUID: dictionaryUUID)
-                }
-
+                if !path.isEmpty { libraryModel.playAudio(path: path, dictionaryUUID: dictionaryUUID) }
             case "http", "https", "mailto":
                 if let url = URL(string: trimmed) { NSWorkspace.shared.open(url) }
-
             default:
                 break
             }
         }
 
-        private func dictionaryUUID(for navigationAction: WKNavigationAction) -> String? {
-            guard let sourceURL = navigationAction.sourceFrame.request.url else { return nil }
-            return Self.dictionaryUUID(fromFrameURL: sourceURL)
+        private func scrollToAnchor(
+            _ anchor: String, dictionaryUUID: String, webView: WKWebView?
+        ) {
+            // Fragment-only links are normally handled in the isolated script.
+            // This fallback covers navigation-delegate links from legacy pages.
+            guard let encoded = try? JSONSerialization.data(withJSONObject: anchor),
+                  let literal = String(data: encoded, encoding: .utf8)
+            else { return }
+            let script = """
+            (() => { const f=document.querySelector('iframe[data-uuid="\(dictionaryUUID.lowercased())"]');
+              if (!f) return; f.contentWindow?.postMessage({kind:'lexicon-anchor',anchor:\(literal)}, '*'); })();
+            """
+            webView?.evaluateJavaScript(script)
         }
 
-        /// Extracts "pron/apple.wav" from sound://pron/apple.wav, sound:pron/apple.wav,
-        /// or the word from entry://colour. Raw strings preserve literal '#'
-        /// characters used by some MDD audio resource names.
         private func referencedName(in rawLink: String, keepFragment: Bool) -> String {
             var name = rawLink
-            if let colon = name.firstIndex(of: ":") {
-                name = String(name[name.index(after: colon)...])
-            }
+            if let colon = name.firstIndex(of: ":") { name = String(name[name.index(after: colon)...]) }
             while name.hasPrefix("/") { name.removeFirst() }
-            if !keepFragment, let hash = name.firstIndex(of: "#") {
-                name = String(name[..<hash])
-            }
-            if let query = name.firstIndex(of: "?") {
-                name = String(name[..<query])
-            }
-            name = name.removingPercentEncoding ?? name
-            return name.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+            if !keepFragment, let hash = name.firstIndex(of: "#") { name = String(name[..<hash]) }
+            if let query = name.firstIndex(of: "?") { name = String(name[..<query]) }
+            return (name.removingPercentEncoding ?? name)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
         }
 
-        static func dictionaryUUID(fromFrameURL url: URL) -> String? {
-            guard url.scheme == DictSchemeHandler.scheme else { return nil }
-            let parts = url.path.split(separator: "/").map(String.init)
-            return parts.first
-        }
+        static let bridgeScript = #"""
+        (() => {
+          const send = payload => { try { webkit.messageHandlers.lexiconBridge.postMessage(payload); } catch (_) {} };
+          const host = location.hostname.toLowerCase();
+          const ready = callback => document.readyState === 'loading'
+            ? addEventListener('DOMContentLoaded', callback, {once:true}) : callback();
+
+          if (host === 'page') {
+            ready(() => {
+              document.querySelectorAll('details[data-uuid]').forEach(card => {
+                card.addEventListener('toggle', () => send({kind:'collapse', dictionaryUUID:card.dataset.uuid,
+                  collapsed:!card.open}));
+              });
+              let pending = false;
+              addEventListener('scroll', () => {
+                if (pending) return; pending = true;
+                requestAnimationFrame(() => { pending = false; send({kind:'pageScroll', offset:scrollY}); });
+              }, {passive:true});
+            });
+            return;
+          }
+
+          let scheduled = false, settleTimer = 0;
+          function measure(deep) {
+            scheduled = false;
+            const root = document.documentElement, body = document.body;
+            if (!root || !body) return;
+            let height = Math.max(root.scrollHeight, body.scrollHeight, root.offsetHeight, body.offsetHeight);
+            if (deep) {
+              let bottom = 0;
+              document.querySelectorAll('*').forEach(element => {
+                const style = getComputedStyle(element);
+                if (style.visibility === 'hidden' || style.position === 'fixed') return;
+                for (const rect of element.getClientRects()) bottom = Math.max(bottom, rect.bottom);
+              });
+              height = Math.max(height, bottom + (parseFloat(getComputedStyle(body).paddingBottom) || 0));
+            }
+            send({kind:'height', height:Math.ceil(height)});
+          }
+          function requestMeasure() {
+            if (!scheduled) { scheduled = true; requestAnimationFrame(() => measure(false)); }
+            clearTimeout(settleTimer); settleTimer = setTimeout(() => measure(true), 240);
+          }
+          ready(() => {
+            new ResizeObserver(requestMeasure).observe(document.documentElement);
+            if (document.body) {
+              new ResizeObserver(requestMeasure).observe(document.body);
+              new MutationObserver(requestMeasure).observe(document.body,
+                {subtree:true, childList:true, attributes:true, characterData:true});
+            }
+            document.querySelectorAll('img,video,audio').forEach(item => {
+              item.addEventListener('load', requestMeasure); item.addEventListener('error', requestMeasure);
+            });
+            document.fonts?.ready.then(requestMeasure);
+            ['click','toggle','input','change','transitionend','animationend'].forEach(name =>
+              document.addEventListener(name, requestMeasure, true));
+            requestMeasure();
+            const anchor = new URLSearchParams(location.search).get('anchor');
+            if (anchor) setTimeout(() => {
+              let target = document.getElementById(anchor);
+              if (!target) { try { target = document.querySelector(`[name="${CSS.escape(anchor)}"]`); } catch (_) {} }
+              if (target) send({kind:'scroll', mode:'element', offset:target.getBoundingClientRect().top,
+                behavior:'auto'});
+            }, 80);
+          });
+          addEventListener('resize', requestMeasure);
+          visualViewport?.addEventListener('resize', requestMeasure);
+          addEventListener('message', event => {
+            if (event.data?.kind !== 'lexicon-anchor' || typeof event.data.anchor !== 'string') return;
+            const anchor = event.data.anchor;
+            let target = document.getElementById(anchor);
+            if (!target) { try { target = document.querySelector(`[name="${CSS.escape(anchor)}"]`); } catch (_) {} }
+            if (target) send({kind:'scroll', mode:'element', offset:target.getBoundingClientRect().top,
+              behavior:'auto'});
+          });
+
+          addEventListener('click', event => {
+            if (!event.isTrusted) return;
+            const link = event.target?.closest?.('a[href],area[href]');
+            if (!link) return;
+            const href = (link.getAttribute('href') || '').trim();
+            const lower = href.toLowerCase();
+            if (href.startsWith('#') || lower.startsWith('entry://#') || lower.startsWith('bword://#')) {
+              const raw = href.startsWith('#') ? href.slice(1) : href.slice(href.indexOf('#') + 1);
+              let id = raw; try { id = decodeURIComponent(raw); } catch (_) {}
+              const target = document.getElementById(id) || document.querySelector(`[name="${CSS.escape(id)}"]`);
+              if (target) send({kind:'scroll', mode:'element', offset:target.getBoundingClientRect().top,
+                behavior:getComputedStyle(document.documentElement).scrollBehavior});
+              event.preventDefault(); event.stopImmediatePropagation(); return;
+            }
+            const scheme = href.includes(':') ? href.slice(0, href.indexOf(':')).toLowerCase() : '';
+            if (['entry','bword','sound','http','https','mailto'].includes(scheme)) {
+              event.preventDefault(); event.stopImmediatePropagation(); send({kind:'link', href});
+            }
+          }, true);
+          addEventListener('dblclick', event => {
+            if (!event.isTrusted || event.target?.closest?.('a[href],input,textarea,select,[contenteditable]')) return;
+            const word = String(getSelection()?.toString() || '').trim();
+            if (word && word.length <= 64 && !/\s/.test(word)) send({kind:'lookup', word});
+          }, true);
+          addEventListener('wheel', event => {
+            if (!event.deltaX && !event.deltaY) return;
+            send({kind:'scroll', mode:'by', offset:event.deltaY}); event.preventDefault();
+          }, {passive:false, capture:true});
+          addEventListener('keydown', event => {
+            if (!event.isTrusted || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey
+                || event.target?.matches?.('input,textarea,select,[contenteditable]')) return;
+            const page = Math.max(120, innerHeight * .85);
+            if (event.key === 'PageDown') send({kind:'scroll', mode:'by', offset:page});
+            else if (event.key === 'PageUp') send({kind:'scroll', mode:'by', offset:-page});
+            else if (event.key === 'Home') send({kind:'scroll', mode:'home'});
+            else if (event.key === 'End') send({kind:'scroll', mode:'end'});
+            else return;
+            event.preventDefault();
+          }, true);
+          addEventListener('lexicon-scroll-request', event => {
+            const detail = event.detail || {};
+            send({kind:'scroll', mode:detail.kind === 'by' ? 'by' : 'element', offset:detail.value || 0,
+              behavior:detail.behavior || 'auto'});
+          });
+        })();
+        """#
     }
 }

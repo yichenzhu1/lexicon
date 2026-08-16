@@ -10,10 +10,25 @@ Run from the repo root:  python3 tools/make_fixtures.py
 import os
 import struct
 import sys
+import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "writemdict"))
 
+import writemdict as writemdict_module  # noqa: E402
 from writemdict import MDictWriter  # noqa: E402
+
+
+# MDict stores the creation date in every header. A fixed date keeps fixture
+# regeneration byte-for-byte reproducible.
+class FixtureDate(datetime.date):
+    fixture_day = 4
+
+    @classmethod
+    def today(cls):
+        return cls(2026, 8, cls.fixture_day)
+
+
+writemdict_module.datetime.date = FixtureDate
 
 OUT = os.path.join(os.path.dirname(__file__), "..", "Tests", "Fixtures")
 
@@ -97,6 +112,7 @@ def main():
     # Headwords whose distinguishing character lives outside the Basic
     # Multilingual Plane. Prefix search bounds the key range byte-wise, so
     # these catch an upper bound that sorts below astral UTF-8 sequences.
+    FixtureDate.fixture_day = 6
     write("astral.mdx", MDictWriter(
         {
             "test": "<div>plain ASCII headword</div>",
@@ -106,6 +122,16 @@ def main():
         },
         title="Astral Plane Dictionary",
         description="Headwords above U+FFFF",
+        block_size=256,
+    ))
+    FixtureDate.fixture_day = 4
+
+    write("multipart.mdx", MDictWriter(
+        {
+            "reverse": '<link rel="stylesheet" href="reverse.css"><div class="reverse">reverse</div>',
+        },
+        title="Multipart Resource Dictionary",
+        description="MDD ordering fixture",
         block_size=256,
     ))
 
@@ -120,6 +146,23 @@ def main():
             resources, title=f"{base} resources",
             description="MDD fixture", is_mdd=True,
         ))
+
+    # Base-volume resources must precede multipart.1.mdd resources. Keeping
+    # the stylesheet in the base volume catches lexical/open-order mismatches.
+    write("multipart.mdd", MDictWriter(
+        {
+            "\\reverse.css": b'.reverse { color: rgb(12, 34, 56); }\n',
+            "\\duplicate.txt": b"base volume wins",
+        },
+        title="multipart base resources", description="MDD base fixture", is_mdd=True,
+    ))
+    write("multipart.1.mdd", MDictWriter(
+        {
+            "\\part-one.txt": b"numbered volume",
+            "\\duplicate.txt": b"numbered duplicate",
+        },
+        title="multipart numbered resources", description="MDD part fixture", is_mdd=True,
+    ))
 
 
 if __name__ == "__main__":

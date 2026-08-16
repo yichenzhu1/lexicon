@@ -5,6 +5,10 @@ private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self
 
 /// Thin wrapper over the system SQLite, just enough for the keyword index.
 public final class SQLiteDB {
+    private final class ProgressCancellation {
+        let isCancelled: @Sendable () -> Bool
+        init(_ isCancelled: @escaping @Sendable () -> Bool) { self.isCancelled = isCancelled }
+    }
     public enum SQLiteError: LocalizedError {
         case open(String)
         case prepare(String, String)
@@ -64,6 +68,24 @@ public final class SQLiteDB {
             try? exec("ROLLBACK")
             throw error
         }
+    }
+
+    /// Installs a temporary SQLite VM progress callback. Returning nonzero
+    /// interrupts a long scan, allowing obsolete incremental searches to stop
+    /// consuming CPU instead of merely discarding their eventual result.
+    public func withProgressCancellation<T>(
+        _ isCancelled: @escaping @Sendable () -> Bool,
+        body: () throws -> T
+    ) throws -> T {
+        let box = ProgressCancellation(isCancelled)
+        let opaque = Unmanaged.passUnretained(box).toOpaque()
+        sqlite3_progress_handler(handle, 1_000, { context in
+            guard let context else { return 0 }
+            return Unmanaged<ProgressCancellation>.fromOpaque(context)
+                .takeUnretainedValue().isCancelled() ? 1 : 0
+        }, opaque)
+        defer { sqlite3_progress_handler(handle, 0, nil, nil) }
+        return try withExtendedLifetime(box) { try body() }
     }
 
     public var lastInsertRowID: Int64 { sqlite3_last_insert_rowid(handle) }

@@ -8,6 +8,7 @@ public enum MdictTextEncoding: String, Sendable {
     case gb18030
     case big5
     case latin1
+    case windows1252
 
     static func from(headerValue: String) -> MdictTextEncoding {
         switch headerValue.uppercased() {
@@ -15,7 +16,8 @@ public enum MdictTextEncoding: String, Sendable {
         case "UTF-16", "UTF16", "UTF-16LE": return .utf16le
         case "GBK", "GB2312", "GB18030": return .gb18030
         case "BIG5", "BIG-5": return .big5
-        case "ISO8859-1", "ISO-8859-1", "LATIN1", "WINDOWS-1252", "CP1252": return .latin1
+        case "ISO8859-1", "ISO-8859-1", "LATIN1": return .latin1
+        case "WINDOWS-1252", "WINDOWS1252", "CP1252": return .windows1252
         default: return .utf8
         }
     }
@@ -28,6 +30,7 @@ public enum MdictTextEncoding: String, Sendable {
         case .utf8: return .utf8
         case .utf16le: return .utf16LittleEndian
         case .latin1: return .isoLatin1
+        case .windows1252: return .windowsCP1252
         case .gb18030:
             let cf = CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
             return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cf))
@@ -37,7 +40,7 @@ public enum MdictTextEncoding: String, Sendable {
         }
     }
 
-    func decode(_ data: Data) throws -> String {
+    public func decode(_ data: Data) throws -> String {
         if let s = String(data: data, encoding: stringEncoding) { return s }
         // Fall back to lossy UTF-8 rather than failing the whole entry.
         if let s = String(data: data, encoding: .utf8) { return s }

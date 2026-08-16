@@ -14,6 +14,18 @@ import SwiftUI
 /// caches, and two windows writing `history.json` over each other.
 @MainActor
 final class LibraryModel: ObservableObject {
+    enum DictionaryNetworkPolicy: String, CaseIterable, Identifiable {
+        case offlineOnly
+        case allowHTTPS
+
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .offlineOnly: return "Offline only"
+            case .allowHTTPS: return "Allow HTTPS content"
+            }
+        }
+    }
     @Published private(set) var dictionaries: [DictionaryRecord] = []
     @Published private(set) var history: [String] = []
     @Published private(set) var starred: [String] = []
@@ -26,11 +38,18 @@ final class LibraryModel: ObservableObject {
     @Published private(set) var removingDictionaryIDs: Set<Int64> = []
     /// Bumped whenever rendered content may change (dictionary set edited).
     @Published private(set) var contentVersion = 0
+    @Published var dictionaryNetworkPolicy: DictionaryNetworkPolicy = LibraryModel.storedNetworkPolicy() {
+        didSet {
+            Self.settings.set(dictionaryNetworkPolicy.rawValue, forKey: Self.networkPolicyKey)
+            if dictionaryNetworkPolicy != oldValue { contentVersion += 1 }
+        }
+    }
 
     let library: DictionaryLibrary?
 
     private var audioPlayer: AVAudioPlayer?
     private let importQueue = DispatchQueue(label: "lexicon.import", qos: .userInitiated)
+    private var importCancellation: ImportCancellationToken?
     /// Resolved headwords, keyed by normalized key. `displayWord` is called
     /// from view bodies for every history row, tab and starred card, so an
     /// uncached lookup ran a SQL query per row on every keystroke.
@@ -54,6 +73,9 @@ final class LibraryModel: ObservableObject {
         }
         loadSidecarLists()
         reloadDictionaries()
+        if let warnings = library?.startupWarnings, !warnings.isEmpty {
+            errorMessage = warnings.joined(separator: "\n")
+        }
     }
 
     // MARK: - Dictionaries
@@ -70,17 +92,25 @@ final class LibraryModel: ObservableObject {
     func importDictionaries(at urls: [URL]) {
         guard let library else { return }
         isImporting = true
+        let cancellation = ImportCancellationToken()
+        importCancellation = cancellation
         importStatus = "Starting import…"
         importFraction = nil
         importQueue.async { [weak self] in
             var failures: [String] = []
             var withoutResources: [String] = []
+            var importWarnings: [String] = []
             for url in urls {
                 let scoped = url.startAccessingSecurityScopedResource()
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
                 do {
                     let name = url.deletingPathExtension().lastPathComponent
-                    let record = try library.importDictionary(from: url) { update in
+                    let record = try library.importDictionary(from: url, cancellation: cancellation) { update in
+                        if update.stage.hasPrefix("Warning:") {
+                            importWarnings.append(
+                                "\(name): " + String(update.stage.dropFirst("Warning: ".count))
+                            )
+                        }
                         let text = update.total > 0
                             ? "\(name): \(update.stage) \(update.completed.formatted()) of \(update.total.formatted())"
                             : "\(name): \(update.stage)"
@@ -93,12 +123,16 @@ final class LibraryModel: ObservableObject {
                         withoutResources.append(record.title)
                     }
                 } catch {
-                    failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
+                    if !(error is CancellationError) {
+                        failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
+                    }
                 }
+                if cancellation.isCancelled { break }
             }
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.isImporting = false
+                self.importCancellation = nil
                 self.importStatus = ""
                 self.importFraction = nil
                 var problems: [String] = []
@@ -115,12 +149,21 @@ final class LibraryModel: ObservableObject {
                         + "if the entries look incomplete."
                     )
                 }
+                if !importWarnings.isEmpty {
+                    problems.append("Some referenced files were not found:\n" + importWarnings.joined(separator: "\n"))
+                }
                 if !problems.isEmpty {
                     self.errorMessage = problems.joined(separator: "\n\n")
                 }
                 self.dictionariesChanged()
             }
         }
+    }
+
+    func cancelImport() {
+        importCancellation?.cancel()
+        importStatus = "Cancelling import…"
+        importFraction = nil
     }
 
     func rename(_ record: DictionaryRecord, to title: String) {
@@ -228,7 +271,7 @@ final class LibraryModel: ObservableObject {
         // already live in Application Support/Lexicon and need no migration.
         if !current.bool(forKey: settingsMigrationKey),
            let legacy = UserDefaults(suiteName: "org.lexicon.Lexicon.settings") {
-            for key in [zoomKey, lookUpKey, collapsedKey, historyLimitKey]
+            for key in [zoomKey, lookUpKey, collapsedKey, historyLimitKey, networkPolicyKey]
             where current.object(forKey: key) == nil {
                 if let value = legacy.object(forKey: key) {
                     current.set(value, forKey: key)
@@ -258,10 +301,13 @@ final class LibraryModel: ObservableObject {
     ///
     /// Deliberately does not bump `contentVersion`: collapsing a card must not
     /// reload the page out from under the click that caused it.
-    @Published private(set) var collapsedDictionaries: Set<String> =
-        Set(LibraryModel.settings.stringArray(forKey: LibraryModel.collapsedKey) ?? [])
+    @Published private(set) var collapsedDictionaries: Set<String> = Set(
+        (LibraryModel.settings.stringArray(forKey: LibraryModel.collapsedKey) ?? [])
+            .map { $0.lowercased() }
+    )
 
     func setDictionary(_ uuid: String, collapsed: Bool) {
+        let uuid = uuid.lowercased()
         let changed = collapsed
             ? collapsedDictionaries.insert(uuid).inserted
             : collapsedDictionaries.remove(uuid) != nil
@@ -273,6 +319,7 @@ final class LibraryModel: ObservableObject {
     private static let lookUpKey = "lookUpOnDoubleClick"
     private static let collapsedKey = "collapsedDictionaries"
     private static let historyLimitKey = "historyLimit"
+    private static let networkPolicyKey = "dictionaryNetworkPolicy"
     private static let settingsMigrationKey = "migratedFromOrgLexiconSettings"
     static let defaultHistoryLimit = 100
     static let historyLimitOptions = [25, 50, 100, 200, 500]
@@ -295,6 +342,11 @@ final class LibraryModel: ObservableObject {
     private static func storedHistoryLimit() -> Int {
         let stored = settings.integer(forKey: historyLimitKey)
         return historyLimitOptions.contains(stored) ? stored : defaultHistoryLimit
+    }
+
+    private static func storedNetworkPolicy() -> DictionaryNetworkPolicy {
+        guard let raw = settings.string(forKey: networkPolicyKey) else { return .allowHTTPS }
+        return DictionaryNetworkPolicy(rawValue: raw) ?? .allowHTTPS
     }
 
     var canZoomIn: Bool { entryZoom < Self.zoomSteps[Self.zoomSteps.count - 1] }
@@ -331,6 +383,7 @@ final class LibraryModel: ObservableObject {
         setZoom(1.0)
         lookUpOnDoubleClick = true
         setHistoryLimit(Self.defaultHistoryLimit)
+        dictionaryNetworkPolicy = .allowHTTPS
         if !collapsedDictionaries.isEmpty {
             collapsedDictionaries.removeAll()
             Self.settings.removeObject(forKey: Self.collapsedKey)
@@ -367,19 +420,27 @@ final class LibraryModel: ObservableObject {
             else { return [] }
             return list
         }
-        let storedHistory = load(historyURL)
+        let storedHistory = load(historyURL).map(DictionaryLibrary.normalizeKey).filter { !$0.isEmpty }
         var seenHistory = Set<String>()
         let uniqueHistory = storedHistory.filter { seenHistory.insert($0).inserted }
         history = Array(uniqueHistory.prefix(historyLimit))
         if history != storedHistory {
             save(history, to: historyURL)
         }
-        starred = load(starredURL)
+        let storedStarred = load(starredURL).map(DictionaryLibrary.normalizeKey).filter { !$0.isEmpty }
+        var seenStarred = Set<String>()
+        starred = storedStarred.filter { seenStarred.insert($0).inserted }
+        if starred != storedStarred { save(starred, to: starredURL) }
     }
 
     private func save(_ list: [String], to url: URL?) {
-        guard let url, let data = try? JSONEncoder().encode(list) else { return }
-        try? data.write(to: url, options: .atomic)
+        guard let url else { return }
+        do {
+            let data = try JSONEncoder().encode(list)
+            try data.write(to: url, options: .atomic)
+        } catch {
+            errorMessage = "Could not save your Lexicon data: \(error.localizedDescription)"
+        }
     }
 
     func recordHistory(_ word: String) {
@@ -412,8 +473,8 @@ final class LibraryModel: ObservableObject {
     }
 
     func toggleStar(_ word: String) {
-        if let index = starred.firstIndex(of: word) {
-            starred.remove(at: index)
+        if starred.contains(word) {
+            starred.removeAll { $0 == word }
         } else {
             starred.insert(word, at: 0)
         }
@@ -425,13 +486,14 @@ final class LibraryModel: ObservableObject {
     func playAudio(path: String, dictionaryUUID: String) {
         guard let library else { return }
         do {
-            guard let data = try library.resource(path: path, dictionaryUUID: dictionaryUUID) else {
+            guard let resource = try library.resource(path: path, dictionaryUUID: dictionaryUUID) else {
+                errorMessage = "Audio resource not found: \(path)"
                 return
             }
-            audioPlayer = try AVAudioPlayer(data: data)
+            audioPlayer = try AVAudioPlayer(data: resource.data)
             audioPlayer?.play()
         } catch {
-            // Unsupported codec (e.g. .spx) — ignore silently.
+            errorMessage = "Could not play this dictionary audio: \(error.localizedDescription)"
         }
     }
 }

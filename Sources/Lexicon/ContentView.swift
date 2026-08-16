@@ -210,17 +210,17 @@ struct ContentView: View {
             browserNavigationBar
             interfaceSeparator.frame(height: 1)
             ZStack {
-                ForEach(appState.tabs) { tab in
+                if let tab = appState.activeTab {
                     EntryWebView(
                         word: tab.word,
+                        anchor: tab.location?.anchor,
+                        preferredDictionaryUUID: tab.location?.preferredDictionaryUUID,
+                        initialScrollOffset: tab.scrollOffset,
                         contentVersion: libraryModel.contentVersion,
                         zoom: libraryModel.entryZoom,
                         collapsedDictionaries: libraryModel.collapsedDictionaries
                     )
-                    .opacity(tab.id == appState.activeTabID ? 1 : 0)
-                    .allowsHitTesting(tab.id == appState.activeTabID)
-                    .accessibilityHidden(tab.id != appState.activeTabID)
-                    .zIndex(tab.id == appState.activeTabID ? 1 : 0)
+                    .id(tab.id)
                 }
             }
         }

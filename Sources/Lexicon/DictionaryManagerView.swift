@@ -104,6 +104,7 @@ struct DictionaryManagerView: View {
                 libraryModel.rename(dictionary, to: draftTitle)
                 dictionaryPendingRename = nil
             }
+            .disabled(draftTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } message: { _ in
             Text("Only the name shown in Lexicon changes; the dictionary files are untouched.")
         }
@@ -132,6 +133,8 @@ struct DictionaryManagerView: View {
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
+                Button("Cancel") { libraryModel.cancelImport() }
+                    .buttonStyle(.borderless)
             }
             // Determinate once the entry count is known; the header supplies it.
             if let fraction = libraryModel.importFraction {
@@ -172,13 +175,15 @@ private struct DictionaryRow: View {
                     Text("\(dictionary.entryCount.formatted()) entries")
                     Text("·")
                     if dictionary.hasResources {
-                        Text("\(dictionary.resourceCount.formatted()) resources")
+                        Text("\(dictionary.totalResourceCount.formatted()) resources")
+                            .help(dictionary.looseResourceCount > 0
+                                ? "Includes \(dictionary.looseResourceCount.formatted()) loose companion file(s), such as same-name CSS or JavaScript."
+                                : "Resources indexed from MDD companion files.")
                     } else {
-                        // The usual cause is the .mdd not being beside the .mdx.
                         Label("No resources", systemImage: "exclamationmark.triangle")
                             .help(
-                                "No .mdd companion was found at import, so images, "
-                                + "audio and stylesheets are unavailable."
+                                "No MDD resources or loose companion files were found at import, "
+                                + "so images, audio and stylesheets may be unavailable."
                             )
                     }
                     Text("·")

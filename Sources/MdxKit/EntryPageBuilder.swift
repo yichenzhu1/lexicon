@@ -1,585 +1,351 @@
 import Foundation
 
-/// Builds the HTML shown in the entry web view: an outer page with one
-/// collapsible card per dictionary, each hosting the dictionary's own HTML in
-/// a same-origin iframe (so per-dictionary CSS can't leak between entries).
+/// Builds the two-layer entry UI. The outer results document is app-owned;
+/// every dictionary is rendered in its own `dict://<uuid>` origin so absolute
+/// paths stay dictionary-local and scripts cannot reach sibling entries.
 public enum EntryPageBuilder {
-    /// Outer page listing every enabled dictionary that has the word.
-    /// - Parameter collapsedDictionaries: UUIDs whose cards start folded.
     public static func resultsDocument(
         for normalizedKey: String,
         library: DictionaryLibrary,
-        collapsedDictionaries: Set<String> = []
+        collapsedDictionaries: Set<String> = [],
+        anchor: String? = nil,
+        preferredDictionaryUUID: String? = nil,
+        initialScrollOffset: Double = 0,
+        allowHTTPS: Bool = true
     ) -> String {
         let hits = (try? library.entries(forNormalizedKey: normalizedKey)) ?? []
         guard !hits.isEmpty else {
-            return messageDocument(
-                title: escape(normalizedKey),
-                message: "No entry found in the enabled dictionaries."
-            )
+            return messageDocument(title: escape(normalizedKey), message: "No entry found in the enabled dictionaries.")
         }
 
-        // One card per dictionary, keeping the user's dictionary order.
         var seen = Set<String>()
-        var orderedDictionaries: [(uuid: String, title: String)] = []
-        for hit in hits where !seen.contains(hit.dictionaryUUID) {
-            seen.insert(hit.dictionaryUUID)
-            orderedDictionaries.append((hit.dictionaryUUID, hit.dictionaryTitle))
+        var dictionaries: [(uuid: String, title: String)] = []
+        for hit in hits where seen.insert(hit.dictionaryUUID.lowercased()).inserted {
+            dictionaries.append((hit.dictionaryUUID, hit.dictionaryTitle))
         }
-
-        let encodedWord = normalizedKey.addingPercentEncoding(
-            withAllowedCharacters: .alphanumerics
-        ) ?? normalizedKey
-
-        let cards = orderedDictionaries.map { dict in
-            let encodedUUID = dict.uuid.addingPercentEncoding(
-                withAllowedCharacters: Self.urlPathUnreserved
-            ) ?? dict.uuid
-            let isOpen = collapsedDictionaries.contains(dict.uuid) ? "" : " open"
+        let word = normalizedKey.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? normalizedKey
+        let targetUUID = dictionaries.contains {
+            $0.uuid.caseInsensitiveCompare(preferredDictionaryUUID ?? "") == .orderedSame
+        } ? preferredDictionaryUUID?.lowercased() : dictionaries.first?.uuid.lowercased()
+        let anchorAllowed = CharacterSet.urlQueryAllowed
+            .subtracting(CharacterSet(charactersIn: "&=+#"))
+        let anchorQuery = anchor?.addingPercentEncoding(withAllowedCharacters: anchorAllowed)
+        let collapsedUUIDs = Set(collapsedDictionaries.map { $0.lowercased() })
+        let cards = dictionaries.map { dictionary in
+            let uuid = dictionary.uuid.lowercased()
+            let anchorSuffix = uuid == targetUUID && anchorQuery != nil ? "&anchor=\(anchorQuery!)" : ""
+            let source = "dict://\(uuid)/entry?word=\(word)\(anchorSuffix)"
+            let isAnchorTarget = uuid == targetUUID && anchorQuery != nil
+            let open = isAnchorTarget || !collapsedUUIDs.contains(uuid) ? " open" : ""
             return """
-            <details\(isOpen) id="dict-\(escape(dict.uuid))" data-uuid="\(escape(dict.uuid))">
-              <summary>\(escape(dict.title))</summary>
-              <iframe src="dict://d/\(encodedUUID)/entry?word=\(encodedWord)"
-                      scrolling="no"></iframe>
+            <details\(open) id="dict-\(escape(uuid))" data-uuid="\(escape(uuid))">
+              <summary>\(escape(dictionary.title))</summary>
+              <iframe data-uuid="\(escape(uuid))" data-src="\(escape(source))"
+                      title="\(escape(dictionary.title))" scrolling="no"></iframe>
             </details>
             """
         }.joined(separator: "\n")
-
-        // With one dictionary the jump bar is pure chrome.
-        let jumpBar = orderedDictionaries.count > 1
-            ? """
-            <nav class="lexicon-jump" aria-label="Jump to dictionary">
-            \(orderedDictionaries.map { dict in
-                """
-                  <button type="button" data-jump="\(escape(dict.uuid))">\(escape(dict.title))</button>
-                """
-            }.joined(separator: "\n"))
-            </nav>
-            """
-            : ""
+        let jumpBar = dictionaries.count > 1 ? """
+        <nav class="lexicon-jump" aria-label="Jump to dictionary">
+        \(dictionaries.map { dictionary in
+            let uuid = dictionary.uuid.lowercased()
+            return "<button type=\"button\" data-jump=\"\(escape(uuid))\">\(escape(dictionary.title))</button>"
+        }.joined(separator: "\n"))
+        </nav>
+        """ : ""
 
         return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta charset="utf-8">
-        <meta http-equiv="Content-Security-Policy"
-              content="default-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+        <!doctype html><html><head><meta charset="utf-8">
+        <meta http-equiv="Content-Security-Policy" content="\(contentSecurityPolicy(allowHTTPS: allowHTTPS, outerPage: true))">
         <style>
-          :root { color-scheme: light dark; }
-          html {
-            overflow-y: auto;
-            overscroll-behavior: contain;
-          }
-          body {
-            font-family: -apple-system, "Helvetica Neue", sans-serif;
-            margin: 0; padding: 12px 16px 24px;
-          }
-          details {
-            margin: 0;
-            background: transparent;
-          }
-          details + details {
-            border-top: 1px solid rgba(128,128,128,0.28);
-            margin-top: 12px;
-            padding-top: 12px;
-          }
-          summary {
-            cursor: pointer;
-            padding: 7px 2px 9px;
-            font-weight: 600;
-            font-size: 13px;
-            user-select: none;
-            background: transparent;
-          }
-          iframe {
-            display: block;
-            width: 100%;
-            border: 0;
-            height: 1px;
-            background: transparent;
-          }
-          /* Sticky jump bar: with several dictionaries the same card is often
-             several screens down. */
-          .lexicon-jump {
-            position: sticky;
-            top: 0;
-            z-index: 5;
-            display: flex;
-            gap: 6px;
-            overflow-x: auto;
-            scrollbar-width: none;
-            margin: -12px -16px 8px;
-            padding: 8px 16px;
-            background: Canvas;
-            border-bottom: 1px solid rgba(128,128,128,0.22);
-          }
-          .lexicon-jump::-webkit-scrollbar { display: none; }
-          .lexicon-jump button {
-            flex: 0 0 auto;
-            font: inherit;
-            font-size: 11px;
-            font-weight: 600;
-            color: inherit;
-            opacity: 0.65;
-            padding: 3px 9px;
-            border: 1px solid rgba(128,128,128,0.35);
-            border-radius: 999px;
-            background: transparent;
-            cursor: pointer;
-          }
-          .lexicon-jump button:hover { opacity: 1; }
-          .lexicon-jump button[data-current="1"] {
-            opacity: 1;
-            border-color: rgba(128,128,128,0.75);
-            background: rgba(128,128,128,0.16);
-          }
-          @media (prefers-reduced-motion: reduce) {
-            .lexicon-jump button { transition: none; }
-          }
-        </style>
-        </head>
-        <body>
-        \(jumpBar)
-        \(cards)
+          :root { color-scheme:light dark; }
+          html { overflow-y:auto; overscroll-behavior:contain; }
+          body { font-family:-apple-system,"Helvetica Neue",sans-serif; margin:0; padding:12px 16px 24px; }
+          details { margin:0; background:transparent; }
+          details + details { border-top:1px solid rgba(128,128,128,.28); margin-top:12px; padding-top:12px; }
+          summary { cursor:pointer; padding:7px 2px 9px; font-weight:600; font-size:13px; user-select:none; }
+          iframe { display:block; width:100%; border:0; height:44px; background:transparent; }
+          details:not([open]) iframe { display:none; }
+          .lexicon-jump { position:sticky; top:0; z-index:5; display:flex; gap:6px; overflow-x:auto;
+            scrollbar-width:none; margin:-12px -16px 8px; padding:8px 16px; background:Canvas;
+            border-bottom:1px solid rgba(128,128,128,.22); }
+          .lexicon-jump::-webkit-scrollbar { display:none; }
+          .lexicon-jump button { flex:0 0 auto; font:inherit; font-size:11px; font-weight:600; color:inherit;
+            opacity:.65; padding:3px 9px; border:1px solid rgba(128,128,128,.35); border-radius:999px;
+            background:transparent; cursor:pointer; }
+          .lexicon-jump button:hover,.lexicon-jump button[data-current="1"] { opacity:1; }
+          .lexicon-jump button[data-current="1"] { background:rgba(128,128,128,.16); }
+          @media (prefers-reduced-motion:reduce) { * { scroll-behavior:auto!important; } }
+        </style></head><body>\(jumpBar)\(cards)
         <script>
-          function hookFrame(f) {
-            let observedDocument = null;
-            let resizeObserver = null;
-            let mutationObserver = null;
-            let settleTimer = null;
-            let resizePending = false;
-            let intrinsicMeasureScheduled = false;
-            function finishIntrinsicMeasure() {
-              // requestAnimationFrame is suspended for offscreen WKWebViews,
-              // so the timeout is also a required non-visual fallback.
-              if (!intrinsicMeasureScheduled) return;
-              intrinsicMeasureScheduled = false;
-              resizeNow(true);
-            }
-            function renderedContentBottom(doc) {
-              const body = doc.body;
-              const win = doc.defaultView;
-              if (!body || !win) return 0;
-              let bottom = 0;
-              // Repacked dictionaries sometimes put expandable content in
-              // positioned wrappers that do not contribute to scrollHeight.
-              Array.from(body.querySelectorAll('*'))
-                .forEach(function (element) {
-                  const rects = element.getClientRects();
-                  if (!rects.length) return;
-                  const style = win.getComputedStyle(element);
-                  if (style.visibility === 'hidden' || style.position === 'fixed') return;
-                  Array.from(rects).forEach(function (rect) {
-                    if (rect.width > 0 || rect.height > 0) {
-                      bottom = Math.max(bottom, rect.bottom + win.scrollY);
-                    }
-                  });
-                });
-              // Include direct text nodes and the body's visual bottom
-              // padding without counting the iframe-sized body box itself.
-              try {
-                const range = doc.createRange();
-                range.selectNodeContents(body);
-                Array.from(range.getClientRects()).forEach(function (rect) {
-                  bottom = Math.max(bottom, rect.bottom + win.scrollY);
-                });
-              } catch (_) {}
-              const paddingBottom = parseFloat(win.getComputedStyle(body).paddingBottom) || 0;
-              return bottom + paddingBottom;
-            }
-            function resize(measureIntrinsic) {
-              if (resizePending || intrinsicMeasureScheduled) return;
-              if (measureIntrinsic) {
-                // WebKit does not synchronously propagate a new iframe
-                // viewport into the child document. Give it two layout frames
-                // before reading descendant rects, otherwise large legacy
-                // panels are measured against the old, clipped viewport.
-                intrinsicMeasureScheduled = true;
-                f.style.height = '10000px';
-                requestAnimationFrame(function () {
-                  requestAnimationFrame(function () {
-                    finishIntrinsicMeasure();
-                  });
-                });
-                setTimeout(finishIntrinsicMeasure, 50);
-                return;
-              }
-              resizeNow(false);
-            }
-            function resizeNow(measureIntrinsic) {
-              if (resizePending) return;
-              resizePending = true;
-              try {
-                const doc = f.contentDocument;
-                if (!doc || !doc.documentElement) {
-                  f.dataset.sizeState = 'nodoc';
-                  return;
-                }
-                const body = doc.body;
-                const root = doc.documentElement;
-                const renderedHeight = renderedContentBottom(doc);
-                const viewportBoundHeight = Math.max(
-                  body ? body.scrollHeight : 0,
-                  body ? body.offsetHeight : 0,
-                  root.scrollHeight,
-                  root.offsetHeight
-                );
-                const intrinsicHeight = measureIntrinsic && renderedHeight > 0
-                  ? renderedHeight
-                  : Math.max(viewportBoundHeight, renderedHeight);
-                // A single dictionary should use the available result area
-                // instead of leaving a dead band below a short iframe. Longer
-                // content still grows past this floor and scrolls as one page.
-                const frameTop = Math.max(0, f.getBoundingClientRect().top);
-                const outerViewportHeight = document.documentElement.clientHeight || window.innerHeight;
-                const viewportFloor = document.querySelectorAll('iframe').length === 1
-                  ? Math.max(44, outerViewportHeight - frameTop - 24)
-                  : 44;
-                const h = Math.max(intrinsicHeight, viewportFloor);
-                f.style.height = Math.max(44, Math.ceil(h)) + 'px';
-                f.dataset.sizeState = 'ok:' + h;
-              } catch (e) {
-                f.dataset.sizeState = 'err:' + String(e);
-              } finally {
-                resizePending = false;
-              }
-            }
-            function forwardWheel(event) {
-              if (!event.deltaX && !event.deltaY) return;
-              window.scrollBy(event.deltaX, event.deltaY);
-              event.preventDefault();
-            }
-            function forwardNavigationKey(event) {
-              if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
-              const target = event.target;
-              if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
-              const page = Math.max(120, window.innerHeight * 0.85);
-              if (event.key === 'PageDown') window.scrollBy(0, page);
-              else if (event.key === 'PageUp') window.scrollBy(0, -page);
-              else if (event.key === 'Home') window.scrollTo(0, 0);
-              else if (event.key === 'End') window.scrollTo(0, document.documentElement.scrollHeight);
-              else return;
-              event.preventDefault();
-            }
-            function settle() {
-              if (settleTimer) clearTimeout(settleTimer);
-              // Measure once after the final mutation/event in a legacy
-              // animation. Debouncing guarantees both opening and closing
-              // receive an intrinsic pass without keeping a sentinel active.
-              settleTimer = setTimeout(function () {
-                settleTimer = null;
-                resize(true);
-              }, 300);
-            }
-            function attach() {
-              resize(true);
-              try {
-                if (f.contentDocument && observedDocument !== f.contentDocument) {
-                  const frameDocument = f.contentDocument;
-                  if (resizeObserver) resizeObserver.disconnect();
-                  if (mutationObserver) mutationObserver.disconnect();
-                  resizeObserver = new ResizeObserver(function () { resize(false); });
-                  resizeObserver.observe(frameDocument.documentElement);
-                  if (frameDocument.body) resizeObserver.observe(frameDocument.body);
-                  mutationObserver = new MutationObserver(function () {
-                    // Attribute-heavy legacy animations can mutate every
-                    // frame. Keep the current viewport stable while they run;
-                    // `settle` performs one intrinsic pass at the end.
-                    resize(false);
-                    settle();
-                  });
-                  if (frameDocument.body) {
-                    mutationObserver.observe(frameDocument.body, {
-                      childList: true, subtree: true, attributes: true,
-                      characterData: true
-                    });
-                  }
-                  // Capture interaction before legacy handlers run. The first
-                  // interval tick happens after they have changed the DOM.
-                  ['click', 'toggle', 'input', 'change'].forEach(function (eventName) {
-                    frameDocument.addEventListener(eventName, settle, true);
-                  });
-                  ['transitionrun', 'transitionend', 'animationstart', 'animationend']
-                    .forEach(function (eventName) {
-                      frameDocument.addEventListener(eventName, settle, true);
-                    });
-                  // A non-scrolling iframe still captures wheel and keyboard
-                  // navigation. Forward them to the one outer results page so
-                  // expanded entries never become a dead scrolling region.
-                  frameDocument.addEventListener('wheel', forwardWheel, { passive: false, capture: true });
-                  frameDocument.addEventListener('keydown', forwardNavigationKey, true);
-                  observedDocument = frameDocument;
-                }
-              } catch (e) {}
-              // Dictionary stylesheets and legacy ready handlers can reflow a
-              // large entry without producing a useful DOM mutation. Sample
-              // briefly while the frame settles so it never remains clipped.
-              settle();
-            }
-            f.addEventListener('load', attach);
-            // A cached frame can finish loading before this script runs, so
-            // the load event alone is not enough.
-            try {
-              if (f.contentDocument && f.contentDocument.readyState !== 'loading') attach();
-            } catch (e) {}
+        (() => {
+          const frames = new Map(Array.from(document.querySelectorAll('iframe[data-uuid]'))
+            .map(frame => [frame.dataset.uuid, frame]));
+          function load(frame) {
+            if (!frame || frame.src || !frame.dataset.src) return;
+            frame.src = frame.dataset.src;
           }
-          document.querySelectorAll('iframe').forEach(hookFrame);
-
-          // Report collapse state so the app can restore it next lookup.
-          document.querySelectorAll('details[data-uuid]').forEach(function (card) {
-            card.addEventListener('toggle', function () {
-              if (card.open) {
-                // A freshly revealed frame was measured while hidden.
-                const frame = card.querySelector('iframe');
-                if (frame) frame.dispatchEvent(new Event('load'));
-              }
-              try {
-                window.webkit.messageHandlers.lexiconLink.postMessage({
-                  kind: 'collapse',
-                  dictionaryUUID: card.dataset.uuid,
-                  collapsed: !card.open
-                });
-              } catch (_) {}
-            });
+          const proximity = new IntersectionObserver(entries => entries.forEach(entry => {
+            if (entry.isIntersecting && entry.target.closest('details')?.open) load(entry.target);
+          }), { rootMargin:'800px 0px' });
+          frames.forEach(frame => proximity.observe(frame));
+          document.querySelectorAll('details[data-uuid]').forEach(card => {
+            card.addEventListener('toggle', () => { if (card.open) load(card.querySelector('iframe')); });
           });
+          requestAnimationFrame(() => frames.forEach(frame => {
+            if (frame.closest('details')?.open && frame.getBoundingClientRect().top < innerHeight + 800) load(frame);
+          }));
 
-          // Jump bar: scroll to a dictionary, expanding it if it is folded.
-          (function () {
-            const buttons = Array.from(document.querySelectorAll('.lexicon-jump button'));
-            if (!buttons.length) return;
-            buttons.forEach(function (button) {
-              button.addEventListener('click', function () {
-                const card = document.getElementById('dict-' + button.dataset.jump);
-                if (!card) return;
-                if (!card.open) card.open = true;
-                card.scrollIntoView({ block: 'start', behavior: 'smooth' });
-              });
+          window.__lexiconSetFrameHeight = (uuid, requested) => {
+            const frame = frames.get(String(uuid).toLowerCase());
+            if (!frame) return;
+            const oldHeight = frame.getBoundingClientRect().height;
+            const wasAbove = frame.getBoundingClientRect().bottom < 0;
+            const floor = frames.size === 1
+              ? Math.max(44, document.documentElement.clientHeight - Math.max(0, frame.getBoundingClientRect().top) - 24)
+              : 44;
+            const height = Math.max(floor, Math.min(200000, Math.ceil(Number(requested) || 44)));
+            frame.style.height = height + 'px';
+            frame.dataset.sizeState = 'ok:' + height;
+            if (wasAbove && Math.abs(height - oldHeight) > .5) scrollBy(0, height - oldHeight);
+          };
+          window.__lexiconScrollFrame = (uuid, offset, behavior) => {
+            const frame = frames.get(String(uuid).toLowerCase());
+            if (!frame) return;
+            const top = frame.getBoundingClientRect().top + scrollY + (Number(offset) || 0);
+            scrollTo({ top:Math.max(0, top - 8), behavior:behavior === 'smooth' ? 'smooth' : 'auto' });
+          };
+
+          const buttons = Array.from(document.querySelectorAll('.lexicon-jump button'));
+          buttons.forEach(button => button.addEventListener('click', () => {
+            const card = document.getElementById('dict-' + button.dataset.jump);
+            if (!card) return;
+            card.open = true; load(card.querySelector('iframe'));
+            card.scrollIntoView({ block:'start', behavior:'smooth' });
+          }));
+          function markCurrent() {
+            const bar = document.querySelector('.lexicon-jump');
+            const cutoff = (bar?.getBoundingClientRect().bottom || 0) + 4;
+            let current = buttons[0]?.dataset.jump;
+            document.querySelectorAll('details[data-uuid]').forEach(card => {
+              if (card.getBoundingClientRect().top <= cutoff) current = card.dataset.uuid;
             });
-            // Highlight whichever card currently sits at the top.
-            function markCurrent() {
-              const bar = document.querySelector('.lexicon-jump');
-              const cutoff = (bar ? bar.getBoundingClientRect().bottom : 0) + 4;
-              let current = null;
-              document.querySelectorAll('details[data-uuid]').forEach(function (card) {
-                if (card.getBoundingClientRect().top <= cutoff) current = card.dataset.uuid;
-              });
-              if (current === null && buttons.length) current = buttons[0].dataset.jump;
-              buttons.forEach(function (button) {
-                if (button.dataset.jump === current) button.dataset.current = '1';
-                else delete button.dataset.current;
-              });
-            }
-            window.addEventListener('scroll', markCurrent, { passive: true });
-            markCurrent();
-          })();
-        </script>
-        </body>
-        </html>
+            buttons.forEach(button => button.toggleAttribute('data-current', button.dataset.jump === current));
+          }
+          addEventListener('scroll', markCurrent, { passive:true }); markCurrent();
+          if (\(max(0, initialScrollOffset)) > 0) requestAnimationFrame(() => scrollTo(0, \(max(0, initialScrollOffset))));
+        })();
+        </script></body></html>
         """
     }
 
-    /// Inner page: all entries for the word within one dictionary.
     public static func entryDocument(
-        for normalizedKey: String, dictionaryUUID: String, library: DictionaryLibrary
+        for normalizedKey: String,
+        dictionaryUUID: String,
+        library: DictionaryLibrary,
+        allowHTTPS: Bool = true
     ) -> String {
-        var hits = (try? library.entries(forNormalizedKey: normalizedKey))?
-            .filter { $0.dictionaryUUID == dictionaryUUID } ?? []
-
-        // Alias keys (case variants etc.) can point at the same record;
-        // render each record once.
-        var seenOffsets = Set<UInt64>()
-        hits = hits.filter { seenOffsets.insert($0.recordOffset).inserted }
-
-        var bodies: [String] = []
-        for hit in hits {
-            if var text = try? library.entryText(for: hit), !text.isEmpty {
-                text = rewriteRootRelativeReferences(text, dictionaryUUID: dictionaryUUID)
-                bodies.append(text)
-            }
+        var hits = ((try? library.entries(forNormalizedKey: normalizedKey)) ?? [])
+            .filter { $0.dictionaryUUID.caseInsensitiveCompare(dictionaryUUID) == .orderedSame }
+        var offsets = Set<UInt64>()
+        hits = hits.filter { offsets.insert($0.recordOffset).inserted }
+        let bodies = hits.compactMap { hit -> String? in
+            guard let text = try? library.entryText(for: hit), !text.isEmpty else { return nil }
+            return normalizeEntryHTML(text)
         }
-        if bodies.isEmpty {
-            bodies = ["<p><i>Could not read this entry.</i></p>"]
-        }
+        let content = bodies.isEmpty
+            ? "<p><i>Could not read this entry.</i></p>"
+            : bodies.joined(separator: "\n<hr class=\"lexicon-sep\">\n")
 
         return """
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta charset="utf-8">
-        <meta http-equiv="Content-Security-Policy"
-              content="default-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+        <!doctype html><html><head><meta charset="utf-8">
+        <meta http-equiv="Content-Security-Policy" content="\(contentSecurityPolicy(allowHTTPS: allowHTTPS, outerPage: false))">
         <style>
-          :root { color-scheme: light dark; }
-          html, body { overflow: visible !important; }
-          body {
-            font-family: -apple-system, "Helvetica Neue", sans-serif;
-            font-size: 15px;
-            line-height: 1.45;
-            box-sizing: border-box;
-            margin: 0 !important;
-            padding: 12px 14px 22px !important;
-            min-height: 0 !important;
-            overflow-wrap: break-word;
-            /* Keep a nonzero alpha for legacy scripts that reject a fully
-               transparent body, while visually blending with the app. */
-            background-color: rgba(255, 255, 255, 0.001) !important;
-          }
-          img { max-width: 100%; height: auto; }
-          hr.lexicon-sep { margin: 14px 0; opacity: 0.4; }
+          :root { color-scheme:light dark; }
+          html,body { overflow:visible!important; }
+          body { font-family:-apple-system,"Helvetica Neue",sans-serif; font-size:15px; line-height:1.45;
+            box-sizing:border-box; margin:0!important; padding:12px 14px 22px!important; min-height:0!important;
+            overflow-wrap:break-word; background-color:rgba(255,255,255,.001)!important; }
+          img,video,svg { max-width:100%; height:auto; }
+          hr.lexicon-sep { margin:14px 0; opacity:.4; }
         </style>
-        </head>
-        <body>
-        \(bodies.joined(separator: "\n<hr class=\"lexicon-sep\">\n"))
-        <link rel="stylesheet" href="custom.css">
         <script>
-          // Capture supported dictionary links before legacy site scripts can
-          // cancel them. Native code performs the lookup/audio/external open.
-          (function () {
-            window.addEventListener('click', function (event) {
-              const link = event.target && event.target.closest
-                ? event.target.closest('a[href]')
-                : null;
-              if (!link) return;
-              const href = (link.getAttribute('href') || '').trim();
-              const scheme = href.includes(':')
-                ? href.slice(0, href.indexOf(':')).toLowerCase()
-                : '';
-              if (!['entry', 'bword', 'sound', 'http', 'https', 'mailto'].includes(scheme)) {
-                return;
-              }
-              event.preventDefault();
-              event.stopImmediatePropagation();
-              try {
-                window.webkit.messageHandlers.lexiconLink.postMessage({
-                  href: href,
-                  dictionaryUUID: \(jsStringLiteral(dictionaryUUID))
-                });
-              } catch (_) {}
-            }, true);
-
-            // Double-clicking a word looks it up. The message is always sent;
-            // native code decides whether the preference is on, so toggling it
-            // takes effect without re-rendering the entry.
-            window.addEventListener('dblclick', function (event) {
-              const target = event.target;
-              if (target && target.closest
-                  && target.closest('a[href], input, textarea, select, [contenteditable]')) {
-                return;
-              }
-              const selection = window.getSelection();
-              if (!selection) return;
-              const word = String(selection.toString()).trim();
-              // Only a plain single word: a double-click that extended an
-              // existing selection is the user selecting text to copy.
-              if (!word || word.length > 64 || /\\s/.test(word)) return;
-              try {
-                window.webkit.messageHandlers.lexiconLink.postMessage({
-                  kind: 'lookup',
-                  word: word,
-                  dictionaryUUID: \(jsStringLiteral(dictionaryUUID))
-                });
-              } catch (_) {}
-            }, true);
-          })();
-        </script>
-        <script src="custom.js"></script>
-        </body>
-        </html>
+        (() => {
+          const emit = (kind,value,behavior) => dispatchEvent(new CustomEvent('lexicon-scroll-request',
+            { detail:{ kind, value:Number(value)||0, behavior:behavior === 'smooth' ? 'smooth' : 'auto' } }));
+          const nativeTo = window.scrollTo.bind(window), nativeBy = window.scrollBy.bind(window);
+          window.scrollTo = function(a,b) { const y = typeof a === 'object' ? a.top : b; emit('to',y,typeof a === 'object' ? a.behavior : 'auto'); };
+          window.scrollBy = function(a,b) { const y = typeof a === 'object' ? a.top : b; emit('by',y,typeof a === 'object' ? a.behavior : 'auto'); };
+          const nativeInto = Element.prototype.scrollIntoView;
+          Element.prototype.scrollIntoView = function(options) { emit('element',this.getBoundingClientRect().top,options?.behavior); };
+          window.__lexiconNativeScroll = { to:nativeTo, by:nativeBy, into:nativeInto };
+        })();
+        </script></head><body>\(content)
+        <link rel="stylesheet" href="custom.css"><script src="custom.js"></script>
+        </body></html>
         """
-        // custom.css/custom.js are optional user/theme overrides served from
-        // the dictionary folder. They load last so they can normalize a
-        // repack's original website-oriented styles and behavior. Missing
-        // override files are silent 404s.
     }
 
     public static func welcomeDocument(hasDictionaries: Bool) -> String {
-        let hint = hasDictionaries
+        let message = hasDictionaries
             ? "Type a word in the search field to look it up in all enabled dictionaries at once."
-            : "No dictionaries yet. Open <b>Dictionaries</b> in the toolbar and import your .mdx files (with their .mdd companions in the same folder)."
-        return messageDocument(title: "Lexicon", message: hint)
+            : "No dictionaries yet. Open <b>Dictionaries</b> and import an .mdx file with its companions."
+        return messageDocument(title: "Lexicon", message: message)
+    }
+
+    public static func normalizeEntryHTML(_ html: String) -> String {
+        var output = html
+        for tag in ["html", "head", "body"] {
+            output = replacing(output, pattern: "(?i)<\\s*" + tag + "\\b", with: "<lexicon-" + tag)
+            output = replacing(output, pattern: "(?i)<\\s*/\\s*" + tag + "\\s*>", with: "</lexicon-" + tag + ">")
+        }
+        output = rewriteAttributes(output)
+        output = replacingBlocks(output, pattern: "(?is)(<style\\b[^>]*>)(.*?)(</style\\s*>)") { groups in
+            groups[1] + rewriteCSSReferences(groups[2]) + groups[3]
+        }
+        output = replacingBlocks(output, pattern: "(?is)(\\bstyle\\s*=\\s*)([\"'])(.*?)(\\2)") { groups in
+            groups[1] + groups[2] + rewriteCSSReferences(groups[3]) + groups[4]
+        }
+        return output
+    }
+
+    public static func rewriteCSSReferences(_ css: String) -> String {
+        var output = replacingBlocks(css, pattern: "(?is)(url\\(\\s*)([\"']?)(.*?)(\\2\\s*\\))") { groups in
+            groups[1] + groups[2] + canonicalReference(groups[3]) + groups[4]
+        }
+        output = replacingBlocks(output, pattern: "(?is)(@import\\s+)([\"'])(.*?)(\\2)") { groups in
+            groups[1] + groups[2] + canonicalReference(groups[3]) + groups[4]
+        }
+        return output
+    }
+
+    /// Local resources statically discoverable in entry HTML or CSS. Import
+    /// uses this to bring along loose assets whose names do not match the MDX.
+    public static func localResourceReferences(in text: String) -> Set<String> {
+        let patterns = [
+            "(?is)\\b(?:src|href|data|poster|xlink:href)\\s*=\\s*[\"']([^\"']+)[\"']",
+            "(?i)\\b(?:src|href|data|poster|xlink:href)\\s*=\\s*([^\\s\"'`=<>]+)",
+            "(?is)url\\(\\s*[\"']?([^\"')]+)",
+            "(?is)@import\\s+[\"']([^\"']+)[\"']",
+        ]
+        var result = Set<String>()
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let ns = text as NSString
+            for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                guard match.numberOfRanges > 1, match.range(at: 1).location != NSNotFound else { continue }
+                var value = ns.substring(with: match.range(at: 1))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let lower = value.lowercased()
+                if value.hasPrefix("#") || value.hasPrefix("//")
+                    || ["http:", "https:", "entry:", "bword:", "sound:", "data:", "blob:", "javascript:"]
+                        .contains(where: lower.hasPrefix) { continue }
+                if lower.hasPrefix("file://") { value = String(value.dropFirst("file://".count)) }
+                if let query = value.firstIndex(of: "?") { value = String(value[..<query]) }
+                value = (value.removingPercentEncoding ?? value)
+                    .replacingOccurrences(of: "\\", with: "/")
+                while value.hasPrefix("/") { value.removeFirst() }
+                guard !value.isEmpty, !value.split(separator: "/").contains("..") else { continue }
+                result.insert(value)
+            }
+        }
+        if let srcset = try? NSRegularExpression(
+            pattern: "(?is)\\bsrcset\\s*=\\s*[\"']([^\"']+)[\"']"
+        ) {
+            let ns = text as NSString
+            for match in srcset.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                let value = ns.substring(with: match.range(at: 1))
+                if value.lowercased().contains("data:") { continue }
+                for candidate in value.split(separator: ",") {
+                    guard let url = candidate.split(whereSeparator: { $0.isWhitespace }).first else { continue }
+                    result.formUnion(localResourceReferences(in: "<img src=\"\(url)\">"))
+                }
+            }
+        }
+        return result
+    }
+
+    private static func rewriteAttributes(_ html: String) -> String {
+        var output = replacingBlocks(
+            html, pattern: "(?is)(\\b(?:src|href|data|poster|xlink:href)\\s*=\\s*)([\"'])(.*?)(\\2)"
+        ) { groups in groups[1] + groups[2] + canonicalReference(groups[3]) + groups[4] }
+        output = replacingBlocks(
+            output, pattern: "(?i)(\\b(?:src|href|data|poster|xlink:href)\\s*=\\s*)([^\\s\"'`=<>]+)"
+        ) { groups in groups[1] + canonicalReference(groups[2]) }
+        output = replacingBlocks(output, pattern: "(?is)(\\bsrcset\\s*=\\s*)([\"'])(.*?)(\\2)") { groups in
+            if groups[3].lowercased().contains("data:") {
+                return groups[1] + groups[2] + groups[3] + groups[4]
+            }
+            let items = groups[3].split(separator: ",", omittingEmptySubsequences: false).map { item -> String in
+                let bits = item.trimmingCharacters(in: .whitespaces).split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+                guard let first = bits.first else { return String(item) }
+                return canonicalReference(String(first)) + (bits.count > 1 ? " " + String(bits[1]) : "")
+            }
+            return groups[1] + groups[2] + items.joined(separator: ", ") + groups[4]
+        }
+        return output
+    }
+
+    private static func canonicalReference(_ raw: String) -> String {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.hasPrefix("//") { return "https:" + value }
+        if value.lowercased().hasPrefix("file://") {
+            if let url = URL(string: value), url.host == nil || url.host == "localhost" {
+                return url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            }
+            return String(value.dropFirst("file://".count))
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }
+        return value
+    }
+
+    private static func contentSecurityPolicy(allowHTTPS: Bool, outerPage: Bool) -> String {
+        let network = allowHTTPS ? " https:" : ""
+        let connections = allowHTTPS ? " https: wss:" : ""
+        let frame = outerPage ? "frame-src dict:\(network); " : "frame-src 'self'\(network); "
+        return "default-src 'self' data: blob:\(network); img-src 'self' data: blob:\(network); "
+            + "media-src 'self' data: blob:\(network); font-src 'self' data:\(network); "
+            + "style-src 'self' 'unsafe-inline'\(network); script-src 'self' 'unsafe-inline'\(network); "
+            + "connect-src 'self'\(connections); " + frame
     }
 
     private static func messageDocument(title: String, message: String) -> String {
         """
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta charset="utf-8">
-        <style>
-          :root { color-scheme: light dark; }
-          body {
-            font-family: -apple-system, sans-serif;
-            display: flex; align-items: center; justify-content: center;
-            height: 90vh; margin: 0;
-          }
-          .box { max-width: 400px; text-align: center; opacity: 0.75; }
-          h1 { font-size: 20px; font-weight: 600; }
-          p { font-size: 14px; line-height: 1.5; }
-        </style>
-        </head>
-        <body>
-          <div class="box"><h1>\(title)</h1><p>\(message)</p></div>
-        </body>
-        </html>
+        <!doctype html><html><head><meta charset="utf-8"><style>
+        :root{color-scheme:light dark} body{font-family:-apple-system,sans-serif;display:flex;align-items:center;
+        justify-content:center;height:90vh;margin:0}.box{max-width:400px;text-align:center;opacity:.75}
+        h1{font-size:20px;font-weight:600}p{font-size:14px;line-height:1.5}</style></head>
+        <body><div class="box"><h1>\(title)</h1><p>\(message)</p></div></body></html>
         """
     }
 
-    /// Root-relative references (src="/x.svg") would resolve against the
-    /// scheme root and lose the dictionary UUID; pin them to the dictionary.
-    private static let rootRelativeAttribute = try? NSRegularExpression(
-        pattern: #"(src|href)\s*=\s*(["'])/([^/"'][^"']*)\2"#,
-        options: [.caseInsensitive]
-    )
-
-    public static func rewriteRootRelativeReferences(_ html: String, dictionaryUUID: String) -> String {
-        guard let regex = rootRelativeAttribute else { return html }
-        let ns = html as NSString
-        return regex.stringByReplacingMatches(
-            in: html,
-            range: NSRange(location: 0, length: ns.length),
-            withTemplate: "$1=$2dict://d/\(dictionaryUUID)/$3$2"
-        )
+    private static func replacing(_ value: String, pattern: String, with replacement: String) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return value }
+        return regex.stringByReplacingMatches(in: value, range: NSRange(value.startIndex..., in: value), withTemplate: replacement)
     }
 
-    /// RFC 3986 unreserved characters. A generated UUID passes through
-    /// untouched, while a path separator or quote is escaped.
-    private static let urlPathUnreserved = CharacterSet(
-        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
-    )
+    private static func replacingBlocks(
+        _ value: String, pattern: String, transform: ([String]) -> String
+    ) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return value }
+        let ns = value as NSString
+        var output = value
+        for match in regex.matches(in: value, range: NSRange(location: 0, length: ns.length)).reversed() {
+            let groups = (0 ..< match.numberOfRanges).map { index -> String in
+                let range = match.range(at: index)
+                return range.location == NSNotFound ? "" : ns.substring(with: range)
+            }
+            guard let range = Range(match.range, in: output) else { continue }
+            output.replaceSubrange(range, with: transform(groups))
+        }
+        return output
+    }
 
-    private static func escape(_ s: String) -> String {
-        s.replacingOccurrences(of: "&", with: "&amp;")
+    private static func escape(_ value: String) -> String {
+        value.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "'", with: "&#39;")
-    }
-
-    /// Renders a quoted JavaScript string literal. `dict://` path components
-    /// are percent-decoded by `URL.path`, so a dictionary's own markup can
-    /// request a UUID containing quotes; interpolating one raw would let it
-    /// close the literal and inject script into the entry frame.
-    private static func jsStringLiteral(_ value: String) -> String {
-        var out = "\""
-        for character in value.unicodeScalars {
-            switch character {
-            case "\"": out += "\\\""
-            case "\\": out += "\\\\"
-            case "\n": out += "\\n"
-            case "\r": out += "\\r"
-            case "\u{2028}": out += "\\u2028" // JS line terminators
-            case "\u{2029}": out += "\\u2029"
-            case "<": out += "\\u003C" // never close the enclosing <script>
-            case "&": out += "\\u0026"
-            default:
-                if character.value < 0x20 {
-                    out += String(format: "\\u%04X", character.value)
-                } else {
-                    out.unicodeScalars.append(character)
-                }
-            }
-        }
-        return out + "\""
     }
 }

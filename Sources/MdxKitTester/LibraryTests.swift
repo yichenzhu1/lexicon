@@ -71,6 +71,38 @@ func runLibraryTests(_ t: TestHarness) {
         t.expectEqual(record.resourceCount, 0, "resource count is zero")
     }
 
+    t.run("library: differently named sibling css and js import automatically") {
+        let source = tempRoot.appendingPathComponent("loose-source")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: fixturesURL.appendingPathComponent("astral.mdx"),
+            to: source.appendingPathComponent("astral.mdx")
+        )
+        try FileManager.default.createDirectory(
+            at: source.appendingPathComponent("assets"), withIntermediateDirectories: true
+        )
+        try Data(".entry { color: teal; background: url(assets/icon.svg) }".utf8)
+            .write(to: source.appendingPathComponent("oald.css"))
+        try Data("window.fixtureLoaded = true".utf8)
+            .write(to: source.appendingPathComponent("oald.js"))
+        try Data("<svg xmlns='http://www.w3.org/2000/svg'/>".utf8)
+            .write(to: source.appendingPathComponent("assets/icon.svg"))
+
+        let looseRoot = tempRoot.appendingPathComponent("loose-resources")
+        let looseLibrary = try DictionaryLibrary(rootURL: looseRoot)
+        let record = try looseLibrary.importDictionary(from: source.appendingPathComponent("astral.mdx"))
+        t.expect(record.hasResources, "differently named loose companions detected without an MDD")
+        t.expectEqual(record.resourceCount, 0, "MDD count remains separate")
+        t.expectEqual(record.looseResourceCount, 3, "CSS, JavaScript and CSS dependency counted")
+        t.expectEqual(try looseLibrary.dictionaries().first?.totalResourceCount, 3, "loose count persisted")
+        t.expect(try looseLibrary.resource(path: "oald.css", dictionaryUUID: record.uuid) != nil,
+                 "differently named CSS served")
+        t.expect(try looseLibrary.resource(path: "oald.js", dictionaryUUID: record.uuid) != nil,
+                 "differently named JavaScript served")
+        t.expect(try looseLibrary.resource(path: "assets/icon.svg", dictionaryUUID: record.uuid) != nil,
+                 "resource referenced by sibling CSS copied recursively")
+    }
+
     t.run("library: failed resource indexing rolls back the whole import") {
         let source = tempRoot.appendingPathComponent("broken-source")
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
@@ -92,8 +124,46 @@ func runLibraryTests(_ t: TestHarness) {
         let copiedFolders = try FileManager.default.contentsOfDirectory(
             at: rollbackLibrary.dictionariesURL,
             includingPropertiesForKeys: nil
-        )
+        ).filter { ![".staging", "Recovery"].contains($0.lastPathComponent) }
         t.expectEqual(copiedFolders.count, 0, "failed import leaves no copied folder")
+    }
+
+    t.run("library: cancelled import rolls back staging and index") {
+        let cancelRoot = tempRoot.appendingPathComponent("cancelled")
+        let cancelLibrary = try DictionaryLibrary(rootURL: cancelRoot)
+        let cancellation = ImportCancellationToken()
+        cancellation.cancel()
+        t.expectThrows("cancelled before copy") {
+            try cancelLibrary.importDictionary(
+                from: fixturesURL.appendingPathComponent("basic.mdx"),
+                cancellation: cancellation
+            )
+        }
+        t.expectEqual(try cancelLibrary.dictionaries().count, 0, "cancelled import has no row")
+        let staging = cancelLibrary.dictionariesURL.appendingPathComponent(".staging")
+        t.expectEqual(
+            try FileManager.default.contentsOfDirectory(at: staging, includingPropertiesForKeys: nil).count,
+            0, "cancelled import cleans staging"
+        )
+    }
+
+    t.run("library: startup reconciliation preserves orphan folders") {
+        let recoveryRoot = tempRoot.appendingPathComponent("recovery")
+        var first: DictionaryLibrary? = try DictionaryLibrary(rootURL: recoveryRoot)
+        let orphan = first!.dictionariesURL.appendingPathComponent("orphan", isDirectory: true)
+        try FileManager.default.createDirectory(at: orphan, withIntermediateDirectories: true)
+        try Data("keep me".utf8).write(to: orphan.appendingPathComponent("asset.bin"))
+        first = nil
+
+        let reopened = try DictionaryLibrary(rootURL: recoveryRoot)
+        let recovery = reopened.dictionariesURL.appendingPathComponent("Recovery", isDirectory: true)
+        let recovered = try FileManager.default.contentsOfDirectory(at: recovery, includingPropertiesForKeys: nil)
+        t.expectEqual(recovered.count, 1, "orphan moved to recovery")
+        t.expect(
+            FileManager.default.fileExists(atPath: recovered[0].appendingPathComponent("asset.bin").path),
+            "orphan contents preserved"
+        )
+        t.expect(!reopened.startupWarnings.isEmpty, "recovery is reported")
     }
 
     t.run("library: renaming changes only the library label") {
@@ -136,6 +206,14 @@ func runLibraryTests(_ t: TestHarness) {
 
         t.expectEqual(try library.search(matching: "zzzz").count, 0, "no bogus matches")
         t.expectEqual(try library.search(matching: "  ").count, 0, "blank query")
+    }
+
+    t.run("library: obsolete search can be cancelled") {
+        let cancellation = SearchCancellationToken()
+        cancellation.cancel()
+        t.expectThrows("cancelled search") {
+            _ = try library.search(matching: "zzzz", cancellation: cancellation)
+        }
     }
 
     t.run("library: search tiers rank exact over prefix over substring") {
@@ -218,14 +296,36 @@ func runLibraryTests(_ t: TestHarness) {
 
     t.run("library: resource lookup via index") {
         let png = try library.resource(path: "apple.png", dictionaryUUID: basic.uuid)
-        t.expect(png?.prefix(4) == Data([0x89, 0x50, 0x4E, 0x47]), "png from mdd")
+        t.expect(png?.data.prefix(4) == Data([0x89, 0x50, 0x4E, 0x47]), "png from mdd")
+        t.expectEqual(png?.mimeType, "image/png", "typed resource MIME")
+        let lowerUUID = try library.resource(
+            path: "apple.png", dictionaryUUID: basic.uuid.lowercased()
+        )
+        t.expect(lowerUUID != nil, "scheme-host UUID lookup is case-insensitive")
 
         let wav = try library.resource(path: "pron/apple.wav", dictionaryUUID: basic.uuid)
-        t.expect(wav?.prefix(4) == Data("RIFF".utf8), "wav from mdd subdirectory")
+        t.expect(wav?.data.prefix(4) == Data("RIFF".utf8), "wav from mdd subdirectory")
 
+        t.expect(try library.resource(path: "nope.bin", dictionaryUUID: basic.uuid) == nil, "absent resource")
+    }
+
+    t.run("library: multipart MDD order and duplicate precedence") {
+        let multipartRoot = tempRoot.appendingPathComponent("multipart")
+        let multipartLibrary = try DictionaryLibrary(rootURL: multipartRoot)
+        let record = try multipartLibrary.importDictionary(
+            from: fixturesURL.appendingPathComponent("multipart.mdx")
+        )
+        let css = try multipartLibrary.resource(path: "reverse.css", dictionaryUUID: record.uuid)
+        t.expect(
+            css.map { String(decoding: $0.data, as: UTF8.self) }?.contains("rgb(12, 34, 56)") == true,
+            "base MDD stylesheet resolves from part zero"
+        )
+        let numbered = try multipartLibrary.resource(path: "part-one.txt", dictionaryUUID: record.uuid)
+        t.expectEqual(numbered.map { String(decoding: $0.data, as: UTF8.self) }, "numbered volume")
+        let duplicate = try multipartLibrary.resource(path: "duplicate.txt", dictionaryUUID: record.uuid)
         t.expectEqual(
-            try library.resource(path: "nope.bin", dictionaryUUID: basic.uuid), nil,
-            "absent resource"
+            duplicate.map { String(decoding: $0.data, as: UTF8.self) },
+            "base volume wins", "base MDD deterministically precedes numbered duplicates"
         )
     }
 
@@ -233,20 +333,27 @@ func runLibraryTests(_ t: TestHarness) {
         // Repack case: entry references "renamed_style.css" but the package
         // ships "<mdx base>.css" as a loose file.
         let folder = library.folderURL(for: basic)
+        // GoldenDict-NG gives a loose file precedence over an identically
+        // named MDD resource, allowing dictionary repacks to override CSS.
+        try Data(".entry { --loose-override: 1; }".utf8)
+            .write(to: folder.appendingPathComponent("style.css"))
+        let overridden = try library.resource(path: "style.css", dictionaryUUID: basic.uuid)
+        t.expect(
+            overridden.map { String(decoding: $0.data, as: UTF8.self) }?.contains("--loose-override") == true,
+            "exact loose stylesheet wins over MDD"
+        )
+
         try Data("body { --lexicon-test: 1; }".utf8)
             .write(to: folder.appendingPathComponent("basic.css"))
         let css = try library.resource(path: "renamed_style.css", dictionaryUUID: basic.uuid)
         t.expect(
-            css.map { String(decoding: $0, as: UTF8.self) }?.contains("--lexicon-test") == true,
+            css.map { String(decoding: $0.data, as: UTF8.self) }?.contains("--lexicon-test") == true,
             "css falls back to mdx base name"
         )
 
         // Optional overrides must not fall back to the dictionary's base JS;
         // that would execute the original script twice when custom.js is absent.
-        t.expectEqual(
-            try library.resource(path: "custom.js", dictionaryUUID: basic.uuid), nil,
-            "missing custom.js stays missing"
-        )
+        t.expect(try library.resource(path: "custom.js", dictionaryUUID: basic.uuid) == nil, "missing custom.js stays missing")
 
         // A loose file with the exact requested name must beat the base-name
         // heuristic (custom.css themes rely on this).
@@ -254,17 +361,13 @@ func runLibraryTests(_ t: TestHarness) {
             .write(to: folder.appendingPathComponent("custom.css"))
         let custom = try library.resource(path: "custom.css", dictionaryUUID: basic.uuid)
         t.expect(
-            custom.map { String(decoding: $0, as: UTF8.self) } == "/* theme */",
+            custom.map { String(decoding: $0.data, as: UTF8.self) } == "/* theme */",
             "exact loose file wins over base-name fallback"
         )
 
         // OALD-style extension-less sound reference completed by prefix.
         let wav = try library.resource(path: "pron/apple", dictionaryUUID: basic.uuid)
-        t.expect(wav?.prefix(4) == Data("RIFF".utf8), "prefix completion for extension-less path")
-
-        // Lost-context absolute path found by searching all dictionaries.
-        let png = try library.resourceSearchingAllDictionaries(path: "apple.png")
-        t.expect(png?.prefix(4) == Data([0x89, 0x50, 0x4E, 0x47]), "cross-dictionary resource search")
+        t.expect(wav?.data.prefix(4) == Data("RIFF".utf8), "prefix completion for extension-less path")
 
         t.expect(!library.isKnownDictionaryUUID("apple.png"), "uuid check")
         t.expect(library.isKnownDictionaryUUID(basic.uuid), "uuid check positive")
@@ -278,14 +381,10 @@ func runLibraryTests(_ t: TestHarness) {
             at: folder.appendingPathComponent("escape.bin"),
             withDestinationURL: outside
         )
-        t.expectEqual(
-            try library.resource(path: "escape.bin", dictionaryUUID: basic.uuid), nil,
-            "symlink outside dictionary folder is rejected"
-        )
-        t.expectEqual(
-            try library.resource(path: "../outside.bin", dictionaryUUID: basic.uuid), nil,
-            "parent traversal is rejected"
-        )
+        t.expect(try library.resource(path: "escape.bin", dictionaryUUID: basic.uuid) == nil,
+                 "symlink outside dictionary folder is rejected")
+        t.expect(try library.resource(path: "../outside.bin", dictionaryUUID: basic.uuid) == nil,
+                 "parent traversal is rejected")
     }
 
     t.run("library: second dictionary and unified search") {

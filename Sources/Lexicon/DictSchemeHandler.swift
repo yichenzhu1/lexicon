@@ -7,10 +7,9 @@ import MdxKit
 
 /// Serves dict:// URLs from the dictionary library.
 ///
-/// URL layout (host is always "d" so that the outer page and all entry
-/// iframes share one origin, letting the outer page measure iframe heights):
-///   dict://d/<dictUUID>/entry?word=<normalized key>   entry HTML for one dictionary
-///   dict://d/<dictUUID>/<resource path>               image/CSS/audio/… from the MDD
+/// URL layout. Each dictionary is a separate origin:
+///   dict://<dictUUID>/entry?word=<normalized key>   entry HTML
+///   dict://<dictUUID>/<resource path>               image/CSS/audio/…
 ///
 /// Requests are served off the main thread: building an entry page decompresses
 /// record blocks and queries SQLite, and an entry with a dozen images would
@@ -25,6 +24,7 @@ final class DictSchemeHandler: NSObject, WKURLSchemeHandler {
     private nonisolated let queue = DispatchQueue(
         label: "lexicon.dict-scheme", qos: .userInitiated, attributes: .concurrent
     )
+    @MainActor var allowHTTPS: Bool
 
     /// Tasks WebKit has started and not yet stopped. Calling back into a
     /// stopped task raises an Objective-C exception, so every delivery looks
@@ -37,6 +37,7 @@ final class DictSchemeHandler: NSObject, WKURLSchemeHandler {
     @MainActor
     init(libraryModel: LibraryModel) {
         self.library = libraryModel.library
+        self.allowHTTPS = libraryModel.dictionaryNetworkPolicy == .allowHTTPS
     }
 
     // WKURLSchemeHandler's conformance is main-actor isolated, which matches
@@ -54,8 +55,11 @@ final class DictSchemeHandler: NSObject, WKURLSchemeHandler {
         }
 
         let library = self.library
+        let allowHTTPS = self.allowHTTPS
         queue.async { [weak self] in
-            let result = library.flatMap { Self.respond(to: url, library: $0) }
+            let result = library.flatMap {
+                Self.respond(to: url, library: $0, allowHTTPS: allowHTTPS)
+            }
             Task { @MainActor in
                 self?.deliver(token: token, url: url, result: result)
             }
@@ -71,7 +75,7 @@ final class DictSchemeHandler: NSObject, WKURLSchemeHandler {
     private func deliver(
         token: ObjectIdentifier,
         url: URL?,
-        result: (data: Data, mimeType: String)?
+        result: DictionaryResource?
     ) {
         // Absent means WebKit stopped the task — the frame navigated away
         // while we were reading — so completing it now would raise.
@@ -83,7 +87,7 @@ final class DictSchemeHandler: NSObject, WKURLSchemeHandler {
         }
         let response = URLResponse(
             url: url, mimeType: result.mimeType, expectedContentLength: result.data.count,
-            textEncodingName: result.mimeType.hasPrefix("text/") ? "utf-8" : nil
+            textEncodingName: result.textEncodingName
         )
         task.didReceive(response)
         task.didReceive(result.data)
@@ -92,67 +96,40 @@ final class DictSchemeHandler: NSObject, WKURLSchemeHandler {
 
     /// Runs on the worker queue.
     private nonisolated static func respond(
-        to url: URL, library: DictionaryLibrary
-    ) -> (data: Data, mimeType: String)? {
-        var components = url.path.split(separator: "/").map(String.init)
-        guard !components.isEmpty else { return nil }
-        let uuid = components.removeFirst()
+        to url: URL, library: DictionaryLibrary, allowHTTPS: Bool
+    ) -> DictionaryResource? {
+        guard let uuid = url.host?.lowercased(), uuid != "page",
+              library.isKnownDictionaryUUID(uuid)
+        else { return nil }
+        let components = url.path.split(separator: "/").map(String.init)
 
         if components == ["entry"] {
             // `url.path` percent-decodes, so this component is attacker
             // reachable from a dictionary's own markup. Only serve UUIDs the
             // library actually knows; anything else cannot address a
             // dictionary and must not reach the page builder.
-            guard library.isKnownDictionaryUUID(uuid) else { return nil }
             let query = URLComponents(url: url, resolvingAgainstBaseURL: false)
             let word = query?.queryItems?.first(where: { $0.name == "word" })?.value ?? ""
             let html = EntryPageBuilder.entryDocument(
-                for: word, dictionaryUUID: uuid, library: library
+                for: word, dictionaryUUID: uuid, library: library,
+                allowHTTPS: allowHTTPS
             )
-            return (Data(html.utf8), "text/html")
+            return DictionaryResource(
+                data: Data(html.utf8), mimeType: "text/html",
+                textEncodingName: "utf-8", resolvedPath: "entry"
+            )
         }
 
         // Everything else is a resource path inside this dictionary.
         let resourcePath = components.joined(separator: "/")
         if !resourcePath.isEmpty,
-           let data = try? library.resource(path: resourcePath, dictionaryUUID: uuid) {
-            return (data, Self.mimeType(forPath: resourcePath))
-        }
-
-        // Root-relative requests generated by dictionary JS resolve to
-        // dict://d/<path> and lose the UUID; the first component is then not
-        // a dictionary. Search all enabled dictionaries for the full path.
-        if !library.isKnownDictionaryUUID(uuid) {
-            let fullPath = ([uuid] + components).joined(separator: "/")
-            if let data = try? library.resourceSearchingAllDictionaries(path: fullPath) {
-                return (data, Self.mimeType(forPath: fullPath))
-            }
+           let resource = try? library.resource(path: resourcePath, dictionaryUUID: uuid) {
+            return resource
         }
         return nil
     }
 
     nonisolated static func mimeType(forPath path: String) -> String {
-        switch (path as NSString).pathExtension.lowercased() {
-        case "html", "htm": return "text/html"
-        case "css": return "text/css"
-        case "js": return "text/javascript"
-        case "png": return "image/png"
-        case "jpg", "jpeg": return "image/jpeg"
-        case "gif": return "image/gif"
-        case "svg": return "image/svg+xml"
-        case "webp": return "image/webp"
-        case "bmp": return "image/bmp"
-        case "ico": return "image/x-icon"
-        case "woff": return "font/woff"
-        case "woff2": return "font/woff2"
-        case "ttf": return "font/ttf"
-        case "otf": return "font/otf"
-        case "mp3": return "audio/mpeg"
-        case "wav": return "audio/wav"
-        case "ogg", "oga": return "audio/ogg"
-        case "mp4": return "video/mp4"
-        case "json": return "application/json"
-        default: return "application/octet-stream"
-        }
+        DictionaryLibrary.mimeType(forPath: path)
     }
 }

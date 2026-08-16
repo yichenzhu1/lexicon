@@ -193,14 +193,29 @@ public final class MdictFile {
                 runningOffset, compSize, max: UInt64(data.count), "key block extent"
             )
         }
+        let declaredKeyBlocksEnd = try Self.checkedSum(
+            keyBlocksStart, keyBlocksLength, max: UInt64(data.count), "key blocks extent"
+        )
+        guard runningOffset == declaredKeyBlocksEnd else {
+            throw MdxError.corruptData("key block sizes do not match declared total")
+        }
+        let indexedKeyCount = infos.reduce(UInt64(0)) { partial, info in
+            partial.addingReportingOverflow(info.entryCount).overflow ? UInt64.max : partial + info.entryCount
+        }
+        guard indexedKeyCount == entryCount else {
+            throw MdxError.corruptData("keyword entry count mismatch")
+        }
         keyBlockInfos = infos
         try reader.skip(Self.checked(keyBlocksLength, max: data.count, "key blocks length"))
 
         // --- Record section ---
         let numRecordBlocks = try reader.readNumber(width: numberWidth)
-        _ = try reader.readNumber(width: numberWidth) // total entries, same as keyword section
+        let recordEntryCount = try reader.readNumber(width: numberWidth)
         let recordIndexLength = try reader.readNumber(width: numberWidth)
-        _ = try reader.readNumber(width: numberWidth) // total record block bytes
+        let declaredRecordBytes = try reader.readNumber(width: numberWidth)
+        guard recordEntryCount == entryCount else {
+            throw MdxError.corruptData("record entry count mismatch")
+        }
 
         // Equivalent to `recordIndexLength == numRecordBlocks * numberWidth * 2`,
         // but division cannot overflow the way that multiplication can.
@@ -244,6 +259,12 @@ public final class MdictFile {
                 plainOffset, table.decompressedSizes[i],
                 max: UInt64(Int.max), "record stream size"
             )
+        }
+        let actualRecordBytes = table.compressedSizes.reduce(UInt64(0)) { partial, size in
+            partial.addingReportingOverflow(size).overflow ? UInt64.max : partial + size
+        }
+        guard actualRecordBytes == declaredRecordBytes else {
+            throw MdxError.corruptData("record block sizes do not match declared total")
         }
         table.totalDecompressedSize = plainOffset
         recordTable = table
@@ -397,6 +418,9 @@ public final class MdictFile {
             }
             currentBlockIndex += 1
             currentLocalOffset = 0
+        }
+        guard remaining == 0 else {
+            throw MdxError.truncatedFile("record data at \(offset), missing \(remaining) bytes")
         }
         return result
     }

@@ -22,6 +22,34 @@ if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "seed" {
     }
 }
 
+// Import mode: `swift run MdxKitTester import <root> <dictionary.mdx>`
+// is useful for verifying a real package without opening the GUI.
+if CommandLine.arguments.count >= 4, CommandLine.arguments[1] == "import" {
+    let root = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
+    let mdx = URL(fileURLWithPath: CommandLine.arguments[3])
+    do {
+        let library = try DictionaryLibrary(rootURL: root)
+        let record = try library.importDictionary(from: mdx) { update in
+            if update.completed == 0 || update.completed == update.total
+                || (update.completed > 0 && update.completed.isMultiple(of: 100_000)) {
+                print("\(update.stage): \(update.completed)/\(update.total)")
+            }
+        }
+        let folder = library.folderURL(for: record)
+        let files = try FileManager.default.contentsOfDirectory(
+            at: folder, includingPropertiesForKeys: nil
+        ).map(\.lastPathComponent).sorted()
+        print("imported \(record.title): \(record.entryCount) entries, "
+            + "\(record.resourceCount) MDD resources, \(record.looseResourceCount) loose resources")
+        print("folder: \(folder.path)")
+        print("files: \(files.joined(separator: ", "))")
+        exit(0)
+    } catch {
+        print("import failed: \(error)")
+        exit(1)
+    }
+}
+
 // Dump mode: `swift run MdxKitTester dump <root> <word> <outdir>`
 // writes each dictionary's raw entry HTML for a word to files.
 if CommandLine.arguments.count >= 5, CommandLine.arguments[1] == "dump" {
@@ -58,12 +86,12 @@ if CommandLine.arguments.count >= 6, CommandLine.arguments[1] == "res" {
             print("no dictionary matching \(titlePart)")
             exit(1)
         }
-        guard let data = try library.resource(path: path, dictionaryUUID: record.uuid) else {
+        guard let resource = try library.resource(path: path, dictionaryUUID: record.uuid) else {
             print("resource not found: \(path)")
             exit(1)
         }
-        try data.write(to: outFile)
-        print("wrote \(data.count) bytes from \(record.title) to \(outFile.path)")
+        try resource.data.write(to: outFile)
+        print("wrote \(resource.data.count) bytes from \(record.title) to \(outFile.path)")
         exit(0)
     } catch {
         print("res failed: \(error)")
@@ -144,4 +172,3 @@ runConcurrencyTests(t)
 runPageBuilderTests(t)
 
 t.finish()
-

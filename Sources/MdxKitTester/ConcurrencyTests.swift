@@ -39,7 +39,7 @@ func runConcurrencyTests(_ t: TestHarness) {
                 // Resource reads share the same decompressed-block cache.
                 if index % 4 == 0 {
                     let png = try library.resource(path: "apple.png", dictionaryUUID: hit.dictionaryUUID)
-                    if png?.prefix(4) != Data([0x89, 0x50, 0x4E, 0x47]) {
+                    if png?.data.prefix(4) != Data([0x89, 0x50, 0x4E, 0x47]) {
                         failures.mutate { $0 += 1 }
                     }
                 }

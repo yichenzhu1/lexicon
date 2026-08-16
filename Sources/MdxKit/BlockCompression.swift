@@ -7,7 +7,9 @@ import Foundation
 enum BlockCompression {
     /// Ceiling on a single decompressed block, so a corrupt size field cannot
     /// request an unbounded allocation. Real blocks are far below this.
-    static let maxDecompressedBlockSize = 1 << 30 // 1 GiB
+    // A single corrupt size must not be able to force a desktop app into a
+    // gigabyte allocation. Real MDict blocks are normally far smaller.
+    static let maxDecompressedBlockSize = 256 << 20 // 256 MiB
 
     /// Decompresses one framed block.
     /// - Parameters:

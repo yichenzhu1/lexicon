@@ -27,6 +27,21 @@ struct SettingsView: View {
                 )
             }
 
+            Section("Dictionary Content") {
+                Picker("Network access", selection: $libraryModel.dictionaryNetworkPolicy) {
+                    ForEach(LibraryModel.DictionaryNetworkPolicy.allCases) { policy in
+                        Text(policy.title).tag(policy)
+                    }
+                }
+
+                Text(libraryModel.dictionaryNetworkPolicy == .allowHTTPS
+                    ? "Dictionary pages may load HTTPS images, fonts, styles, scripts, and data. Remote scripts can read the displayed entry. HTTP remains blocked."
+                    : "All dictionary page resources must come from the imported dictionary files.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Section("History") {
                 LabeledContent("Keep recent lookups") {
                     Picker("Keep recent lookups", selection: historyLimit) {
@@ -56,7 +71,7 @@ struct SettingsView: View {
                     }
                 }
 
-                Text("Restores reading, history-limit, and folded-section preferences. Dictionaries, history, and starred words are kept.")
+                Text("Restores reading, network, history-limit, and folded-section preferences. Dictionaries, history, and starred words are kept.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
