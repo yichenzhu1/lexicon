@@ -104,8 +104,9 @@ in the app's `Info.plist`, but is not included in the archive filename.
 
 Lexicon is licensed under the
 [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). See
-`LICENSE` for the full terms. Licenses for bundled components and test tooling
-are kept beside their source and the relevant license is included in the app.
+`LICENSE` for the full terms and
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) for bundled components and
+test tooling.
 
 ## Import dictionaries
 

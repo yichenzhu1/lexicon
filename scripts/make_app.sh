@@ -48,7 +48,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/Lexicon"
 cp "$ICON" "$APP/Contents/Resources/Lexicon.icns"
 cp "LICENSE" "$APP/Contents/Resources/LICENSE.txt"
-cp "Sources/CLzokay/LICENSE" "$APP/Contents/Resources/lzokay-LICENSE.txt"
+cp "THIRD-PARTY-NOTICES.md" "$APP/Contents/Resources/THIRD-PARTY-NOTICES.md"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
