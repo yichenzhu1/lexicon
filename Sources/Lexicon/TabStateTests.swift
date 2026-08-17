@@ -17,6 +17,17 @@ enum TabStateTests {
             if !condition() { failures.append(message) }
         }
 
+        expect(
+            EntryWebView.Coordinator.dictionaryCompatibilityScript
+                .contains("__lexiconVirtualScroll"),
+            "dictionary jQuery window scrolling was not adapted to the outer page"
+        )
+        expect(
+            EntryWebView.Coordinator.dictionaryCompatibilityScript
+                .contains("window.scrollBy({top:delta"),
+            "dictionary position-preservation setters are not routed as relative corrections"
+        )
+
         let initialID = state.activeTabID
         expect(state.residentTabIDs == [initialID], "initial tab was not resident")
 

@@ -31,6 +31,11 @@ struct EntryWebView: NSViewRepresentable {
             contentWorld: Coordinator.bridgeWorld,
             name: Coordinator.bridgeMessageName
         )
+        controller.add(
+            context.coordinator,
+            contentWorld: .page,
+            name: Coordinator.pageGeometryMessageName
+        )
         controller.addUserScript(WKUserScript(
             source: Coordinator.bridgeScript,
             injectionTime: .atDocumentStart,
@@ -38,7 +43,7 @@ struct EntryWebView: NSViewRepresentable {
             in: Coordinator.bridgeWorld
         ))
         controller.addUserScript(WKUserScript(
-            source: Coordinator.ttsCompatibilityScript,
+            source: Coordinator.dictionaryCompatibilityScript,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false,
             in: .page
@@ -81,6 +86,10 @@ struct EntryWebView: NSViewRepresentable {
             forName: Coordinator.bridgeMessageName,
             contentWorld: Coordinator.bridgeWorld
         )
+        webView.configuration.userContentController.removeScriptMessageHandler(
+            forName: Coordinator.pageGeometryMessageName,
+            contentWorld: .page
+        )
         coordinator.schemeHandler = nil
         coordinator.diagnosticHandler = nil
     }
@@ -88,6 +97,7 @@ struct EntryWebView: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         static let bridgeMessageName = "lexiconBridge"
+        static let pageGeometryMessageName = "lexiconPageGeometry"
         static let bridgeWorld = WKContentWorld.world(name: "LexiconBridge")
 
         let tabID: UUID
@@ -97,13 +107,18 @@ struct EntryWebView: NSViewRepresentable {
         var networkPolicyOverride: LibraryModel.DictionaryNetworkPolicy?
         /// Test-only observer used by the offscreen WebKit harness. Production
         /// pages never receive the diagnostic user script that emits it.
-        var diagnosticHandler: ((String, [String: Any]) -> Void)?
+        var diagnosticHandler: ((String, [String: Any], WKFrameInfo) -> Void)?
         private var loadedToken: String?
+        private var dictionaryFrames: [String: WKFrameInfo] = [:]
 
         init(tabID: UUID, appState: AppState, libraryModel: LibraryModel) {
             self.tabID = tabID
             self.appState = appState
             self.libraryModel = libraryModel
+        }
+
+        func dictionaryFrameInfo(for uuid: String) -> WKFrameInfo? {
+            dictionaryFrames[uuid.lowercased()]
         }
 
         func load(
@@ -114,6 +129,7 @@ struct EntryWebView: NSViewRepresentable {
             let token = "\(version)|\(word ?? "")|\(anchor ?? "")|\(preferredDictionaryUUID ?? "")"
             guard force || token != loadedToken else { return }
             loadedToken = token
+            dictionaryFrames.removeAll(keepingCapacity: true)
             let allowHTTPS = (networkPolicyOverride ?? libraryModel.dictionaryNetworkPolicy) == .allowHTTPS
             let html: String
             if let word, let library = libraryModel.library {
@@ -186,17 +202,35 @@ struct EntryWebView: NSViewRepresentable {
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
-            guard message.name == Self.bridgeMessageName,
-                  let payload = message.body as? [String: Any],
+            guard let payload = message.body as? [String: Any],
                   let kind = payload["kind"] as? String,
                   let frameURL = message.frameInfo.request.url,
                   frameURL.scheme?.lowercased() == DictSchemeHandler.scheme,
                   let host = frameURL.host?.lowercased()
             else { return }
 
-            if host == "page" {
-                if kind == "pageScroll", let offset = payload["offset"] as? Double {
+            if message.name == Self.pageGeometryMessageName {
+                guard host == "page" else { return }
+                if kind == "pageScroll",
+                   let offset = (payload["offset"] as? NSNumber)?.doubleValue {
                     recordPageScroll(offset)
+                } else if kind == "frameScroll" {
+                    synchronizeDictionaryScroll(
+                        payload["frames"] as? [[String: Any]] ?? [], webView: message.webView
+                    )
+                }
+                return
+            }
+            guard message.name == Self.bridgeMessageName else { return }
+
+            if host == "page" {
+                if kind == "pageScroll",
+                   let offset = (payload["offset"] as? NSNumber)?.doubleValue {
+                    recordPageScroll(offset)
+                } else if kind == "frameScroll" {
+                    synchronizeDictionaryScroll(
+                        payload["frames"] as? [[String: Any]] ?? [], webView: message.webView
+                    )
                 } else if kind == "collapse",
                           appState.isActiveTab(tabID),
                           let uuid = payload["dictionaryUUID"] as? String,
@@ -207,13 +241,18 @@ struct EntryWebView: NSViewRepresentable {
                 return
             }
             guard libraryModel.library?.isKnownDictionaryUUID(host) == true else { return }
+            let isDictionaryRootFrame = payload["dictionaryRoot"] as? Bool == true
+            if isDictionaryRootFrame { dictionaryFrames[host] = message.frameInfo }
 
             switch kind {
             case "diagnostic":
-                diagnosticHandler?(host, payload)
+                if isDictionaryRootFrame {
+                    diagnosticHandler?(host, payload, message.frameInfo)
+                }
 
             case "height":
-                guard let height = payload["height"] as? Double else { return }
+                guard isDictionaryRootFrame,
+                      let height = payload["height"] as? Double else { return }
                 let script = "window.__lexiconSetFrameHeight?.('\(host)',\(height));"
                 message.webView?.evaluateJavaScript(script)
 
@@ -240,6 +279,38 @@ struct EntryWebView: NSViewRepresentable {
                 else { return }
                 libraryModel.speak(text, language: language)
 
+            case "translation":
+                guard appState.isActiveTab(tabID),
+                      let requestID = payload["requestID"] as? String,
+                      requestID.range(of: #"^[A-Za-z0-9-]{1,80}$"#, options: .regularExpression) != nil,
+                      let prompt = payload["prompt"] as? String,
+                      !prompt.isEmpty,
+                      prompt.utf8.count <= 20_000,
+                      let webView = message.webView
+                else { return }
+                let frameInfo = message.frameInfo
+                Task { @MainActor [weak self, weak webView] in
+                    guard let self, let webView else { return }
+                    do {
+                        let text = try await libraryModel.translateDictionaryPrompt(prompt)
+                        deliverTranslationResponse(
+                            requestID: requestID,
+                            text: text,
+                            error: nil,
+                            frameInfo: frameInfo,
+                            webView: webView
+                        )
+                    } catch {
+                        deliverTranslationResponse(
+                            requestID: requestID,
+                            text: nil,
+                            error: error.localizedDescription,
+                            frameInfo: frameInfo,
+                            webView: webView
+                        )
+                    }
+                }
+
             case "link":
                 guard appState.isActiveTab(tabID),
                       let href = payload["href"] as? String
@@ -255,6 +326,33 @@ struct EntryWebView: NSViewRepresentable {
 
             default:
                 break
+            }
+        }
+
+        private func synchronizeDictionaryScroll(
+            _ states: [[String: Any]], webView: WKWebView?
+        ) {
+            guard let webView else { return }
+            for state in states {
+                guard let uuid = (state["uuid"] as? String)?.lowercased(),
+                      libraryModel.library?.isKnownDictionaryUUID(uuid) == true,
+                      let frameInfo = dictionaryFrames[uuid],
+                      let offset = (state["offset"] as? NSNumber)?.doubleValue,
+                      let viewportHeight = (state["viewportHeight"] as? NSNumber)?.doubleValue,
+                      offset.isFinite, offset >= 0,
+                      viewportHeight.isFinite, viewportHeight > 0
+                else { continue }
+                webView.callAsyncJavaScript(
+                    """
+                    window.__lexiconVirtualScrollY = offset;
+                    window.__lexiconVirtualViewportHeight = viewportHeight;
+                    window.__lexiconReceiveScrollState?.(offset, viewportHeight);
+                    return true;
+                    """,
+                    arguments: ["offset": offset, "viewportHeight": viewportHeight],
+                    in: frameInfo,
+                    in: .page
+                ) { _ in }
             }
         }
 
@@ -335,6 +433,27 @@ struct EntryWebView: NSViewRepresentable {
             }
         }
 
+        private func deliverTranslationResponse(
+            requestID: String,
+            text: String?,
+            error: String?,
+            frameInfo: WKFrameInfo,
+            webView: WKWebView
+        ) {
+            var payload: [String: String] = ["requestID": requestID]
+            if let text { payload["text"] = text }
+            if let error { payload["error"] = error }
+            guard let data = try? JSONSerialization.data(withJSONObject: payload),
+                  let detail = String(data: data, encoding: .utf8)
+            else { return }
+            webView.callAsyncJavaScript(
+                "window.dispatchEvent(new CustomEvent('lexicon-translation-response', {detail: detail}));",
+                arguments: ["detail": detail],
+                in: frameInfo,
+                in: .page
+            ) { _ in }
+        }
+
         private func scrollToAnchor(
             _ anchor: String, dictionaryUUID: String, webView: WKWebView?
         ) {
@@ -362,7 +481,13 @@ struct EntryWebView: NSViewRepresentable {
 
         static let bridgeScript = #"""
         (() => {
-          const send = payload => { try { webkit.messageHandlers.lexiconBridge.postMessage(payload); } catch (_) {} };
+          const send = payload => {
+            try {
+              webkit.messageHandlers.lexiconBridge.postMessage(Object.assign({}, payload, {
+                dictionaryRoot:window !== top && parent === top
+              }));
+            } catch (_) {}
+          };
           const host = location.hostname.toLowerCase();
           const ready = callback => document.readyState === 'loading'
             ? addEventListener('DOMContentLoaded', callback, {once:true}) : callback();
@@ -373,24 +498,23 @@ struct EntryWebView: NSViewRepresentable {
                 card.addEventListener('toggle', () => send({kind:'collapse', dictionaryUUID:card.dataset.uuid,
                   collapsed:!card.open}));
               });
-              let pending = false;
-              addEventListener('scroll', () => {
-                if (pending) return; pending = true;
-                requestAnimationFrame(() => { pending = false; send({kind:'pageScroll', offset:scrollY}); });
-              }, {passive:true});
             });
             return;
           }
 
           let scheduled = false, settleTimer = 0, lastSent = -1;
-          let lastTrustedTTSClick = -Infinity;
+          let lastTrustedClick = -Infinity;
+          let translationUsedForClick = false;
           addEventListener('click', event => {
-            if (event.isTrusted) lastTrustedTTSClick = performance.now();
+            if (event.isTrusted) {
+              lastTrustedClick = performance.now();
+              translationUsedForClick = false;
+            }
           }, true);
           function forwardTTSRequest(detail) {
             // Page scripts cannot invoke the native bridge directly. Accept a
             // compatibility request only immediately after a real user click.
-            if (performance.now() - lastTrustedTTSClick > 2000) return;
+            if (performance.now() - lastTrustedClick > 2000) return;
             let request;
             try { request = JSON.parse(String(detail || '')); } catch (_) { return; }
             const text = String(request.text || '').trim();
@@ -398,6 +522,19 @@ struct EntryWebView: NSViewRepresentable {
               ? 'en-GB' : 'en-US';
             if (!text || new TextEncoder().encode(text).length > 5000) return;
             send({kind:'tts', text, language});
+          }
+          function forwardTranslationRequest(detail) {
+            // One paid translation at most per physical click. The page may
+            // choose the passage and prompt, but it never sees the API key.
+            if (translationUsedForClick || performance.now() - lastTrustedClick > 2000) return;
+            let request;
+            try { request = JSON.parse(String(detail || '')); } catch (_) { return; }
+            const requestID = String(request.requestID || '');
+            const prompt = String(request.prompt || '').trim();
+            if (!/^[A-Za-z0-9-]{1,80}$/.test(requestID) || !prompt
+                || new TextEncoder().encode(prompt).length > 20000) return;
+            translationUsedForClick = true;
+            send({kind:'translation', requestID, prompt});
           }
           function measure(deep) {
             scheduled = false;
@@ -464,6 +601,10 @@ struct EntryWebView: NSViewRepresentable {
               forwardTTSRequest(event.data.detail);
               return;
             }
+            if (event.source === window && event.data?.kind === 'lexicon-translation-request') {
+              forwardTranslationRequest(event.data.detail);
+              return;
+            }
             if (event.data?.kind !== 'lexicon-anchor' || typeof event.data.anchor !== 'string') return;
             const anchor = event.data.anchor;
             let target = document.getElementById(anchor);
@@ -519,14 +660,255 @@ struct EntryWebView: NSViewRepresentable {
         })();
         """#
 
-        /// ODE and OALD repacks synthesize missing sentence audio by POSTing
-        /// to this compatibility proxy. Intercept that one request in the page
-        /// world, hand its already-cleaned text to the isolated bridge, and
-        /// return an empty successful response so the remote proxy is never
-        /// contacted. Other fetches (images, translations, etc.) are untouched.
-        static let ttsCompatibilityScript = #"""
+        /// Compatibility adapters for optional services embedded by common
+        /// dictionary repacks. Requests are intercepted before credentials or
+        /// text can leave the page, then handed to the isolated native bridge.
+        static let dictionaryCompatibilityScript = #"""
         (() => {
           const nativeFetch = window.fetch.bind(window);
+          const NativeWebSocket = window.WebSocket;
+          const pendingTranslations = new Map();
+          if (!Number.isFinite(Number(window.__lexiconVirtualScrollY))) {
+            window.__lexiconVirtualScrollY = 0;
+          }
+          if (!Number.isFinite(Number(window.__lexiconVirtualViewportHeight))) {
+            window.__lexiconVirtualViewportHeight = window.innerHeight;
+          }
+
+          // Dictionary pages live in full-content-height iframes, so their
+          // native window scroll offset is always zero even while the outer
+          // results page is far down the entry. jQuery-based dictionaries use
+          // $(window).scrollTop() around fold/show operations to keep the
+          // clicked control stationary. Feed those calls the outer page's
+          // dictionary-local offset and route setters back through the narrow
+          // scroll compatibility shim.
+          function installJQueryScrollAdapter() {
+            const jq = window.jQuery;
+            if (!jq?.fn || typeof jq.fn.scrollTop !== 'function') return false;
+            if (!jq.fn.scrollTop.__lexiconVirtualScroll) {
+              const originalScrollTop = jq.fn.scrollTop;
+              function adaptedScrollTop(value) {
+                const target = this[0];
+                const isViewport = target === window || target === document;
+                if (!isViewport) return originalScrollTop.apply(this, arguments);
+                if (!arguments.length) return Number(window.__lexiconVirtualScrollY) || 0;
+                const top = Number(value);
+                const current = Number(window.__lexiconVirtualScrollY) || 0;
+                const delta = top - current;
+                // jQuery dictionaries use a getter/setter pair around a DOM
+                // mutation to preserve the clicked control. Treat the result
+                // as a relative correction: interpreting it as an absolute
+                // iframe offset is what sent the outer page back toward the
+                // dictionary's top when WebKit reported a stale zero.
+                if (Number.isFinite(delta) && Math.abs(delta) > .5) {
+                  window.__lexiconVirtualScrollY = top;
+                  window.scrollBy({top:delta, left:0, behavior:'auto'});
+                }
+                return this;
+              }
+              Object.defineProperty(adaptedScrollTop, '__lexiconVirtualScroll', {value:true});
+              jq.fn.scrollTop = adaptedScrollTop;
+            }
+            if (typeof jq.fn.height === 'function' && !jq.fn.height.__lexiconVirtualViewport) {
+              const originalHeight = jq.fn.height;
+              function adaptedHeight(value) {
+                const target = this[0];
+                if (!arguments.length && (target === window || target === document)) {
+                  return Number(window.__lexiconVirtualViewportHeight) || window.innerHeight;
+                }
+                return originalHeight.apply(this, arguments);
+              }
+              Object.defineProperty(adaptedHeight, '__lexiconVirtualViewport', {value:true});
+              jq.fn.height = adaptedHeight;
+            }
+            return true;
+          }
+
+          let jqueryInstallAttempts = 0;
+          const jqueryInstallTimer = setInterval(() => {
+            jqueryInstallAttempts += 1;
+            if (installJQueryScrollAdapter() || jqueryInstallAttempts >= 200) {
+              clearInterval(jqueryInstallTimer);
+            }
+          }, 50);
+          addEventListener('DOMContentLoaded', installJQueryScrollAdapter, {once:true});
+          function receiveScrollState(offset, viewportHeight) {
+            const next = Number(offset);
+            const viewport = Number(viewportHeight);
+            if (!Number.isFinite(next) || next < 0) return;
+            const changed = Math.abs(next - Number(window.__lexiconVirtualScrollY)) > .5;
+            window.__lexiconVirtualScrollY = next;
+            if (Number.isFinite(viewport) && viewport > 0) {
+              window.__lexiconVirtualViewportHeight = viewport;
+            }
+            installJQueryScrollAdapter();
+            if (changed) dispatchEvent(new Event('scroll'));
+          }
+          Object.defineProperty(window, '__lexiconReceiveScrollState', {
+            value:receiveScrollState, configurable:true
+          });
+
+          function safeTranslationMarkup(value, allowDictionaryTags) {
+            let text = String(value || '')
+              .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+              .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+            if (allowDictionaryTags) {
+              // OED intentionally round-trips only these three inert markup
+              // tags. Everything else stays escaped before jQuery appends it.
+              text = text.replace(/&lt;(\/?)(m|n|o)&gt;/gi, '<$1$2>');
+            }
+            return text;
+          }
+
+          addEventListener('lexicon-translation-response', event => {
+            let payload;
+            try { payload = JSON.parse(String(event.detail || '')); } catch (_) { return; }
+            const pending = pendingTranslations.get(String(payload.requestID || ''));
+            if (!pending) return;
+            pendingTranslations.delete(payload.requestID);
+            clearTimeout(pending.timer);
+            if (payload.error) {
+              if (pending.kind === 'websocket') pending.socket.fail();
+              else pending.resolve(new Response('', {status:502, statusText:'Translation failed'}));
+              return;
+            }
+            if (pending.kind === 'websocket') {
+              pending.socket.succeed(safeTranslationMarkup(payload.text, false));
+              return;
+            }
+            const content = safeTranslationMarkup(payload.text, true);
+            const chunk = JSON.stringify({choices:[{delta:{content}}]});
+            const stream = `data: ${chunk}\n\ndata: [DONE]\n\n`;
+            pending.resolve(new Response(stream, {
+              status:200,
+              headers:{'Content-Type':'text/event-stream; charset=utf-8'}
+            }));
+          });
+
+          function makeRequestID() {
+            return typeof crypto.randomUUID === 'function'
+              ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          }
+
+          function postTranslationRequest(requestID, prompt) {
+            window.postMessage({
+              kind:'lexicon-translation-request',
+              detail:JSON.stringify({requestID, prompt})
+            }, '*');
+          }
+
+          function requestTranslation(prompt) {
+            const requestID = makeRequestID();
+            return new Promise(resolve => {
+              const timer = setTimeout(() => {
+                pendingTranslations.delete(requestID);
+                resolve(new Response('', {status:504, statusText:'Translation timed out'}));
+              }, 60000);
+              pendingTranslations.set(requestID, {kind:'fetch', resolve, timer});
+              postTranslationRequest(requestID, prompt);
+            });
+          }
+
+          class TranslationWebSocket extends EventTarget {
+            constructor(url) {
+              super();
+              this.url = String(url);
+              this.protocol = '';
+              this.extensions = '';
+              this.binaryType = 'blob';
+              this.bufferedAmount = 0;
+              this._readyState = NativeWebSocket.CONNECTING;
+              this.onopen = null;
+              this.onmessage = null;
+              this.onerror = null;
+              this.onclose = null;
+              queueMicrotask(() => {
+                if (this._readyState !== NativeWebSocket.CONNECTING) return;
+                this._readyState = NativeWebSocket.OPEN;
+                this._emit('open', new Event('open'));
+              });
+            }
+
+            get readyState() { return this._readyState; }
+
+            send(data) {
+              if (this._readyState !== NativeWebSocket.OPEN) {
+                throw new DOMException('WebSocket is not open', 'InvalidStateError');
+              }
+              let request;
+              try { request = JSON.parse(String(data)); } catch (_) { this.fail(); return; }
+              const messages = request?.payload?.message?.text;
+              const userMessage = Array.isArray(messages)
+                ? [...messages].reverse().find(item => item?.role === 'user') : null;
+              const prompt = typeof userMessage?.content === 'string'
+                ? userMessage.content.trim() : '';
+              if (!prompt) { this.fail(); return; }
+
+              const requestID = makeRequestID();
+              const timer = setTimeout(() => {
+                pendingTranslations.delete(requestID);
+                this.fail();
+              }, 60000);
+              pendingTranslations.set(requestID, {kind:'websocket', socket:this, timer});
+              postTranslationRequest(requestID, prompt);
+            }
+
+            close(code = 1000, reason = '') {
+              if (this._readyState === NativeWebSocket.CLOSED) return;
+              this._readyState = NativeWebSocket.CLOSED;
+              this._emit('close', new CloseEvent('close', {code, reason, wasClean:code === 1000}));
+            }
+
+            succeed(text) {
+              if (this._readyState !== NativeWebSocket.OPEN) return;
+              // Match the iFlytek Spark/MAAS response shape consumed by the
+              // Longman 6 repack. Its existing renderer remains unchanged.
+              const data = JSON.stringify({
+                header:{code:0, status:2},
+                payload:{choices:{status:2, text:[{role:'assistant', content:text, index:0}]}}
+              });
+              this._emit('message', new MessageEvent('message', {data}));
+              this.close();
+            }
+
+            fail() {
+              if (this._readyState === NativeWebSocket.CLOSED) return;
+              this._emit('error', new Event('error'));
+              this.close(1011, 'Translation failed');
+            }
+
+            _emit(type, event) {
+              try { this.dispatchEvent(event); } catch (_) {}
+              const handler = this[`on${type}`];
+              if (typeof handler === 'function') {
+                try { handler.call(this, event); } catch (error) { setTimeout(() => { throw error; }); }
+              }
+            }
+          }
+
+          function isLongmanTranslationSocket(url) {
+            try {
+              const parsed = new URL(String(url), location.href);
+              return parsed.protocol === 'wss:'
+                && parsed.hostname.endsWith('.xf-yun.com')
+                && parsed.hostname.startsWith('maas-api.')
+                && parsed.pathname.endsWith('/chat');
+            } catch (_) { return false; }
+          }
+
+          function CompatibleWebSocket(url, protocols) {
+            if (!new.target) throw new TypeError("Failed to construct 'WebSocket': use 'new'");
+            if (isLongmanTranslationSocket(url)) return new TranslationWebSocket(url);
+            return protocols === undefined
+              ? new NativeWebSocket(url) : new NativeWebSocket(url, protocols);
+          }
+          CompatibleWebSocket.prototype = NativeWebSocket.prototype;
+          Object.defineProperties(CompatibleWebSocket, {
+            CONNECTING:{value:NativeWebSocket.CONNECTING}, OPEN:{value:NativeWebSocket.OPEN},
+            CLOSING:{value:NativeWebSocket.CLOSING}, CLOSED:{value:NativeWebSocket.CLOSED}
+          });
+          window.WebSocket = CompatibleWebSocket;
+
           window.fetch = function(input, init) {
             let url;
             try { url = new URL(typeof input === 'string' ? input : input.url, location.href); }
@@ -544,6 +926,24 @@ struct EntryWebView: NSViewRepresentable {
                   return Promise.resolve(new Response(new Blob([], {type:'audio/mpeg'}), {status:200}));
                 }
               } catch (_) {}
+            }
+
+            const dashScopeHost = url.hostname === 'dashscope.aliyuncs.com'
+              || url.hostname === 'dashscope-intl.aliyuncs.com'
+              || url.hostname === 'dashscope-us.aliyuncs.com'
+              || url.hostname.endsWith('.maas.aliyuncs.com');
+            if (url.protocol === 'https:' && dashScopeHost
+                && url.pathname.endsWith('/chat/completions') && method === 'POST') {
+              try {
+                const body = typeof init?.body === 'string' ? JSON.parse(init.body) : null;
+                const messages = Array.isArray(body?.messages) ? body.messages : [];
+                const userMessage = [...messages].reverse().find(item => item?.role === 'user');
+                if (typeof userMessage?.content === 'string' && userMessage.content.trim()) {
+                  // Never forward the dictionary bundle's Authorization header.
+                  return requestTranslation(userMessage.content);
+                }
+              } catch (_) {}
+              return Promise.resolve(new Response('', {status:400, statusText:'Invalid translation request'}));
             }
             return nativeFetch(input, init);
           };

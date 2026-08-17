@@ -8,6 +8,7 @@ struct SettingsView: View {
         // Interface pane is renamed.
         case general = "interface"
         case content
+        case translation
         case speech
         case hotkeys
     }
@@ -16,6 +17,7 @@ struct SettingsView: View {
     @AppStorage("selectedSettingsPane", store: LibraryModel.settings)
     private var selectedPane = Pane.general.rawValue
     @State private var googleAPIKey = ""
+    @State private var translationAPIKey = ""
     @State private var showingRestoreConfirmation = false
 
     var body: some View {
@@ -27,6 +29,10 @@ struct SettingsView: View {
             contentPane
                 .tabItem { Label("Content", systemImage: "book.closed") }
                 .tag(Pane.content.rawValue)
+
+            translationPane
+                .tabItem { Label("Translation", systemImage: "character.bubble") }
+                .tag(Pane.translation.rawValue)
 
             speechPane
                 .tabItem { Label("Speech", systemImage: "speaker.wave.2") }
@@ -50,7 +56,16 @@ struct SettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("General, content, speech, history, and folded-section preferences will return to their defaults. Your API key, dictionaries, history, and starred words will be kept.")
+            Text("General, content, translation, speech, history, and folded-section preferences will return to their defaults. Your API keys, dictionaries, history, and starred words will be kept.")
+        }
+        .onChange(of: libraryModel.translationProvider) { _, _ in
+            translationAPIKey = ""
+        }
+        .background {
+            // Keeps Test Translation functional even when the Settings window
+            // is the only visible app window.
+            AppleTranslationHost()
+                .environmentObject(libraryModel)
         }
     }
 
@@ -127,10 +142,180 @@ struct SettingsView: View {
 
                 Section("Privacy") {
                     Label("Imported dictionary files stay on this Mac.", systemImage: "internaldrive")
-                    Text("Text leaves the app only when Google Cloud is selected in the Speech pane or a dictionary page is allowed to load HTTPS content.")
+                    Text("Text leaves the app only when you select a cloud translation provider, select Google Cloud in the Speech pane, or allow a dictionary page to load HTTPS content. Apple Translation stays on-device.")
                         .settingsNote()
                 }
             }
+        }
+    }
+
+    private var translationPane: some View {
+        settingsPage {
+            Form {
+                Section("Live Translation") {
+                    Picker("Provider", selection: $libraryModel.translationProvider) {
+                        ForEach(TranslationProvider.allCases) { provider in
+                            Text(provider.title).tag(provider)
+                        }
+                    }
+
+                    if libraryModel.translationProvider == .disabled {
+                        Text("Dictionary-provided network translation is intercepted and kept off. Bundled translations, such as OALD’s hidden Chinese examples, continue to work locally.")
+                            .settingsNote()
+                    } else {
+                        Text(translationProviderDescription)
+                            .settingsNote()
+                    }
+                }
+
+                if libraryModel.translationProvider != .disabled {
+                    Section(libraryModel.translationProvider.title) {
+                        if libraryModel.translationProvider == .apple {
+                            HStack {
+                                Label("On-device translation", systemImage: "checkmark.shield.fill")
+                                    .foregroundStyle(.green)
+                                Spacer()
+                                Button("Test Translation") { libraryModel.testTranslation() }
+                            }
+                            Text("Apple may ask to download the English and Simplified Chinese language models the first time they are needed.")
+                                .settingsNote()
+                            Text("No API key is required, and dictionary text is processed on this Mac.")
+                                .settingsNote()
+                        } else {
+                            if libraryModel.translationProvider == .dashScope {
+                                Picker("Region", selection: $libraryModel.dashScopeRegion) {
+                                    ForEach(DashScopeRegion.allCases) { region in
+                                        Text(region.title).tag(region)
+                                    }
+                                }
+                                LabeledContent("Model") {
+                                    TextField("", text: $libraryModel.dashScopeModel)
+                                        .labelsHidden()
+                                        .textFieldStyle(.roundedBorder)
+                                        .accessibilityLabel("DashScope model name")
+                                        .frame(width: 220)
+                                }
+                                Text("Recommended for this region: \(libraryModel.dashScopeRegion.recommendedModel)")
+                                    .settingsNote()
+                            }
+
+                            translationCredentialRow
+
+                            HStack {
+                                Label(
+                                    libraryModel.hasTranslationAPIKey
+                                        ? "Saved in Keychain" : "No key saved",
+                                    systemImage: libraryModel.hasTranslationAPIKey
+                                        ? "checkmark.circle.fill" : "key"
+                                )
+                                .foregroundStyle(
+                                    libraryModel.hasTranslationAPIKey ? .green : .secondary
+                                )
+                                Spacer()
+                                Button("Test Translation") { libraryModel.testTranslation() }
+                                    .disabled(!libraryModel.hasTranslationAPIKey)
+                            }
+
+                            DisclosureGroup("Setup instructions") {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    switch libraryModel.translationProvider {
+                                    case .googleCloud:
+                                        Text("1. Enable billing and the Cloud Translation API in a Google Cloud project.")
+                                        Text("2. Create an API key restricted to Cloud Translation, then paste it above.")
+                                        HStack(spacing: 12) {
+                                            Link(
+                                                "Enable Cloud Translation API",
+                                                destination: URL(string: "https://console.cloud.google.com/apis/library/translate.googleapis.com")!
+                                            )
+                                            Link(
+                                                "Open API credentials",
+                                                destination: URL(string: "https://console.cloud.google.com/apis/credentials")!
+                                            )
+                                        }
+                                    case .deepL:
+                                        Text("1. Create a DeepL API Free or API Pro account and copy its authentication key.")
+                                        Text("2. Paste the key above. Free keys ending in :fx automatically use the Free endpoint.")
+                                        Link(
+                                            "Open DeepL API keys",
+                                            destination: URL(string: "https://www.deepl.com/your-account/keys")!
+                                        )
+                                    case .dashScope:
+                                        Text("1. Create a Model Studio API key for the selected region.")
+                                        Text("2. Enter a supported OpenAI-compatible model name, then paste the key above.")
+                                        Link(
+                                            "DashScope API-key guide",
+                                            destination: URL(string: "https://www.alibabacloud.com/help/en/model-studio/get-api-key")!
+                                        )
+                                    case .apple, .disabled:
+                                        EmptyView()
+                                    }
+                                }
+                                .settingsNote()
+                                .padding(.top, 4)
+                            }
+
+                            Text("Only a passage you click is sent directly from Lexicon to the selected provider. Dictionary pages cannot read the saved key. Output is Simplified Chinese.")
+                                .settingsNote()
+                        }
+                    }
+                }
+
+                if let status = libraryModel.translationStatus {
+                    Section("Status") {
+                        Text(status).settingsNote()
+                    }
+                }
+            }
+        }
+    }
+
+    private var translationCredentialRow: some View {
+        LabeledContent("API key") {
+            HStack(spacing: 8) {
+                ZStack(alignment: .leading) {
+                    SecureField("", text: $translationAPIKey)
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Translation API key")
+
+                    if translationAPIKey.isEmpty {
+                        Text(libraryModel.hasTranslationAPIKey
+                            ? "Replacement key" : "Paste API key")
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 7)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .frame(width: 220)
+
+                Button("Save") {
+                    if libraryModel.saveTranslationAPIKey(translationAPIKey) {
+                        translationAPIKey = ""
+                    }
+                }
+                .disabled(
+                    translationAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
+
+                if libraryModel.hasTranslationAPIKey {
+                    Button("Remove") { libraryModel.removeTranslationAPIKey() }
+                }
+            }
+        }
+    }
+
+    private var translationProviderDescription: String {
+        switch libraryModel.translationProvider {
+        case .apple:
+            return "Uses Apple’s Translation framework and the system’s preferred translation model. This is the default and keeps dictionary text on-device."
+        case .disabled:
+            return ""
+        case .googleCloud:
+            return "Translates the source passage with Google Cloud Translation. This is predictable and works well for ordinary modern examples."
+        case .deepL:
+            return "Translates the source passage with DeepL, preserving OED’s supported markup and using the remaining dictionary prompt as translation context."
+        case .dashScope:
+            return "Sends the dictionary’s complete contextual prompt to an OpenAI-compatible DashScope model. This best preserves OED and ODE’s definition-aware instructions and markup."
         }
     }
 

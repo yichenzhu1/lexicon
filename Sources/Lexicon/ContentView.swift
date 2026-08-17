@@ -465,31 +465,18 @@ struct ContentView: View {
             // button groups share one height and one vertical rhythm.
             .frame(height: ChromeMetrics.controlHeight)
             .background {
-                if #available(macOS 26.0, *) {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(.clear)
-                        .glassEffect(
-                            .regular.interactive(),
-                            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        )
-                } else {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color(nsColor: .textBackgroundColor))
-                }
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(.clear)
+                    .glassEffect(
+                        .regular.interactive(),
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    )
             }
             .overlay {
-                if #available(macOS 26.0, *) {
-                    // Glass carries the resting state; only focus gets a ring.
-                    if searchFocused {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(Color.accentColor, lineWidth: 2)
-                    }
-                } else {
+                // Glass carries the resting state; only focus gets a ring.
+                if searchFocused {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(
-                            searchFocused ? Color.accentColor : ChromeMetrics.separatorColor,
-                            lineWidth: searchFocused ? 2 : 1
-                        )
+                        .stroke(Color.accentColor, lineWidth: 2)
                 }
             }
             .frame(maxWidth: .infinity)
@@ -1093,12 +1080,6 @@ private struct BrowserTabBar: View {
     /// The tab a reorder drag is hovering over; drives the insertion indicator.
     @State private var dropTargetTabID: UUID?
 
-    /// Liquid Glass chrome needs macOS 26; older systems get flat fills.
-    private var supportsGlass: Bool {
-        if #available(macOS 26.0, *) { return true }
-        return false
-    }
-
     var body: some View {
         GeometryReader { proxy in
             let count = max(1, appState.tabs.count)
@@ -1206,31 +1187,16 @@ private struct BrowserTabBar: View {
         .frame(height: 30)
         .background {
             if isActive {
-                if #available(macOS 26.0, *) {
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(.clear)
-                        .glassEffect(
-                            .regular,
-                            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        )
-                        .matchedGeometryEffect(id: "active-tab", in: activeTabBackground)
-                } else {
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                        .matchedGeometryEffect(id: "active-tab", in: activeTabBackground)
-                }
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(.clear)
+                    .glassEffect(
+                        .regular,
+                        in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    )
+                    .matchedGeometryEffect(id: "active-tab", in: activeTabBackground)
             } else if isHovered {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .fill(Color.primary.opacity(0.055))
-            }
-        }
-        .overlay {
-            if !supportsGlass {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .stroke(
-                        ChromeMetrics.separatorColor.opacity(isActive ? 1 : 0),
-                        lineWidth: 1
-                    )
             }
         }
         .overlay(alignment: .trailing) {

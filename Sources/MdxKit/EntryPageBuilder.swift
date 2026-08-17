@@ -96,6 +96,30 @@ public enum EntryPageBuilder {
         (() => {
           const frames = new Map(Array.from(document.querySelectorAll('iframe[data-uuid]'))
             .map(frame => [frame.dataset.uuid, frame]));
+          let scrollSyncPending = false;
+          function syncFrameScrollState() {
+            scrollSyncPending = false;
+            const states = [];
+            frames.forEach(frame => {
+              const rect = frame.getBoundingClientRect();
+              const maxLocalY = Math.max(0, rect.height - innerHeight);
+              const localY = Math.max(0, Math.min(maxLocalY, -rect.top));
+              states.push({uuid:frame.dataset.uuid || '', offset:localY, viewportHeight:innerHeight});
+            });
+            // Cross-origin custom-scheme frames do not consistently support
+            // Window.postMessage in WebKit. Hand inert geometry to a dedicated
+            // page-only handler; native code validates the main-frame origin
+            // and delivers it to each dictionary by WKFrameInfo.
+            try {
+              webkit.messageHandlers.lexiconPageGeometry.postMessage({kind:'pageScroll', offset:scrollY});
+              webkit.messageHandlers.lexiconPageGeometry.postMessage({kind:'frameScroll', frames:states});
+            } catch (_) {}
+          }
+          function requestFrameScrollSync() {
+            if (scrollSyncPending) return;
+            scrollSyncPending = true;
+            queueMicrotask(syncFrameScrollState);
+          }
           function load(frame) {
             if (!frame || frame.src || !frame.dataset.src) return;
             frame.src = frame.dataset.src;
@@ -103,7 +127,10 @@ public enum EntryPageBuilder {
           const proximity = new IntersectionObserver(entries => entries.forEach(entry => {
             if (entry.isIntersecting && entry.target.closest('details')?.open) load(entry.target);
           }), { rootMargin:'800px 0px' });
-          frames.forEach(frame => proximity.observe(frame));
+          frames.forEach(frame => {
+            proximity.observe(frame);
+            frame.addEventListener('load', requestFrameScrollSync);
+          });
           document.querySelectorAll('details[data-uuid]').forEach(card => {
             card.addEventListener('toggle', () => { if (card.open) load(card.querySelector('iframe')); });
           });
@@ -127,6 +154,7 @@ public enum EntryPageBuilder {
             frame.style.height = height + 'px';
             frame.dataset.sizeState = 'ok:' + height;
             if (wasAbove && Math.abs(height - oldHeight) > .5) scrollBy(0, height - oldHeight);
+            requestFrameScrollSync();
           };
           window.__lexiconScrollFrame = (uuid, offset, behavior) => {
             const frame = frames.get(String(uuid).toLowerCase());
@@ -173,7 +201,9 @@ public enum EntryPageBuilder {
             });
             buttons.forEach(button => button.toggleAttribute('data-current', button.dataset.jump === current));
           }
-          addEventListener('scroll', markCurrent, { passive:true }); markCurrent();
+          addEventListener('scroll', () => { markCurrent(); requestFrameScrollSync(); }, { passive:true });
+          addEventListener('resize', requestFrameScrollSync);
+          markCurrent(); requestFrameScrollSync();
           if (\(max(0, initialScrollOffset)) > 0) requestAnimationFrame(() => scrollTo(0, \(max(0, initialScrollOffset))));
         })();
         </script></body></html>

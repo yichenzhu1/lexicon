@@ -3,7 +3,9 @@ import PackageDescription
 
 let package = Package(
     name: "Lexicon",
-    platforms: [.macOS(.v14)],
+    // Lexicon intentionally follows the current macOS SDK instead of carrying
+    // compatibility code for older releases.
+    platforms: [.macOS("26.0")],
     products: [
         .library(name: "MdxKit", targets: ["MdxKit"]),
         .executable(name: "Lexicon", targets: ["Lexicon"]),

@@ -54,6 +54,10 @@ private struct LexiconWindowRoot: View {
             .environmentObject(appState)
             .focusedSceneValue(\.lexiconAppState, appState)
             .frame(minWidth: 760, minHeight: 480)
+            .background {
+                AppleTranslationHost()
+                    .environmentObject(libraryModel)
+            }
     }
 }
 

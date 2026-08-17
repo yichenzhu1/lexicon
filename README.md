@@ -19,7 +19,7 @@ Lexicon ships no dictionary content. You supply `.mdx` files (with their
 
 ## Install
 
-Lexicon requires macOS 14 or later. Download the ZIP for your Mac from the
+Lexicon follows the current macOS release and currently requires macOS 26 or later. Download the ZIP for your Mac from the
 [GitHub Releases](https://github.com/yichenzhu1/lexicon/releases) page, unzip
 it, and move `Lexicon.app` to `/Applications`.
 
@@ -52,9 +52,8 @@ with MdxBuilder 3.x.
 
 ## Internal builds
 
-Requires macOS 14+ and a Swift compiler paired with its matching macOS SDK.
-CI uses Xcode 16.4; use that version for release-equivalent builds. Command
-Line Tools work too when their compiler and SDK were installed together.
+Requires the current macOS SDK and a Swift compiler paired with that SDK.
+Command Line Tools work when their compiler and SDK were installed together.
 
 ```sh
 # Fast, unoptimized developer build
@@ -140,7 +139,7 @@ the Longman 6 look (palette lifted from `lm6.css`, including dark mode).
 ## Text-to-speech
 
 Lexicon can replace the online sentence TTS used by compatible ODE and OALD
-repacks. Choose a provider in **Settings → Text-to-Speech**:
+repacks. Choose a provider in **Settings → Speech**:
 
 - **System Voice** is the default. It uses English voices installed on the Mac,
   stays on-device, and works with dictionary network access disabled.
@@ -152,6 +151,40 @@ repacks. Choose a provider in **Settings → Text-to-Speech**:
 When a compatible dictionary requests sentence audio, Lexicon sends only the
 requested English text and locale to the selected provider. Google Cloud usage
 may incur charges.
+
+## Live translation
+
+Compatible OED, ODE, Longman 6, and similar repacks attach translation prompts
+to definitions and example sentences. Lexicon intercepts both DashScope
+`chat/completions` requests and Longman's signed iFlytek WebSocket before any
+bundled credential or passage leaves the page. Choose a provider in
+**Settings → Translation**:
+
+- **Apple Translation** is the default. It uses the system Translation
+  framework on-device and can ask permission to download the English and
+  Simplified Chinese language models on first use. It needs no API key.
+- **Google Cloud Translation** extracts only the source passage, accounting
+  for both OED/ODE's source-first prompts and Longman's instruction-first
+  prompts. It is the predictable choice for modern example sentences. Enable
+  the Cloud Translation Basic API and use a key restricted to that API.
+- **DeepL** translates the extracted passage through the v2 API. Free keys
+  ending in `:fx` automatically use the Free endpoint; Pro keys use the Pro
+  endpoint. OED's `<m>`, `<n>`, and `<o>` markup is preserved, with lemma and
+  small-cap tags excluded from translation.
+- **Alibaba DashScope** sends the dictionary's complete contextual prompt to
+  the selected OpenAI-compatible model. This best preserves the OED/ODE
+  repacks' definition-aware instructions and markup. Lexicon suggests
+  `qwen3.7-plus` (or `qwen3.7-plus-us` in Virginia), but leaves the model name
+  editable as regional availability changes.
+- **Off** disables network and Apple live translation. Bundled bilingual
+  content, including OALD's hidden Chinese examples, still works locally.
+
+Cloud translation keys are stored separately in macOS Keychain and are never
+exposed to dictionary JavaScript. At most one translation request is accepted
+per real click, passages are capped at 20 KB, and output is currently Simplified
+Chinese. Provider calls are made by Lexicon itself, so live translation can
+remain under the user's control even when dictionary-page network access is
+disabled.
 
 ## Tests
 

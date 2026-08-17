@@ -26,6 +26,10 @@ func runPageBuilderTests(_ t: TestHarness) {
         t.expect(html.contains("IntersectionObserver"), "nearby expanded frames load")
         t.expect(html.contains("__lexiconSetFrameHeight"), "child height reports have an outer receiver")
         t.expect(
+            html.contains("lexiconPageGeometry") && html.contains("requestFrameScrollSync"),
+            "outer scrolling is synchronized into dictionary frames"
+        )
+        t.expect(
             html.contains("Math.abs(height - oldHeight) < 1"),
             "unchanged child heights do not retrigger iframe layout"
         )

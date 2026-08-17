@@ -14,6 +14,12 @@ import SwiftUI
 /// caches, and two windows writing `history.json` over each other.
 @MainActor
 final class LibraryModel: ObservableObject {
+    private struct PendingAppleTranslation {
+        let id: UUID
+        let sourceText: String
+        let continuation: CheckedContinuation<String, any Error>
+    }
+
     struct Notice: Identifiable, Equatable {
         let id = UUID()
         let title: String
@@ -66,6 +72,8 @@ final class LibraryModel: ObservableObject {
     /// from view bodies for every history row, tab and starred card, so an
     /// uncached lookup ran a SQL query per row on every keystroke.
     private var displayWordCache: [String: String] = [:]
+    private var pendingAppleTranslations: [PendingAppleTranslation] = []
+    private var claimedAppleTranslationID: UUID?
 
     nonisolated static var defaultRoot: URL {
         // Override for testing against a disposable library.
@@ -88,6 +96,7 @@ final class LibraryModel: ObservableObject {
         if let warnings = library?.startupWarnings, !warnings.isEmpty {
             notice = Notice(title: "Library notice", message: warnings.joined(separator: "\n"))
         }
+        refreshTranslationCredentialState()
     }
 
     // MARK: - Dictionaries
@@ -327,6 +336,7 @@ final class LibraryModel: ObservableObject {
                 zoomKey, lookUpKey, collapsedKey, historyLimitKey, networkPolicyKey,
                 ttsProviderKey, systemBritishVoiceKey, systemAmericanVoiceKey,
                 googleBritishVoiceKey, googleAmericanVoiceKey,
+                translationProviderKey, dashScopeRegionKey, dashScopeModelKey,
             ]
             where current.object(forKey: key) == nil {
                 if let value = legacy.object(forKey: key) {
@@ -382,6 +392,33 @@ final class LibraryModel: ObservableObject {
     @Published private(set) var hasGoogleAPIKey = (try? TTSKeychain.readAPIKey()) != nil
     @Published private(set) var ttsStatus: String?
 
+    @Published var translationProvider: TranslationProvider = LibraryModel.storedTranslationProvider() {
+        didSet {
+            Self.settings.set(translationProvider.rawValue, forKey: Self.translationProviderKey)
+            refreshTranslationCredentialState()
+            translationStatus = nil
+        }
+    }
+    @Published var dashScopeRegion: DashScopeRegion = LibraryModel.storedDashScopeRegion() {
+        didSet {
+            Self.settings.set(dashScopeRegion.rawValue, forKey: Self.dashScopeRegionKey)
+            let standardModels = Set(
+                DashScopeRegion.allCases.map(\.recommendedModel) + ["qwen-plus"]
+            )
+            if standardModels.contains(dashScopeModel) {
+                dashScopeModel = dashScopeRegion.recommendedModel
+            }
+        }
+    }
+    @Published var dashScopeModel: String = LibraryModel.settings.string(
+        forKey: LibraryModel.dashScopeModelKey
+    ) ?? LibraryModel.storedDashScopeRegion().recommendedModel {
+        didSet { Self.settings.set(dashScopeModel, forKey: Self.dashScopeModelKey) }
+    }
+    @Published private(set) var hasTranslationAPIKey = false
+    @Published private(set) var translationStatus: String?
+    @Published private(set) var appleTranslationRequest: AppleTranslationRequest?
+
     /// Dictionaries the user collapsed on a results page. Remembered across
     /// lookups so a dictionary you always skip stays folded away.
     ///
@@ -411,6 +448,9 @@ final class LibraryModel: ObservableObject {
     private static let systemAmericanVoiceKey = "systemAmericanVoice"
     private static let googleBritishVoiceKey = "googleBritishVoice"
     private static let googleAmericanVoiceKey = "googleAmericanVoice"
+    private static let translationProviderKey = "translationProvider"
+    private static let dashScopeRegionKey = "dashScopeRegion"
+    private static let dashScopeModelKey = "dashScopeModel"
     private static let settingsMigrationKey = "migratedFromOrgLexiconSettings"
     private static let sidebarWidthKey = "sidebarWidth"
     private static let sidebarVisibleKey = "sidebarVisible"
@@ -476,6 +516,16 @@ final class LibraryModel: ObservableObject {
         return GoogleCloudTTS.voiceNames.contains(stored) ? stored : "Algieba"
     }
 
+    private static func storedTranslationProvider() -> TranslationProvider {
+        guard let raw = settings.string(forKey: translationProviderKey) else { return .apple }
+        return TranslationProvider(rawValue: raw) ?? .apple
+    }
+
+    private static func storedDashScopeRegion() -> DashScopeRegion {
+        guard let raw = settings.string(forKey: dashScopeRegionKey) else { return .china }
+        return DashScopeRegion(rawValue: raw) ?? .china
+    }
+
     static func systemVoices(language: String) -> [SystemSpeechVoice] {
         AVSpeechSynthesisVoice.speechVoices()
             .filter { $0.language.caseInsensitiveCompare(language) == .orderedSame }
@@ -523,6 +573,9 @@ final class LibraryModel: ObservableObject {
         systemAmericanVoiceIdentifier = ""
         googleBritishVoice = "Algieba"
         googleAmericanVoice = "Algieba"
+        translationProvider = .apple
+        dashScopeRegion = .china
+        dashScopeModel = DashScopeRegion.china.recommendedModel
         if !collapsedDictionaries.isEmpty {
             collapsedDictionaries.removeAll()
             Self.settings.removeObject(forKey: Self.collapsedKey)
@@ -722,6 +775,157 @@ final class LibraryModel: ObservableObject {
 
     func testTTS() {
         speak("Lexicon text-to-speech is ready.", language: "en-US")
+    }
+
+    func translateDictionaryPrompt(_ rawPrompt: String) async throws -> String {
+        let prompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else {
+            throw TranslationServiceError(message: "The dictionary supplied no text to translate.")
+        }
+        guard prompt.utf8.count <= 20_000 else {
+            throw TranslationServiceError(message: "This dictionary passage is too long to translate.")
+        }
+        let provider = translationProvider
+        guard provider != .disabled else {
+            let error = TranslationServiceError(
+                message: "Choose a live translation provider in Settings > Translation."
+            )
+            translationStatus = "Live translation is off."
+            errorMessage = error.message
+            throw error
+        }
+
+        translationStatus = "Translating with \(provider.title)…"
+        do {
+            let result: String
+            if provider == .apple {
+                let source = DictionaryTranslationService.plainSourcePassage(from: prompt)
+                guard !source.isEmpty else {
+                    throw TranslationServiceError(
+                        message: "The dictionary supplied no text to translate."
+                    )
+                }
+                result = try await enqueueAppleTranslation(source)
+            } else {
+                guard let apiKey = try? TranslationKeychain.readAPIKey(for: provider),
+                      !apiKey.isEmpty
+                else {
+                    throw TranslationServiceError(
+                        message: "Add a \(provider.title) API key in Settings > Translation."
+                    )
+                }
+                result = try await DictionaryTranslationService.translate(
+                    prompt: prompt,
+                    provider: provider,
+                    apiKey: apiKey,
+                    dashScopeModel: dashScopeModel,
+                    dashScopeRegion: dashScopeRegion
+                )
+            }
+            translationStatus = "Translated with \(provider.title)."
+            return result
+        } catch {
+            translationStatus = "\(provider.title) translation failed."
+            errorMessage = "Could not translate this passage: \(error.localizedDescription)"
+            throw error
+        }
+    }
+
+    @discardableResult
+    func saveTranslationAPIKey(_ rawValue: String) -> Bool {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard translationProvider.requiresAPIKey else {
+            errorMessage = "The selected translation provider does not use an API key."
+            return false
+        }
+        guard !value.isEmpty else {
+            errorMessage = "Enter a translation API key first."
+            return false
+        }
+        do {
+            try TranslationKeychain.saveAPIKey(value, for: translationProvider)
+            hasTranslationAPIKey = true
+            translationStatus = "\(translationProvider.title) API key saved in Keychain."
+            return true
+        } catch {
+            errorMessage = "Could not save the translation API key: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    func removeTranslationAPIKey() {
+        guard translationProvider.requiresAPIKey else { return }
+        do {
+            try TranslationKeychain.removeAPIKey(for: translationProvider)
+            hasTranslationAPIKey = false
+            translationStatus = "\(translationProvider.title) API key removed."
+        } catch {
+            errorMessage = "Could not remove the translation API key: \(error.localizedDescription)"
+        }
+    }
+
+    func testTranslation() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await translateDictionaryPrompt(
+                    "The old lighthouse stood on the edge of the cliff.\n"
+                    + "Translate the English sentence above into Simplified Chinese. "
+                    + "Return only the translation."
+                )
+                translationStatus = "Test: \(result)"
+            } catch {
+                // translateDictionaryPrompt already provides the actionable error.
+            }
+        }
+    }
+
+    private func refreshTranslationCredentialState() {
+        hasTranslationAPIKey = translationProvider.requiresAPIKey
+            && (try? TranslationKeychain.readAPIKey(for: translationProvider)) != nil
+    }
+
+    private func enqueueAppleTranslation(_ sourceText: String) async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            let request = PendingAppleTranslation(
+                id: UUID(),
+                sourceText: sourceText,
+                continuation: continuation
+            )
+            pendingAppleTranslations.append(request)
+            publishNextAppleTranslationIfNeeded()
+        }
+    }
+
+    func claimAppleTranslationRequest() -> AppleTranslationRequest? {
+        guard let request = appleTranslationRequest,
+              claimedAppleTranslationID == nil
+        else { return nil }
+        claimedAppleTranslationID = request.id
+        return request
+    }
+
+    func completeAppleTranslation(
+        id: UUID,
+        result: Result<String, any Error>
+    ) {
+        guard let index = pendingAppleTranslations.firstIndex(where: { $0.id == id }) else {
+            return
+        }
+        let pending = pendingAppleTranslations.remove(at: index)
+        if appleTranslationRequest?.id == id {
+            appleTranslationRequest = nil
+            claimedAppleTranslationID = nil
+        }
+        pending.continuation.resume(with: result)
+        publishNextAppleTranslationIfNeeded()
+    }
+
+    private func publishNextAppleTranslationIfNeeded() {
+        guard appleTranslationRequest == nil,
+              let next = pendingAppleTranslations.first
+        else { return }
+        appleTranslationRequest = AppleTranslationRequest(id: next.id, sourceText: next.sourceText)
     }
 
     private func stopSpeech() {

@@ -15,6 +15,8 @@ enum RenderSmokeTest {
     private static var baselineHeights: [Double] = []
     private static var stabilityCheckStarted = false
     private static var stabilityPassed = false
+    private static var scrollCompatibilityCheckStarted = false
+    private static var scrollCompatibilityPassed = false
     private static var diagnostics: [String: Diagnostic] = [:]
     private static let word = ProcessInfo.processInfo.environment["LEXICON_SMOKE_WORD"] ?? "apple"
     private static let resizeCycle = ProcessInfo.processInfo.environment["LEXICON_SMOKE_RESIZE_CYCLE"] == "1"
@@ -43,7 +45,7 @@ enum RenderSmokeTest {
         if ProcessInfo.processInfo.environment["LEXICON_SMOKE_ONLINE"] != "1" {
             bridge.networkPolicyOverride = .offlineOnly
         }
-        bridge.diagnosticHandler = { uuid, payload in
+        bridge.diagnosticHandler = { uuid, payload, _ in
             if let report = payload["probe"] as? String {
                 probeReports[uuid] = report
                 return
@@ -54,9 +56,11 @@ enum RenderSmokeTest {
             let lm6JS = payload["lm6JS"] as? Bool ?? false
             let lm6WordSetItems = payload["lm6WordSetItems"] as? Int ?? 0
             let lm6WordSetVisible = payload["lm6WordSetVisible"] as? Bool ?? false
+            let hasJQuery = payload["hasJQuery"] as? Bool ?? false
             diagnostics[uuid] = Diagnostic(
                 styles: styles, reverseColor: reverseColor, lm6Font: lm6Font, lm6JS: lm6JS,
-                lm6WordSetItems: lm6WordSetItems, lm6WordSetVisible: lm6WordSetVisible
+                lm6WordSetItems: lm6WordSetItems, lm6WordSetVisible: lm6WordSetVisible,
+                hasJQuery: hasJQuery
             )
         }
         coordinator = bridge
@@ -67,6 +71,11 @@ enum RenderSmokeTest {
             contentWorld: EntryWebView.Coordinator.bridgeWorld,
             name: EntryWebView.Coordinator.bridgeMessageName
         )
+        configuration.userContentController.add(
+            bridge,
+            contentWorld: .page,
+            name: EntryWebView.Coordinator.pageGeometryMessageName
+        )
         configuration.userContentController.addUserScript(WKUserScript(
             source: EntryWebView.Coordinator.bridgeScript,
             injectionTime: .atDocumentStart,
@@ -74,7 +83,7 @@ enum RenderSmokeTest {
             in: EntryWebView.Coordinator.bridgeWorld
         ))
         configuration.userContentController.addUserScript(WKUserScript(
-            source: EntryWebView.Coordinator.ttsCompatibilityScript,
+            source: EntryWebView.Coordinator.dictionaryCompatibilityScript,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false,
             in: .page
@@ -84,6 +93,8 @@ enum RenderSmokeTest {
             setTimeout(() => {
               document.documentElement.dataset.lexiconSmokeLm6 =
                 typeof window.lm6cf === 'object' ? '1' : '0';
+              document.documentElement.dataset.lexiconSmokeJQuery =
+                typeof window.jQuery === 'function' ? '1' : '0';
             }, 500);
             """,
             injectionTime: .atDocumentEnd,
@@ -99,12 +110,14 @@ enum RenderSmokeTest {
               const lm6WordSet = document.querySelector('body > .category.lm6 > .content');
               webkit.messageHandlers.lexiconBridge.postMessage({
                 kind:'diagnostic',
+                dictionaryRoot:window !== top && parent === top,
                 styles:Array.from(document.styleSheets).map(s => s.href || 'inline'),
                 reverseColor:reverse ? getComputedStyle(reverse).color : '',
                 lm6Font:lm6 ? getComputedStyle(lm6).fontFamily : '',
                 lm6JS:document.documentElement.dataset.lexiconSmokeLm6 === '1',
                 lm6WordSetItems:lm6WordSet?.querySelectorAll('a[href]').length || 0,
-                lm6WordSetVisible:!!lm6WordSet && getComputedStyle(lm6WordSet).display !== 'none'
+                lm6WordSetVisible:!!lm6WordSet && getComputedStyle(lm6WordSet).display !== 'none',
+                hasJQuery:document.documentElement.dataset.lexiconSmokeJQuery === '1'
               });
             }, 700);
             """,
@@ -130,6 +143,7 @@ enum RenderSmokeTest {
                   const hidden = Array.from(document.querySelectorAll('*')).filter(
                     el => getComputedStyle(el).display === 'none').length;
                   webkit.messageHandlers.lexiconBridge.postMessage({ kind:'diagnostic',
+                    dictionaryRoot:window !== top && parent === top,
                     probe:'scrollH=' + de.scrollHeight + ' bodyH=' + (b ? b.scrollHeight : 0)
                       + ' deepestBottom=' + Math.round(bottom) + ' deepest=' + deepest
                       + ' elements=' + document.querySelectorAll('*').length
@@ -205,6 +219,12 @@ enum RenderSmokeTest {
                     }
                     guard stabilityPassed else {
                         if !stabilityCheckStarted { startStabilityCheck() }
+                        return
+                    }
+                    guard scrollCompatibilityPassed else {
+                        if !scrollCompatibilityCheckStarted {
+                            startScrollCompatibilityCheck(frames: frames)
+                        }
                         return
                     }
                     if word == "苹果" {
@@ -331,6 +351,99 @@ enum RenderSmokeTest {
         }
     }
 
+    /// Reproduces the contract used by Longman/OED controls: read jQuery's
+    /// window scrollTop, change content, then set a corrected value. In a
+    /// full-height iframe the native value is always zero, so this verifies
+    /// that the page-world adapter receives and controls the outer scroll.
+    private static func startScrollCompatibilityCheck(frames: [Frame]) {
+        guard let webView else { return }
+        scrollCompatibilityCheckStarted = true
+        let viewportHeight = Double(webView.bounds.height)
+        guard let target = frames.first(where: {
+            $0.height > viewportHeight + 400
+                && diagnostics[$0.uuid]?.hasJQuery == true
+                && coordinator?.dictionaryFrameInfo(for: $0.uuid) != nil
+        }), let frameInfo = coordinator?.dictionaryFrameInfo(for: target.uuid) else {
+            // Tiny fixture dictionaries may have neither jQuery nor enough
+            // content to scroll within; the compatibility path is inapplicable.
+            scrollCompatibilityPassed = true
+            return
+        }
+        Task { @MainActor in
+            do {
+                let outerValue = try await webView.evaluateJavaScript("""
+                (() => {
+                  const frame=document.querySelector('iframe[data-uuid="\(target.uuid)"]');
+                  if (!frame) return -1;
+                  const top=frame.getBoundingClientRect().top + scrollY;
+                  scrollTo(0, top + 220);
+                  return scrollY;
+                })()
+                """)
+                guard let outerStart = (outerValue as? NSNumber)?.doubleValue, outerStart >= 0 else {
+                    print("SMOKE FAIL: could not position the outer page for scroll compatibility")
+                    exit(1)
+                }
+                try await Task.sleep(for: .milliseconds(250))
+                let adapter = try await callPageNumber(
+                    in: webView,
+                    "return window.jQuery?.fn?.scrollTop?.__lexiconVirtualScroll ? 1 : 0;",
+                    frameInfo: frameInfo
+                )
+                guard adapter == 1 else {
+                    print("SMOKE FAIL: dictionary jQuery scroll adapter was not installed")
+                    exit(1)
+                }
+                _ = try await callPageNumber(
+                    in: webView,
+                    "window.jQuery(window).scrollTop(window.jQuery(window).scrollTop() + 120); return 1;",
+                    frameInfo: frameInfo
+                )
+                try await Task.sleep(for: .milliseconds(250))
+                let finalValue = try await webView.evaluateJavaScript("scrollY")
+                guard let outerEnd = (finalValue as? NSNumber)?.doubleValue,
+                      abs(outerEnd - outerStart - 120) < 4
+                else {
+                    print(
+                        "SMOKE FAIL: dictionary scroll setter jumped unexpectedly: "
+                            + String(describing: finalValue)
+                    )
+                    exit(1)
+                }
+                scrollCompatibilityPassed = true
+            } catch {
+                print("SMOKE FAIL: scroll compatibility check errored: \(error.localizedDescription)")
+                exit(1)
+            }
+        }
+    }
+
+    private static func callPageNumber(
+        in webView: WKWebView, _ source: String, frameInfo: WKFrameInfo
+    ) async throws -> Double {
+        try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Double, Error>) in
+            webView.callAsyncJavaScript(
+                source, arguments: [:], in: frameInfo, in: .page
+            ) { result in
+                switch result {
+                case .success(let value):
+                    guard let number = value as? NSNumber else {
+                        continuation.resume(throwing: SmokeError.nonNumericJavaScriptResult)
+                        return
+                    }
+                    continuation.resume(returning: number.doubleValue)
+                case .failure(let error):
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private enum SmokeError: Error {
+        case nonNumericJavaScriptResult
+    }
+
     private struct Diagnostic: CustomStringConvertible {
         let styles: [String]
         let reverseColor: String
@@ -338,9 +451,11 @@ enum RenderSmokeTest {
         let lm6JS: Bool
         let lm6WordSetItems: Int
         let lm6WordSetVisible: Bool
+        let hasJQuery: Bool
         var description: String {
             "styles=\(styles), reverseColor=\(reverseColor), lm6Font=\(lm6Font), lm6JS=\(lm6JS), "
-                + "lm6WordSetItems=\(lm6WordSetItems), lm6WordSetVisible=\(lm6WordSetVisible)"
+                + "lm6WordSetItems=\(lm6WordSetItems), lm6WordSetVisible=\(lm6WordSetVisible), "
+                + "hasJQuery=\(hasJQuery)"
         }
     }
 
