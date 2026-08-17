@@ -194,6 +194,40 @@ struct EntryWebView: NSViewRepresentable {
                         }
                     }
                 }
+                // LEXICON_DEBUG_SWEEP=1 simulates wheel-like scrolling in the
+                // live window — fine-grained steps with direction reversals —
+                // logging scroll position, frame heights, and every height
+                // assignment between ticks to catch bounce/oscillation.
+                if ProcessInfo.processInfo.environment["LEXICON_DEBUG_SWEEP"] == "1" {
+                    for step in 0 ..< 400 {
+                        // Four phases: down, up, down, up (60px per 60ms).
+                        let delta = (step / 100) % 2 == 0 ? 60 : -60
+                        DispatchQueue.main.asyncAfter(
+                            deadline: .now() + 4 + Double(step) * 0.06
+                        ) { [weak webView] in
+                            webView?.evaluateJavaScript("""
+                            (() => {
+                              if (!window.__lexiconHeightLog) {
+                                const log = [];
+                                const orig = window.__lexiconSetFrameHeight;
+                                window.__lexiconSetFrameHeight = (u, h) => {
+                                  log.push(u.slice(0, 8) + '=' + Math.round(Number(h) || 0));
+                                  return orig(u, h);
+                                };
+                                window.__lexiconHeightLog = log;
+                              }
+                              const dh = window.__lexiconHeightLog.splice(0);
+                              const s = JSON.stringify({y: Math.round(scrollY),
+                                h: Array.from(document.querySelectorAll('iframe[data-uuid]'))
+                                  .map(f => Math.round(f.getBoundingClientRect().height)), dh});
+                              scrollBy(0, \(delta)); return s; })()
+                            """) { value, _ in
+                                let line = "SWEEP \(step): \(value ?? "")\n"
+                                FileHandle.standardOutput.write(Data(line.utf8))
+                            }
+                        }
+                    }
+                }
             }
             #endif
         }
@@ -553,10 +587,32 @@ struct EntryWebView: NSViewRepresentable {
               // paddingBottom again: doing so made the fast and settled paths
               // alternate forever by exactly the 14px wrapper padding.
               let bottom = bodyRect.bottom;
+              // Descendants of an overflow-clipping box (line-clamped fold
+              // boxes, nested scrollboxes) keep their laid-out client rects
+              // even where the box clips them away. Counting that invisible
+              // overflow made the settled height thousands of points taller
+              // than the body box on OED entries, so the fast and settled
+              // paths alternated forever and the resize compensation bounced
+              // the outer page on every scroll.
+              const clipBottoms = new Map();
               document.querySelectorAll('*').forEach(element => {
                 const style = getComputedStyle(element);
+                if (style.overflowY !== 'visible') {
+                  clipBottoms.set(element, element.getBoundingClientRect().bottom);
+                }
                 if (style.visibility === 'hidden' || style.position === 'fixed') return;
-                for (const rect of element.getClientRects()) bottom = Math.max(bottom, rect.bottom);
+                for (const rect of element.getClientRects()) {
+                  if (rect.bottom <= bottom) continue;
+                  let clipped = false;
+                  for (let p = element.parentElement; p && p !== body; p = p.parentElement) {
+                    const clipBottom = clipBottoms.get(p);
+                    if (clipBottom !== undefined && rect.bottom > clipBottom + 1) {
+                      clipped = true;
+                      break;
+                    }
+                  }
+                  if (!clipped) bottom = rect.bottom;
+                }
               });
               height = Math.max(height, Math.ceil(bottom - bodyRect.top));
             }

@@ -17,6 +17,8 @@ enum RenderSmokeTest {
     private static var stabilityPassed = false
     private static var scrollCompatibilityCheckStarted = false
     private static var scrollCompatibilityPassed = false
+    private static var scrollSweepCheckStarted = false
+    private static var scrollSweepPassed = false
     private static var diagnostics: [String: Diagnostic] = [:]
     private static let word = ProcessInfo.processInfo.environment["LEXICON_SMOKE_WORD"] ?? "apple"
     private static let resizeCycle = ProcessInfo.processInfo.environment["LEXICON_SMOKE_RESIZE_CYCLE"] == "1"
@@ -227,6 +229,10 @@ enum RenderSmokeTest {
                         }
                         return
                     }
+                    guard scrollSweepPassed else {
+                        if !scrollSweepCheckStarted { startScrollSweepCheck() }
+                        return
+                    }
                     if word == "苹果" {
                         let reverse = diagnostics.values.first {
                             $0.styles.contains(where: { $0.hasSuffix("/oaldzh.css") })
@@ -413,6 +419,80 @@ enum RenderSmokeTest {
                 scrollCompatibilityPassed = true
             } catch {
                 print("SMOKE FAIL: scroll compatibility check errored: \(error.localizedDescription)")
+                exit(1)
+            }
+        }
+    }
+
+    /// Reproduces a downward scroll gesture through the whole results page.
+    /// Dictionary scroll handlers react to the synthetic per-frame scroll
+    /// events; their floating chrome must not feed back into frame heights,
+    /// and the page must never be yanked back up while scrolling down.
+    private static func startScrollSweepCheck() {
+        guard let webView else { return }
+        scrollSweepCheckStarted = true
+        Task { @MainActor in
+            do {
+                _ = try await webView.evaluateJavaScript("""
+                (() => {
+                  const frames = Array.from(document.querySelectorAll('iframe[data-uuid]'));
+                  if (!window.__lexiconStabilityRanges) return false;
+                  window.__lexiconStabilityRanges = new Map(frames.map(frame => {
+                    const height = frame.getBoundingClientRect().height;
+                    return [frame.dataset.uuid || '', {uuid:frame.dataset.uuid || '', min:height, max:height}];
+                  }));
+                  return true;
+                })()
+                """)
+                let maxValue = try await webView.evaluateJavaScript(
+                    "document.documentElement.scrollHeight - innerHeight"
+                )
+                guard let maxScroll = (maxValue as? NSNumber)?.doubleValue, maxScroll > 0 else {
+                    scrollSweepPassed = true
+                    return
+                }
+                var previousY = 0.0
+                var y = 0.0
+                while y <= maxScroll {
+                    _ = try await webView.evaluateJavaScript("""
+                    (() => { scrollTo(0, \(y)); return scrollY; })()
+                    """)
+                    try await Task.sleep(for: .milliseconds(320))
+                    let settled = try await webView.evaluateJavaScript(
+                        "JSON.stringify({y: scrollY, h: Array.from(document.querySelectorAll('iframe[data-uuid]')).map(f => Math.round(f.getBoundingClientRect().height))})"
+                    )
+                    let currentY = ((settled as? String)
+                        .flatMap { $0.data(using: .utf8) }
+                        .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any])
+                        .flatMap { ($0["y"] as? NSNumber)?.doubleValue } ?? y
+                    print("SWEEP target=\(Int(y)) actual=\(Int(currentY)) "
+                        + "\((settled as? String) ?? "")")
+                    if currentY < previousY - 8 || currentY < y - 8 {
+                        print("SMOKE FAIL: page bounced back during downward scroll: "
+                            + "target=\(y) actual=\(currentY) previous=\(previousY)")
+                        exit(1)
+                    }
+                    previousY = currentY
+                    y += 500
+                }
+                let value = try await webView.evaluateJavaScript(
+                    "JSON.stringify(Array.from(window.__lexiconStabilityRanges?.values?.() || []))"
+                )
+                guard let json = value as? String,
+                      let data = json.data(using: .utf8),
+                      let ranges = try? JSONDecoder().decode([HeightRange].self, from: data)
+                else {
+                    print("SMOKE FAIL: could not sample scroll-sweep stability: invalid result")
+                    exit(1)
+                }
+                let unstable = ranges.filter { $0.max - $0.min > 1 }
+                guard unstable.isEmpty else {
+                    print("SMOKE FAIL: iframe heights oscillated during scroll: \(unstable)")
+                    exit(1)
+                }
+                scrollSweepPassed = true
+            } catch {
+                print("SMOKE FAIL: scroll sweep errored: \(error.localizedDescription)")
                 exit(1)
             }
         }
