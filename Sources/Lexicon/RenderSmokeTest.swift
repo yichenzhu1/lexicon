@@ -74,6 +74,12 @@ enum RenderSmokeTest {
             in: EntryWebView.Coordinator.bridgeWorld
         ))
         configuration.userContentController.addUserScript(WKUserScript(
+            source: EntryWebView.Coordinator.ttsCompatibilityScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false,
+            in: .page
+        ))
+        configuration.userContentController.addUserScript(WKUserScript(
             source: """
             setTimeout(() => {
               document.documentElement.dataset.lexiconSmokeLm6 =

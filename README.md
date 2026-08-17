@@ -137,6 +137,22 @@ The `themes/` directory contains ready-made themes that restyle
 Merriam-Webster (`mw-lm6.css`) and OALD 10 (`oald-lm6.css`) repacks to match
 the Longman 6 look (palette lifted from `lm6.css`, including dark mode).
 
+## Text-to-speech
+
+Lexicon can replace the online sentence TTS used by compatible ODE and OALD
+repacks. Choose a provider in **Settings → Text-to-Speech**:
+
+- **System Voice** is the default. It uses English voices installed on the Mac,
+  stays on-device, and works with dictionary network access disabled.
+- **Google Cloud** uses Chirp 3 HD voices. Enable the Cloud Text-to-Speech API
+  and billing in a Google Cloud project, create an API key restricted to that
+  API, and paste it into Settings. The key is stored in macOS Keychain and is
+  never exposed to dictionary JavaScript.
+
+When a compatible dictionary requests sentence audio, Lexicon sends only the
+requested English text and locale to the selected provider. Google Cloud usage
+may incur charges.
+
 ## Tests
 
 ```sh

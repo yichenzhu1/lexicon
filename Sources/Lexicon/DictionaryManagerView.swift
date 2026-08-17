@@ -34,16 +34,7 @@ struct DictionaryManagerView: View {
             Divider()
 
             if libraryModel.dictionaries.isEmpty && !libraryModel.isImporting {
-                ContentUnavailableView(
-                    "No dictionaries",
-                    systemImage: "books.vertical",
-                    description: Text(
-                        "Import a .mdx file, or drag one onto the window. Companion "
-                        + "files (.mdd resources, .css) in the same folder are copied "
-                        + "automatically. Drag to set the display order."
-                    )
-                )
-                .frame(maxHeight: .infinity)
+                emptyLibraryView
             } else {
                 List {
                     ForEach(libraryModel.dictionaries) { dictionary in
@@ -68,14 +59,18 @@ struct DictionaryManagerView: View {
                 Divider()
                 importProgress
                     .padding()
-            } else if let notice = libraryModel.notice {
-                Divider()
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if !libraryModel.isImporting, let notice = libraryModel.notice {
                 LibraryNoticeView(notice: notice) {
                     libraryModel.dismissNotice()
                 }
                 .padding(12)
+                .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .bottom)))
             }
         }
+        .animation(.smooth(duration: 0.2), value: libraryModel.notice?.id)
         .frame(minWidth: 460, idealWidth: 560, minHeight: 360, idealHeight: 460)
         .alert(
             "Move Dictionary to Trash?",
@@ -125,6 +120,19 @@ struct DictionaryManagerView: View {
         }
     }
 
+    private var emptyLibraryView: some View {
+        ContentUnavailableView(
+            "No dictionaries",
+            systemImage: "books.vertical",
+            description: Text(
+                "Import a .mdx file, or drag one onto the window. Companion "
+                + "files (.mdd resources, .css) in the same folder are copied "
+                + "automatically. Drag to set the display order."
+            )
+        )
+        .frame(maxHeight: .infinity)
+    }
+
     private var importProgress: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
@@ -163,15 +171,7 @@ private struct DictionaryRow: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            Toggle("", isOn: Binding(
-                get: { dictionary.enabled },
-                set: { libraryModel.setEnabled($0, for: dictionary) }
-            ))
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .labelsHidden()
-            .disabled(isRemoving)
-            .accessibilityLabel("Enable \(dictionary.title)")
+            DictionaryIconView(image: libraryModel.dictionaryIcon(for: dictionary))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(dictionary.title)
@@ -183,7 +183,7 @@ private struct DictionaryRow: View {
                     if dictionary.hasResources {
                         Text("\(dictionary.totalResourceCount.formatted()) resources")
                             .help(dictionary.looseResourceCount > 0
-                                ? "Includes \(dictionary.looseResourceCount.formatted()) loose companion file(s), such as same-name CSS or JavaScript."
+                                ? "Includes \(dictionary.looseResourceCount.formatted()) loose companion file(s), such as CSS, JavaScript, or images."
                                 : "Resources indexed from MDD companion files.")
                     } else {
                         Label("No resources", systemImage: "exclamationmark.triangle")
@@ -203,6 +203,16 @@ private struct DictionaryRow: View {
 
             Spacer()
 
+            Toggle("", isOn: Binding(
+                get: { dictionary.enabled },
+                set: { libraryModel.setEnabled($0, for: dictionary) }
+            ))
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .labelsHidden()
+            .disabled(isRemoving || libraryModel.isImporting)
+            .accessibilityLabel("Enable \(dictionary.title)")
+
             if isRemoving {
                 ProgressView()
                     .controlSize(.small)
@@ -214,6 +224,7 @@ private struct DictionaryRow: View {
                 .buttonStyle(.borderless)
                 .help("Rename this dictionary")
                 .accessibilityLabel("Rename \(dictionary.title)")
+                .disabled(libraryModel.isImporting)
 
                 Button(action: requestRemoval) {
                     Image(systemName: "trash")
@@ -226,7 +237,32 @@ private struct DictionaryRow: View {
         .padding(.vertical, 3)
         .contextMenu {
             Button("Rename…", action: requestRename)
+                .disabled(libraryModel.isImporting)
             Button("Move to Trash", role: .destructive, action: requestRemoval)
         }
+    }
+}
+
+private struct DictionaryIconView: View {
+    let image: NSImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else {
+                Image(systemName: "book.closed.fill")
+                    .resizable()
+                    .scaledToFit()
+                    .padding(6)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 28, height: 28)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .accessibilityHidden(true)
     }
 }

@@ -94,15 +94,6 @@ struct ContentView: View {
                     .transition(.opacity)
             }
         }
-        .overlay(alignment: .bottomTrailing) {
-            if let notice = libraryModel.notice {
-                LibraryNoticeView(notice: notice) {
-                    libraryModel.dismissNotice()
-                }
-                .padding(16)
-                .transition(.opacity)
-            }
-        }
         .alert(
             "Lexicon",
             isPresented: Binding(
@@ -453,8 +444,11 @@ struct ContentView: View {
                     }
                 }
                 .onKeyPress(.escape) {
-                    guard !appState.searchText.isEmpty else { return .ignored }
-                    appState.searchText = ""
+                    if appState.searchText.isEmpty {
+                        searchFocused = false
+                    } else {
+                        appState.searchText = ""
+                    }
                     return .handled
                 }
                 .onKeyPress(.downArrow) {
@@ -499,6 +493,9 @@ struct ContentView: View {
                 }
             }
             .frame(maxWidth: .infinity)
+            .background {
+                SearchFocusDismissBridge(isFocused: $searchFocused)
+            }
             .accessibilityLabel("Search all dictionaries")
     }
 
@@ -757,6 +754,72 @@ struct ContentView: View {
         case .lexicon: return "Type in the search field to look up a word"
         case .history: return "No lookup history yet"
         case .starred: return "Star a word to keep it here"
+        }
+    }
+}
+
+/// SwiftUI's focus state doesn't automatically resign when an AppKit-backed
+/// view (notably WKWebView) receives a click. This unobtrusive bridge watches
+/// the containing window and releases search focus on any click outside the
+/// search field without consuming the click meant for the destination view.
+private struct SearchFocusDismissBridge: NSViewRepresentable {
+    let isFocused: FocusState<Bool>.Binding
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isFocused: isFocused)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        context.coordinator.hostView = view
+        context.coordinator.installMonitor()
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.hostView = nsView
+        context.coordinator.isFocused = isFocused
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.removeMonitor()
+    }
+
+    @MainActor
+    final class Coordinator {
+        weak var hostView: NSView?
+        var isFocused: FocusState<Bool>.Binding
+        private var eventMonitor: Any?
+
+        init(isFocused: FocusState<Bool>.Binding) {
+            self.isFocused = isFocused
+        }
+
+        func installMonitor() {
+            guard eventMonitor == nil else { return }
+            eventMonitor = NSEvent.addLocalMonitorForEvents(
+                matching: [.leftMouseDown, .rightMouseDown]
+            ) { [weak self] event in
+                guard let self,
+                      isFocused.wrappedValue,
+                      let hostView,
+                      let window = hostView.window,
+                      event.window === window
+                else { return event }
+
+                let point = hostView.convert(event.locationInWindow, from: nil)
+                guard !hostView.bounds.contains(point) else { return event }
+
+                isFocused.wrappedValue = false
+                return event
+            }
+        }
+
+        func removeMonitor() {
+            if let eventMonitor {
+                NSEvent.removeMonitor(eventMonitor)
+            }
+            eventMonitor = nil
         }
     }
 }

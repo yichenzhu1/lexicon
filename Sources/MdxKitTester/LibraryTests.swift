@@ -81,7 +81,13 @@ func runLibraryTests(_ t: TestHarness) {
         try FileManager.default.createDirectory(
             at: source.appendingPathComponent("assets"), withIntermediateDirectories: true
         )
-        try Data(".entry { color: teal; background: url(assets/icon.svg) }".utf8)
+        try Data(
+            """
+            .entry { color: teal; background: url(assets/icon.svg) }
+            .optional-decoration { background: url(assets/missing-chevron.png) }
+            @font-face { font-family: optional; src: url(assets/missing-font.otf) }
+            """.utf8
+        )
             .write(to: source.appendingPathComponent("oald.css"))
         try Data("window.fixtureLoaded = true".utf8)
             .write(to: source.appendingPathComponent("oald.js"))
@@ -90,7 +96,10 @@ func runLibraryTests(_ t: TestHarness) {
 
         let looseRoot = tempRoot.appendingPathComponent("loose-resources")
         let looseLibrary = try DictionaryLibrary(rootURL: looseRoot)
-        let record = try looseLibrary.importDictionary(from: source.appendingPathComponent("astral.mdx"))
+        var importStages: [String] = []
+        let record = try looseLibrary.importDictionary(
+            from: source.appendingPathComponent("astral.mdx")
+        ) { importStages.append($0.stage) }
         t.expect(record.hasResources, "differently named loose companions detected without an MDD")
         t.expectEqual(record.resourceCount, 0, "MDD count remains separate")
         t.expectEqual(record.looseResourceCount, 3, "CSS, JavaScript and CSS dependency counted")
@@ -101,6 +110,34 @@ func runLibraryTests(_ t: TestHarness) {
                  "differently named JavaScript served")
         t.expect(try looseLibrary.resource(path: "assets/icon.svg", dictionaryUUID: record.uuid) != nil,
                  "resource referenced by sibling CSS copied recursively")
+        t.expect(
+            !importStages.contains(where: { $0.hasPrefix("Warning:") }),
+            "missing optional CSS font/background fallbacks do not warn"
+        )
+    }
+
+    t.run("library: top-level static companions import without entry discovery") {
+        let source = tempRoot.appendingPathComponent("static-source")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(
+            at: fixturesURL.appendingPathComponent("astral.mdx"),
+            to: source.appendingPathComponent("static.mdx")
+        )
+        try Data("fixture image".utf8).write(to: source.appendingPathComponent("INTRODUCTION.jpeg"))
+        try Data("fixture icon".utf8).write(to: source.appendingPathComponent("static.png"))
+
+        let staticRoot = tempRoot.appendingPathComponent("static-resources")
+        let staticLibrary = try DictionaryLibrary(rootURL: staticRoot)
+        let record = try staticLibrary.importDictionary(from: source.appendingPathComponent("static.mdx"))
+        t.expectEqual(record.looseResourceCount, 2, "top-level static companions counted")
+        t.expect(
+            try staticLibrary.resource(path: "INTRODUCTION.jpeg", dictionaryUUID: record.uuid) != nil,
+            "differently named top-level image served"
+        )
+        t.expectEqual(
+            staticLibrary.iconURL(for: record)?.lastPathComponent, "static.png",
+            "same-basename dictionary icon discovered"
+        )
     }
 
     t.run("library: failed resource indexing rolls back the whole import") {

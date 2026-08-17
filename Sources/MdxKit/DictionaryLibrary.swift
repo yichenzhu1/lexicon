@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import UniformTypeIdentifiers
 
@@ -452,10 +453,50 @@ public final class DictionaryLibrary: @unchecked Sendable {
         dictionariesURL.appendingPathComponent(record.folderName, isDirectory: true)
     }
 
+    /// The artwork convention used by MDict packages is a top-level image
+    /// with the same basename as the MDX. Keep discovery runtime-based so
+    /// existing libraries gain icons without a schema migration or reimport.
+    public func iconURL(for record: DictionaryRecord) -> URL? {
+        let folder = folderURL(for: record)
+        let base = (record.mdxFileName as NSString).deletingPathExtension.lowercased()
+        let extensionPriority = ["png", "jpg", "jpeg", "webp", "gif", "tiff", "tif", "bmp", "ico", "icns"]
+        let priority = Dictionary(uniqueKeysWithValues: extensionPriority.enumerated().map { ($1, $0) })
+        let candidates = (try? FileManager.default.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+        )) ?? []
+        return candidates.filter { candidate in
+            let candidateBase = (candidate.lastPathComponent as NSString)
+                .deletingPathExtension.lowercased()
+            guard candidateBase == base,
+                  priority[candidate.pathExtension.lowercased()] != nil,
+                  let values = try? candidate.resourceValues(
+                      forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
+                  )
+            else { return false }
+            return values.isRegularFile == true && values.isSymbolicLink != true
+        }.min {
+            priority[$0.pathExtension.lowercased(), default: Int.max]
+                < priority[$1.pathExtension.lowercased(), default: Int.max]
+        }
+    }
+
     // MARK: - Import
 
-    /// Copies the MDX, its same-basename package files, and every sibling CSS
-    /// or JavaScript file into the library, then indexes all keywords.
+    /// Safe, static companion types that may be copied from the MDX's own
+    /// directory without decoding every entry to rediscover their filenames.
+    /// Nested trees are still copied only through HTML/CSS references, so an
+    /// unrelated source directory is never mirrored wholesale.
+    private static let automaticallyCopiedLooseExtensions: Set<String> = [
+        "css", "js", "json", "xml", "htm", "html", "xhtml", "txt", "pdf",
+        "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tif", "tiff", "ico", "icns",
+        "woff", "woff2", "ttf", "otf", "eot",
+        "mp3", "wav", "ogg", "oga", "m4a", "aac", "flac",
+        "mp4", "m4v", "webm", "mov",
+    ]
+
+    /// Copies the MDX, its same-basename package files, and safe top-level
+    /// static companions into the library, then indexes all keywords.
     @discardableResult
     public func importDictionary(
         from sourceMdxURL: URL,
@@ -484,15 +525,15 @@ public final class DictionaryLibrary: @unchecked Sendable {
                 let name = file.lastPathComponent
                 let ext = file.pathExtension.lowercased()
                 let isPackageSibling = name == baseName || name.hasPrefix(baseName + ".")
-                let isLooseCode = ext == "css" || ext == "js"
-                guard isPackageSibling || isLooseCode,
+                let isLooseAsset = Self.automaticallyCopiedLooseExtensions.contains(ext)
+                guard isPackageSibling || isLooseAsset,
                       let values = try? file.resourceValues(
                           forKeys: [.isRegularFileKey, .isSymbolicLinkKey]
                       ),
                       values.isRegularFile == true, values.isSymbolicLink != true
                 else { continue }
-                try fm.copyItem(at: file, to: folder.appendingPathComponent(name))
-                if isLooseCode { discoveredLooseCompanions.insert(name) }
+                try cloneOrCopyFile(file, to: folder.appendingPathComponent(name))
+                if isLooseAsset { discoveredLooseCompanions.insert(name) }
             }
 
             let mdxFileName = sourceMdxURL.lastPathComponent
@@ -529,8 +570,12 @@ public final class DictionaryLibrary: @unchecked Sendable {
                 siblings, baseName: baseName
             )
             var assetOffsets = Set<UInt64>()
-            let mddURLs = mddFiles(in: folder)
+            let mdds = try mddFiles(in: folder).map { try MdictFile(url: $0) }
+            let expectedResources = mdds.reduce(into: 0) { count, mdd in
+                count += Int(min(mdd.info.entryCount, UInt64(Int.max - count)))
+            }
             let progressStride = max(2_000, expectedEntries / 100)
+            let resourceProgressStride = max(2_000, expectedResources / 100)
             let dictID: Int64 = try pool.write { db in
                 try db.transaction {
                     try db.run(
@@ -574,13 +619,14 @@ public final class DictionaryLibrary: @unchecked Sendable {
                         "UPDATE dictionaries SET entryCount = ? WHERE id = ?",
                         [.int(Int64(entryCount)), .int(dictID)]
                     )
-                    if !mddURLs.isEmpty {
-                        progress?(ImportProgress(stage: "Indexing resources…"))
+                    if !mdds.isEmpty {
+                        progress?(ImportProgress(
+                            stage: "Indexing resources", completed: 0, total: expectedResources
+                        ))
                         let resourceInsert = try db.prepare(
                             "INSERT INTO resources (dict, part, path, offset, length) VALUES (?,?,?,?,?)"
                         )
-                        for (part, mddURL) in mddURLs.enumerated() {
-                            let mdd = try MdictFile(url: mddURL)
+                        for (part, mdd) in mdds.enumerated() {
                             try mdd.forEachIndexedEntry { entry in
                                 if resourceCount % 2_000 == 0 { try cancellation?.check() }
                                 try resourceInsert.bind([
@@ -592,6 +638,13 @@ public final class DictionaryLibrary: @unchecked Sendable {
                                 try resourceInsert.step()
                                 resourceInsert.reset()
                                 resourceCount += 1
+                                if resourceCount.isMultiple(of: resourceProgressStride) {
+                                    progress?(ImportProgress(
+                                        stage: "Indexing resources",
+                                        completed: resourceCount,
+                                        total: expectedResources
+                                    ))
+                                }
                             }
                         }
                         try db.run(
@@ -664,22 +717,32 @@ public final class DictionaryLibrary: @unchecked Sendable {
     ) throws -> Set<String> {
         let fm = FileManager.default
         let sourceRoot = sourceDirectory.resolvingSymlinksInPath().standardizedFileURL
-        var queue = Array(references)
+        // A direct reference came from entry HTML and may represent missing
+        // content. A transitive CSS url(), however, is commonly an optional
+        // local font or decorative fallback. Browsers handle those through
+        // the CSS cascade, so copy them when present without producing a
+        // user-facing warning when absent. Missing imported CSS remains
+        // reportable because it can affect the entire dictionary layout.
+        var queue = references.map { (path: $0, reportMissing: true) }
         var visited = Set<String>()
         var missing = Set<String>()
-        while let relative = queue.popLast() {
+        while let pending = queue.popLast() {
             try cancellation?.check()
+            let relative = pending.path
             guard visited.insert(relative).inserted else { continue }
             let source = sourceDirectory.appendingPathComponent(relative)
                 .resolvingSymlinksInPath().standardizedFileURL
             guard source.path.hasPrefix(sourceRoot.path + "/"),
                   let values = try? source.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
                   values.isRegularFile == true, values.isSymbolicLink != true
-            else { missing.insert(relative); continue }
+            else {
+                if pending.reportMissing { missing.insert(relative) }
+                continue
+            }
             let destination = destinationDirectory.appendingPathComponent(relative)
             if !fm.fileExists(atPath: destination.path) {
                 try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try fm.copyItem(at: source, to: destination)
+                try cloneOrCopyFile(source, to: destination)
             }
             guard source.pathExtension.lowercased() == "css",
                   let data = try? Data(contentsOf: source)
@@ -688,7 +751,11 @@ public final class DictionaryLibrary: @unchecked Sendable {
             let base = (relative as NSString).deletingLastPathComponent
             for nested in EntryPageBuilder.localCSSResourceReferences(in: css) {
                 let combined = (base as NSString).appendingPathComponent(nested)
-                queue.append((combined as NSString).standardizingPath)
+                let path = (combined as NSString).standardizingPath
+                queue.append((
+                    path: path,
+                    reportMissing: (path as NSString).pathExtension.lowercased() == "css"
+                ))
             }
         }
         return missing
@@ -703,7 +770,8 @@ public final class DictionaryLibrary: @unchecked Sendable {
     ) -> Bool {
         let fm = FileManager.default
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey]
-        let intrinsicallyDiscoveredExtensions: Set<String> = ["mdx", "mdd", "css", "js"]
+        let intrinsicallyDiscoveredExtensions = Set(["mdx", "mdd"])
+            .union(Self.automaticallyCopiedLooseExtensions)
 
         for sibling in siblings where !sibling.lastPathComponent.hasPrefix(".") {
             guard let values = try? sibling.resourceValues(forKeys: keys),
@@ -738,6 +806,24 @@ public final class DictionaryLibrary: @unchecked Sendable {
             }
         }
         return false
+    }
+
+    /// APFS clones make multi-gigabyte dictionary packages effectively
+    /// instant and space-efficient. `COPYFILE_CLONE` automatically falls back
+    /// to an ordinary data copy when source and destination cannot be cloned
+    /// (for example, across volumes).
+    private func cloneOrCopyFile(_ source: URL, to destination: URL) throws {
+        let flags = copyfile_flags_t(COPYFILE_ALL | COPYFILE_CLONE)
+        let result = source.path.withCString { sourcePath in
+            destination.path.withCString { destinationPath in
+                copyfile(sourcePath, destinationPath, nil, flags)
+            }
+        }
+        guard result == 0 else {
+            let code = errno
+            try? FileManager.default.removeItem(at: destination)
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
     }
 
     /// Removes a dictionary from Lexicon's index without touching its files.

@@ -37,6 +37,12 @@ struct EntryWebView: NSViewRepresentable {
             forMainFrameOnly: false,
             in: Coordinator.bridgeWorld
         ))
+        controller.addUserScript(WKUserScript(
+            source: Coordinator.ttsCompatibilityScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: false,
+            in: .page
+        ))
 
         let schemeHandler = DictSchemeHandler(libraryModel: libraryModel)
         configuration.setURLSchemeHandler(schemeHandler, forURLScheme: DictSchemeHandler.scheme)
@@ -227,6 +233,13 @@ struct EntryWebView: NSViewRepresentable {
                     )
                 }
 
+            case "tts":
+                guard appState.isActiveTab(tabID),
+                      let text = payload["text"] as? String,
+                      let language = payload["language"] as? String
+                else { return }
+                libraryModel.speak(text, language: language)
+
             case "link":
                 guard appState.isActiveTab(tabID),
                       let href = payload["href"] as? String
@@ -370,6 +383,22 @@ struct EntryWebView: NSViewRepresentable {
           }
 
           let scheduled = false, settleTimer = 0, lastSent = -1;
+          let lastTrustedTTSClick = -Infinity;
+          addEventListener('click', event => {
+            if (event.isTrusted) lastTrustedTTSClick = performance.now();
+          }, true);
+          function forwardTTSRequest(detail) {
+            // Page scripts cannot invoke the native bridge directly. Accept a
+            // compatibility request only immediately after a real user click.
+            if (performance.now() - lastTrustedTTSClick > 2000) return;
+            let request;
+            try { request = JSON.parse(String(detail || '')); } catch (_) { return; }
+            const text = String(request.text || '').trim();
+            const language = String(request.language || '').toLowerCase() === 'en-gb'
+              ? 'en-GB' : 'en-US';
+            if (!text || new TextEncoder().encode(text).length > 5000) return;
+            send({kind:'tts', text, language});
+          }
           function measure(deep) {
             scheduled = false;
             const root = document.documentElement, body = document.body;
@@ -431,6 +460,10 @@ struct EntryWebView: NSViewRepresentable {
           addEventListener('resize', requestMeasure);
           visualViewport?.addEventListener('resize', requestMeasure);
           addEventListener('message', event => {
+            if (event.source === window && event.data?.kind === 'lexicon-tts-request') {
+              forwardTTSRequest(event.data.detail);
+              return;
+            }
             if (event.data?.kind !== 'lexicon-anchor' || typeof event.data.anchor !== 'string') return;
             const anchor = event.data.anchor;
             let target = document.getElementById(anchor);
@@ -483,6 +516,37 @@ struct EntryWebView: NSViewRepresentable {
             send({kind:'scroll', mode:detail.kind === 'by' ? 'by' : 'element', offset:detail.value || 0,
               behavior:detail.behavior || 'auto'});
           });
+        })();
+        """#
+
+        /// ODE and OALD repacks synthesize missing sentence audio by POSTing
+        /// to this compatibility proxy. Intercept that one request in the page
+        /// world, hand its already-cleaned text to the isolated bridge, and
+        /// return an empty successful response so the remote proxy is never
+        /// contacted. Other fetches (images, translations, etc.) are untouched.
+        static let ttsCompatibilityScript = #"""
+        (() => {
+          const nativeFetch = window.fetch.bind(window);
+          window.fetch = function(input, init) {
+            let url;
+            try { url = new URL(typeof input === 'string' ? input : input.url, location.href); }
+            catch (_) { return nativeFetch(input, init); }
+            const method = String(init?.method || (typeof input !== 'string' && input.method) || 'GET')
+              .toUpperCase();
+            if (url.protocol === 'https:' && url.hostname === 'tts.dxde.de' && method === 'POST') {
+              try {
+                const body = typeof init?.body === 'string' ? JSON.parse(init.body) : null;
+                if (body && typeof body.text === 'string') {
+                  window.postMessage({
+                    kind:'lexicon-tts-request',
+                    detail:JSON.stringify({text:body.text, language:body.language_code})
+                  }, '*');
+                  return Promise.resolve(new Response(new Blob([], {type:'audio/mpeg'}), {status:200}));
+                }
+              } catch (_) {}
+            }
+            return nativeFetch(input, init);
+          };
         })();
         """#
     }

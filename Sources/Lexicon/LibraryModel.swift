@@ -55,8 +55,13 @@ final class LibraryModel: ObservableObject {
     let library: DictionaryLibrary?
 
     private var audioPlayer: AVAudioPlayer?
+    private let speechSynthesizer = AVSpeechSynthesizer()
+    private var cloudSpeechTask: Task<Void, Never>?
+    private var speechGeneration = UUID()
     private let importQueue = DispatchQueue(label: "lexicon.import", qos: .userInitiated)
     private var importCancellation: ImportCancellationToken?
+    private var dictionaryIconCache: [String: NSImage] = [:]
+    private var dictionariesWithoutIcons = Set<String>()
     /// Resolved headwords, keyed by normalized key. `displayWord` is called
     /// from view bodies for every history row, tab and starred card, so an
     /// uncached lookup ran a SQL query per row on every keystroke.
@@ -90,14 +95,18 @@ final class LibraryModel: ObservableObject {
     func reloadDictionaries() {
         guard let library else { return }
         do {
-            dictionaries = try library.dictionaries()
+            let records = try library.dictionaries()
+            dictionaries = records
+            let liveUUIDs = Set(records.map { $0.uuid.lowercased() })
+            dictionaryIconCache = dictionaryIconCache.filter { liveUUIDs.contains($0.key) }
+            dictionariesWithoutIcons.formIntersection(liveUUIDs)
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
     func importDictionaries(at urls: [URL]) {
-        guard let library else { return }
+        guard let library, !isImporting, !urls.isEmpty else { return }
         isImporting = true
         let cancellation = ImportCancellationToken()
         importCancellation = cancellation
@@ -107,7 +116,7 @@ final class LibraryModel: ObservableObject {
         importQueue.async { [weak self] in
             var failures: [String] = []
             var withoutResources: [String] = []
-            var importWarnings: [String] = []
+            var importWarnings = Set<String>()
             for url in urls {
                 let scoped = url.startAccessingSecurityScopedResource()
                 defer { if scoped { url.stopAccessingSecurityScopedResource() } }
@@ -115,7 +124,7 @@ final class LibraryModel: ObservableObject {
                     let name = url.deletingPathExtension().lastPathComponent
                     let record = try library.importDictionary(from: url, cancellation: cancellation) { update in
                         if update.stage.hasPrefix("Warning:") {
-                            importWarnings.append(
+                            importWarnings.insert(
                                 "\(name): " + String(update.stage.dropFirst("Warning: ".count))
                             )
                         }
@@ -158,7 +167,10 @@ final class LibraryModel: ObservableObject {
                     )
                 }
                 if !importWarnings.isEmpty {
-                    warnings.append("Some optional files were not found:\n" + importWarnings.joined(separator: "\n"))
+                    warnings.append(
+                        "Some optional files were not found:\n"
+                        + importWarnings.sorted().joined(separator: "\n")
+                    )
                 }
                 if !warnings.isEmpty {
                     self.notice = Notice(
@@ -181,8 +193,22 @@ final class LibraryModel: ObservableObject {
         notice = nil
     }
 
+    func dictionaryIcon(for record: DictionaryRecord) -> NSImage? {
+        let key = record.uuid.lowercased()
+        if let cached = dictionaryIconCache[key] { return cached }
+        guard !dictionariesWithoutIcons.contains(key),
+              let iconURL = library?.iconURL(for: record),
+              let image = NSImage(contentsOf: iconURL)
+        else {
+            dictionariesWithoutIcons.insert(key)
+            return nil
+        }
+        dictionaryIconCache[key] = image
+        return image
+    }
+
     func rename(_ record: DictionaryRecord, to title: String) {
-        guard let library else { return }
+        guard let library, !isImporting else { return }
         do {
             try library.setTitle(title, for: record)
         } catch {
@@ -224,22 +250,33 @@ final class LibraryModel: ObservableObject {
             removingDictionaryIDs.remove(record.id)
             return
         }
-        do {
-            try library.unregisterDictionary(record)
-        } catch {
-            if filesWereRecycled {
-                errorMessage = "“\(record.title)” was moved to Trash, but Lexicon "
-                    + "could not remove it from the library index: \(error.localizedDescription)"
-            } else {
-                errorMessage = error.localizedDescription
+        // Import owns the SQLite writer for a long bulk transaction. Waiting
+        // for that lock on MainActor freezes every window; queue the unregister
+        // behind the import instead and leave the row visibly busy meanwhile.
+        importQueue.async { [weak self] in
+            let failure: String?
+            do {
+                try library.unregisterDictionary(record)
+                failure = nil
+            } catch {
+                if filesWereRecycled {
+                    failure = "“\(record.title)” was moved to Trash, but Lexicon "
+                        + "could not remove it from the library index: \(error.localizedDescription)"
+                } else {
+                    failure = error.localizedDescription
+                }
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let failure { self.errorMessage = failure }
+                self.removingDictionaryIDs.remove(record.id)
+                self.dictionariesChanged()
             }
         }
-        removingDictionaryIDs.remove(record.id)
-        dictionariesChanged()
     }
 
     func setEnabled(_ enabled: Bool, for record: DictionaryRecord) {
-        guard let library else { return }
+        guard let library, !isImporting else { return }
         do {
             try library.setEnabled(enabled, for: record)
         } catch {
@@ -249,7 +286,7 @@ final class LibraryModel: ObservableObject {
     }
 
     func moveDictionaries(fromOffsets: IndexSet, toOffset: Int) {
-        guard let library else { return }
+        guard let library, !isImporting else { return }
         var reordered = dictionaries
         reordered.move(fromOffsets: fromOffsets, toOffset: toOffset)
         do {
@@ -286,7 +323,11 @@ final class LibraryModel: ObservableObject {
         // already live in Application Support/Lexicon and need no migration.
         if !current.bool(forKey: settingsMigrationKey),
            let legacy = UserDefaults(suiteName: "org.lexicon.Lexicon.settings") {
-            for key in [zoomKey, lookUpKey, collapsedKey, historyLimitKey, networkPolicyKey]
+            for key in [
+                zoomKey, lookUpKey, collapsedKey, historyLimitKey, networkPolicyKey,
+                ttsProviderKey, systemBritishVoiceKey, systemAmericanVoiceKey,
+                googleBritishVoiceKey, googleAmericanVoiceKey,
+            ]
             where current.object(forKey: key) == nil {
                 if let value = legacy.object(forKey: key) {
                     current.set(value, forKey: key)
@@ -310,6 +351,36 @@ final class LibraryModel: ObservableObject {
 
     /// Maximum number of unique lookup records kept in browser-style history.
     @Published private(set) var historyLimit: Int = LibraryModel.storedHistoryLimit()
+
+    @Published var ttsProvider: TTSProvider = LibraryModel.storedTTSProvider() {
+        didSet { Self.settings.set(ttsProvider.rawValue, forKey: Self.ttsProviderKey) }
+    }
+    @Published var systemBritishVoiceIdentifier: String = LibraryModel.settings.string(
+        forKey: LibraryModel.systemBritishVoiceKey
+    ) ?? "" {
+        didSet {
+            Self.settings.set(systemBritishVoiceIdentifier, forKey: Self.systemBritishVoiceKey)
+        }
+    }
+    @Published var systemAmericanVoiceIdentifier: String = LibraryModel.settings.string(
+        forKey: LibraryModel.systemAmericanVoiceKey
+    ) ?? "" {
+        didSet {
+            Self.settings.set(systemAmericanVoiceIdentifier, forKey: Self.systemAmericanVoiceKey)
+        }
+    }
+    @Published var googleBritishVoice: String = LibraryModel.storedGoogleVoice(
+        key: LibraryModel.googleBritishVoiceKey
+    ) {
+        didSet { Self.settings.set(googleBritishVoice, forKey: Self.googleBritishVoiceKey) }
+    }
+    @Published var googleAmericanVoice: String = LibraryModel.storedGoogleVoice(
+        key: LibraryModel.googleAmericanVoiceKey
+    ) {
+        didSet { Self.settings.set(googleAmericanVoice, forKey: Self.googleAmericanVoiceKey) }
+    }
+    @Published private(set) var hasGoogleAPIKey = (try? TTSKeychain.readAPIKey()) != nil
+    @Published private(set) var ttsStatus: String?
 
     /// Dictionaries the user collapsed on a results page. Remembered across
     /// lookups so a dictionary you always skip stays folded away.
@@ -335,6 +406,11 @@ final class LibraryModel: ObservableObject {
     private static let collapsedKey = "collapsedDictionaries"
     private static let historyLimitKey = "historyLimit"
     private static let networkPolicyKey = "dictionaryNetworkPolicy"
+    private static let ttsProviderKey = "ttsProvider"
+    private static let systemBritishVoiceKey = "systemBritishVoice"
+    private static let systemAmericanVoiceKey = "systemAmericanVoice"
+    private static let googleBritishVoiceKey = "googleBritishVoice"
+    private static let googleAmericanVoiceKey = "googleAmericanVoice"
     private static let settingsMigrationKey = "migratedFromOrgLexiconSettings"
     private static let sidebarWidthKey = "sidebarWidth"
     private static let sidebarVisibleKey = "sidebarVisible"
@@ -390,6 +466,23 @@ final class LibraryModel: ObservableObject {
         return DictionaryNetworkPolicy(rawValue: raw) ?? .allowHTTPS
     }
 
+    private static func storedTTSProvider() -> TTSProvider {
+        guard let raw = settings.string(forKey: ttsProviderKey) else { return .system }
+        return TTSProvider(rawValue: raw) ?? .system
+    }
+
+    private static func storedGoogleVoice(key: String) -> String {
+        let stored = settings.string(forKey: key) ?? "Algieba"
+        return GoogleCloudTTS.voiceNames.contains(stored) ? stored : "Algieba"
+    }
+
+    static func systemVoices(language: String) -> [SystemSpeechVoice] {
+        AVSpeechSynthesisVoice.speechVoices()
+            .filter { $0.language.caseInsensitiveCompare(language) == .orderedSame }
+            .map { SystemSpeechVoice(id: $0.identifier, name: $0.name, language: $0.language) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
     var canZoomIn: Bool { entryZoom < Self.zoomSteps[Self.zoomSteps.count - 1] }
     var canZoomOut: Bool { entryZoom > Self.zoomSteps[0] }
     /// "125%" for the View menu.
@@ -425,6 +518,11 @@ final class LibraryModel: ObservableObject {
         lookUpOnDoubleClick = true
         setHistoryLimit(Self.defaultHistoryLimit)
         dictionaryNetworkPolicy = .allowHTTPS
+        ttsProvider = .system
+        systemBritishVoiceIdentifier = ""
+        systemAmericanVoiceIdentifier = ""
+        googleBritishVoice = "Algieba"
+        googleAmericanVoice = "Algieba"
         if !collapsedDictionaries.isEmpty {
             collapsedDictionaries.removeAll()
             Self.settings.removeObject(forKey: Self.collapsedKey)
@@ -525,6 +623,7 @@ final class LibraryModel: ObservableObject {
     // MARK: - Audio
 
     func playAudio(path: String, dictionaryUUID: String) {
+        stopSpeech()
         guard let library else { return }
         do {
             guard let resource = try library.resource(path: path, dictionaryUUID: dictionaryUUID) else {
@@ -536,5 +635,100 @@ final class LibraryModel: ObservableObject {
         } catch {
             errorMessage = "Could not play this dictionary audio: \(error.localizedDescription)"
         }
+    }
+
+    func speak(_ rawText: String, language rawLanguage: String) {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        guard text.utf8.count <= 5_000 else {
+            errorMessage = "This passage is too long for text-to-speech."
+            return
+        }
+        let language = rawLanguage.caseInsensitiveCompare("en-GB") == .orderedSame
+            ? "en-GB" : "en-US"
+        stopSpeech()
+        speechGeneration = UUID()
+
+        switch ttsProvider {
+        case .system:
+            let utterance = AVSpeechUtterance(string: text)
+            let identifier = language == "en-GB"
+                ? systemBritishVoiceIdentifier : systemAmericanVoiceIdentifier
+            utterance.voice = identifier.isEmpty
+                ? AVSpeechSynthesisVoice(language: language)
+                : AVSpeechSynthesisVoice(identifier: identifier)
+            utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+            speechSynthesizer.speak(utterance)
+            ttsStatus = "Speaking with System Voice."
+
+        case .googleCloud:
+            guard let apiKey = try? TTSKeychain.readAPIKey(), !apiKey.isEmpty else {
+                ttsStatus = "Google Cloud needs an API key."
+                errorMessage = "Add a Google Cloud Text-to-Speech API key in Settings."
+                return
+            }
+            let voice = language == "en-GB" ? googleBritishVoice : googleAmericanVoice
+            let generation = speechGeneration
+            ttsStatus = "Generating speech with Google Cloud…"
+            cloudSpeechTask = Task { @MainActor [weak self] in
+                do {
+                    let data = try await GoogleCloudTTS.synthesize(
+                        text: text, language: language, voiceName: voice, apiKey: apiKey
+                    )
+                    try Task.checkCancellation()
+                    guard let self, self.speechGeneration == generation else { return }
+                    self.audioPlayer = try AVAudioPlayer(data: data)
+                    self.audioPlayer?.play()
+                    self.ttsStatus = "Playing Google Cloud voice \(voice)."
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard let self, self.speechGeneration == generation else { return }
+                    self.ttsStatus = "Google Cloud speech failed."
+                    self.errorMessage = "Could not generate speech: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    func saveGoogleAPIKey(_ rawValue: String) -> Bool {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else {
+            errorMessage = "Enter a Google Cloud API key first."
+            return false
+        }
+        do {
+            try TTSKeychain.saveAPIKey(value)
+            hasGoogleAPIKey = true
+            ttsStatus = "Google Cloud API key saved in Keychain."
+            return true
+        } catch {
+            errorMessage = "Could not save the API key: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    func removeGoogleAPIKey() {
+        do {
+            try TTSKeychain.removeAPIKey()
+            hasGoogleAPIKey = false
+            ttsStatus = "Google Cloud API key removed."
+            if ttsProvider == .googleCloud { stopSpeech() }
+        } catch {
+            errorMessage = "Could not remove the API key: \(error.localizedDescription)"
+        }
+    }
+
+    func testTTS() {
+        speak("Lexicon text-to-speech is ready.", language: "en-US")
+    }
+
+    private func stopSpeech() {
+        cloudSpeechTask?.cancel()
+        cloudSpeechTask = nil
+        speechGeneration = UUID()
+        speechSynthesizer.stopSpeaking(at: .immediate)
+        audioPlayer?.stop()
     }
 }
