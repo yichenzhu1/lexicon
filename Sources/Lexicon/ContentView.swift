@@ -537,9 +537,11 @@ struct ContentView: View {
     private var sidebar: some View {
         VStack(spacing: 0) {
             sidebarModePicker
-                // Same inset as the list rows (7) and the same row height as
-                // the tab strip (38), so the control shares the tabs' line.
-                .padding(.horizontal, 7)
+                // The selector and result rows share one horizontal edge. Its
+                // 30-point surface matches the tabs, with a one-point optical
+                // lift inside the common 38-point navigation row.
+                .padding(.horizontal, ChromeMetrics.sidebarContentInset)
+                .offset(y: ChromeMetrics.sidebarModeVerticalOffset)
                 .frame(height: ChromeMetrics.tabStripRowHeight)
 
             sidebarStatusBar
@@ -572,7 +574,7 @@ struct ContentView: View {
                         }
                     }
                 }
-                .padding(.horizontal, 7)
+                .padding(.horizontal, ChromeMetrics.sidebarContentInset)
                 .padding(.bottom, 8)
             }
             .scrollIndicators(.automatic)
@@ -591,10 +593,10 @@ struct ContentView: View {
                     setSidebarMode(mode)
                 } label: {
                     Text(mode.title)
-                        .font(.system(size: 12.5, weight: .medium))
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(sidebarMode == mode ? .primary : .secondary)
                         .frame(maxWidth: .infinity)
-                        .frame(height: 22)
+                        .frame(height: ChromeMetrics.sidebarModeButtonHeight)
                         .contentShape(Rectangle())
                         .background {
                             if sidebarMode == mode {
@@ -822,6 +824,9 @@ private enum ChromeMetrics {
     static let controlHeight: CGFloat = 32
     static let toolbarContentVerticalOffset: CGFloat = 1
     static let horizontalInset: CGFloat = 8
+    static let sidebarContentInset: CGFloat = 7
+    static let sidebarModeButtonHeight: CGFloat = 26
+    static let sidebarModeVerticalOffset: CGFloat = -1
     static let trafficLightInset: CGFloat = 82
     static let splitterHitWidth: CGFloat = 7
     static let separatorThickness: CGFloat = 1
