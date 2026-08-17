@@ -365,7 +365,23 @@ public final class DictionaryLibrary: @unchecked Sendable {
 
     /// Search key normalization: case- and diacritic-insensitive.
     public static func normalizeKey(_ key: String) -> String {
-        key.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+        var isASCII = true
+        var containsUppercaseASCII = false
+        for byte in key.utf8 {
+            if byte >= 0x80 {
+                isASCII = false
+                break
+            }
+            if byte >= 0x41, byte <= 0x5A { containsUppercaseASCII = true }
+        }
+        if isASCII {
+            let hasEdgeWhitespace = key.first?.isWhitespace == true || key.last?.isWhitespace == true
+            if !containsUppercaseASCII, !hasEdgeWhitespace { return key }
+            let trimmed = hasEdgeWhitespace
+                ? key.trimmingCharacters(in: .whitespacesAndNewlines) : key
+            return containsUppercaseASCII ? trimmed.lowercased() : trimmed
+        }
+        return key.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -505,8 +521,16 @@ public final class DictionaryLibrary: @unchecked Sendable {
             // these paths also makes copyLooseReferences inspect CSS imports
             // and url(...) dependencies recursively.
             var looseReferences = discoveredLooseCompanions
+            // Entry HTML only needs decoding when the source package actually
+            // contains a loose asset that CSS discovery cannot already reach.
+            // Most production dictionaries keep media in MDD volumes, so the
+            // old unconditional scan redundantly decoded 600k+ entries.
+            let scanEntryAssets = sourceHasPotentialLooseAssets(
+                siblings, baseName: baseName
+            )
             var assetOffsets = Set<UInt64>()
             let mddURLs = mddFiles(in: folder)
+            let progressStride = max(2_000, expectedEntries / 100)
             let dictID: Int64 = try pool.write { db in
                 try db.transaction {
                     try db.run(
@@ -530,14 +554,15 @@ public final class DictionaryLibrary: @unchecked Sendable {
                         try insert.step()
                         insert.reset()
                         entryCount += 1
-                        if assetOffsets.insert(entry.recordOffset).inserted,
+                        if scanEntryAssets,
+                           assetOffsets.insert(entry.recordOffset).inserted,
                            entry.recordLength <= 8 * 1_024 * 1_024,
                            let text = try? mdx.entryText(
                                at: entry.recordOffset, length: Int(entry.recordLength)
                            ) {
                             looseReferences.formUnion(EntryPageBuilder.localResourceReferences(in: text))
                         }
-                        if entryCount % 2_000 == 0 {
+                        if entryCount.isMultiple(of: progressStride) {
                             progress?(ImportProgress(
                                 stage: "Indexing entries",
                                 completed: entryCount,
@@ -667,6 +692,52 @@ public final class DictionaryLibrary: @unchecked Sendable {
             }
         }
         return missing
+    }
+
+    /// True when entry HTML might point at a loose file that is neither part
+    /// of the same-basename MDX package nor discoverable through sibling CSS.
+    /// Hidden files and alternate nested CSS/JS themes do not justify decoding
+    /// every dictionary entry merely to prove they are unused.
+    private func sourceHasPotentialLooseAssets(
+        _ siblings: [URL], baseName: String
+    ) -> Bool {
+        let fm = FileManager.default
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey]
+        let intrinsicallyDiscoveredExtensions: Set<String> = ["mdx", "mdd", "css", "js"]
+
+        for sibling in siblings where !sibling.lastPathComponent.hasPrefix(".") {
+            guard let values = try? sibling.resourceValues(forKeys: keys),
+                  values.isSymbolicLink != true
+            else { continue }
+
+            if values.isRegularFile == true {
+                let name = sibling.lastPathComponent
+                let isPackageSibling = name == baseName || name.hasPrefix(baseName + ".")
+                if !isPackageSibling,
+                   !intrinsicallyDiscoveredExtensions.contains(sibling.pathExtension.lowercased()) {
+                    return true
+                }
+                continue
+            }
+
+            guard values.isDirectory == true,
+                  let enumerator = fm.enumerator(
+                      at: sibling,
+                      includingPropertiesForKeys: Array(keys),
+                      options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                  )
+            else { continue }
+            for case let candidate as URL in enumerator {
+                guard let candidateValues = try? candidate.resourceValues(forKeys: keys),
+                      candidateValues.isRegularFile == true,
+                      candidateValues.isSymbolicLink != true
+                else { continue }
+                if !intrinsicallyDiscoveredExtensions.contains(candidate.pathExtension.lowercased()) {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /// Removes a dictionary from Lexicon's index without touching its files.

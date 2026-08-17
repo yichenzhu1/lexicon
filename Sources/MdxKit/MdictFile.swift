@@ -345,8 +345,22 @@ public final class MdictFile {
         offsets = []
 
         let streamEnd = recordTable.totalDecompressedSize
+        var boundaryCursor = 0
+        var previousOffset: UInt64?
         try forEachKey { key, offset in
-            let end = Self.firstBoundary(after: offset, in: boundaries) ?? streamEnd
+            // MDX keyword records normally appear in record-stream order. Walk
+            // the boundary table linearly in that common case instead of doing
+            // a binary search for every one of hundreds of thousands of keys.
+            // A malformed or unusual out-of-order offset falls back safely.
+            if let previousOffset, offset < previousOffset {
+                boundaryCursor = Self.firstBoundaryIndex(after: offset, in: boundaries)
+            } else {
+                while boundaryCursor < boundaries.count, boundaries[boundaryCursor] <= offset {
+                    boundaryCursor += 1
+                }
+            }
+            previousOffset = offset
+            let end = boundaryCursor < boundaries.count ? boundaries[boundaryCursor] : streamEnd
             // A corrupt offset past the end of the stream yields an empty
             // record rather than underflowing.
             let length = end > offset ? end - offset : 0
@@ -366,14 +380,14 @@ public final class MdictFile {
         return result
     }
 
-    /// First boundary strictly greater than `offset`.
-    private static func firstBoundary(after offset: UInt64, in boundaries: [UInt64]) -> UInt64? {
+    /// Index of the first boundary strictly greater than `offset`.
+    private static func firstBoundaryIndex(after offset: UInt64, in boundaries: [UInt64]) -> Int {
         var lo = 0, hi = boundaries.count
         while lo < hi {
             let mid = (lo + hi) / 2
             if boundaries[mid] <= offset { lo = mid + 1 } else { hi = mid }
         }
-        return lo < boundaries.count ? boundaries[lo] : nil
+        return lo
     }
 
     // MARK: - Records
