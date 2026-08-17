@@ -94,6 +94,15 @@ struct ContentView: View {
                     .transition(.opacity)
             }
         }
+        .overlay(alignment: .bottomTrailing) {
+            if let notice = libraryModel.notice {
+                LibraryNoticeView(notice: notice) {
+                    libraryModel.dismissNotice()
+                }
+                .padding(16)
+                .transition(.opacity)
+            }
+        }
         .alert(
             "Lexicon",
             isPresented: Binding(
@@ -747,6 +756,49 @@ struct ContentView: View {
         case .history: return "No lookup history yet"
         case .starred: return "Star a word to keep it here"
         }
+    }
+}
+
+struct LibraryNoticeView: View {
+    let notice: LibraryModel.Notice
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(notice.title)
+                    .font(.callout.weight(.semibold))
+                Text(notice.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(5)
+                    .help(notice.message)
+            }
+
+            Spacer(minLength: 4)
+
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Dismiss")
+            .accessibilityLabel("Dismiss notice")
+        }
+        .padding(12)
+        .frame(maxWidth: 420, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(ChromeMetrics.separatorColor, lineWidth: ChromeMetrics.separatorThickness)
+        }
+        .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+        .accessibilityElement(children: .contain)
     }
 }
 

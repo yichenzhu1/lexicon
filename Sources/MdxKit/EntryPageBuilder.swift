@@ -265,50 +265,132 @@ public enum EntryPageBuilder {
         return output
     }
 
-    /// Local resources statically discoverable in entry HTML or CSS. Import
-    /// uses this to bring along loose assets whose names do not match the MDX.
+    /// Local resources statically discoverable in entry HTML. Attributes are
+    /// interpreted in the context of their element: an anchor's `href` is a
+    /// dictionary link, while a stylesheet link's `href` is a resource. This
+    /// distinction prevents headwords and JavaScript data values from being
+    /// reported as thousands of missing files during import.
     public static func localResourceReferences(in text: String) -> Set<String> {
+        var result = Set<String>()
+
+        let tagPattern = #"(?is)<\s*([a-z][a-z0-9:-]*)\b(?:[^>\"']|\"[^\"]*\"|'[^']*')*>"#
+        if let tagRegex = try? NSRegularExpression(pattern: tagPattern) {
+            let ns = text as NSString
+            for match in tagRegex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                guard match.numberOfRanges > 1 else { continue }
+                let tagName = ns.substring(with: match.range(at: 1)).lowercased()
+                let tag = ns.substring(with: match.range)
+                let attributes = htmlAttributes(in: tag)
+
+                func add(_ name: String) {
+                    for value in attributes[name] ?? [] {
+                        if let path = normalizedLocalReference(value) { result.insert(path) }
+                    }
+                }
+
+                // `src` is a resource for every standard element that defines
+                // it. Do not scan arbitrary `data` or `href` attributes: many
+                // dictionaries use those for lookup IDs and entry links.
+                if ["audio", "embed", "iframe", "img", "input", "script", "source", "track", "video"]
+                    .contains(tagName) {
+                    add("src")
+                }
+                if tagName == "link" || tagName == "image" || tagName == "use" {
+                    add("href")
+                    add("xlink:href")
+                }
+                if tagName == "object" { add("data") }
+                if tagName == "video" { add("poster") }
+
+                if tagName == "img" || tagName == "source" {
+                    for srcset in attributes["srcset"] ?? [] {
+                        addSrcsetReferences(srcset, to: &result)
+                    }
+                }
+                for style in attributes["style"] ?? [] {
+                    result.formUnion(localCSSResourceReferences(in: style))
+                }
+            }
+        }
+
+        if let styleRegex = try? NSRegularExpression(
+            pattern: "(?is)<style\\b[^>]*>(.*?)</style\\s*>"
+        ) {
+            let ns = text as NSString
+            for match in styleRegex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+            where match.numberOfRanges > 1 && match.range(at: 1).location != NSNotFound {
+                result.formUnion(localCSSResourceReferences(in: ns.substring(with: match.range(at: 1))))
+            }
+        }
+        return result
+    }
+
+    /// Resource references in a CSS file or inline declaration. This is kept
+    /// separate from HTML scanning so JavaScript calls and prose containing
+    /// `url(...)` cannot be mistaken for assets.
+    public static func localCSSResourceReferences(in css: String) -> Set<String> {
         let patterns = [
-            "(?is)\\b(?:src|href|data|poster|xlink:href)\\s*=\\s*[\"']([^\"']+)[\"']",
-            "(?i)\\b(?:src|href|data|poster|xlink:href)\\s*=\\s*([^\\s\"'`=<>]+)",
             "(?is)url\\(\\s*[\"']?([^\"')]+)",
             "(?is)@import\\s+[\"']([^\"']+)[\"']",
         ]
         var result = Set<String>()
+        let ns = css as NSString
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            let ns = text as NSString
-            for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-                guard match.numberOfRanges > 1, match.range(at: 1).location != NSNotFound else { continue }
-                var value = ns.substring(with: match.range(at: 1))
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                let lower = value.lowercased()
-                if value.hasPrefix("#") || value.hasPrefix("//")
-                    || ["http:", "https:", "entry:", "bword:", "sound:", "data:", "blob:", "javascript:"]
-                        .contains(where: lower.hasPrefix) { continue }
-                if lower.hasPrefix("file://") { value = String(value.dropFirst("file://".count)) }
-                if let query = value.firstIndex(of: "?") { value = String(value[..<query]) }
-                value = (value.removingPercentEncoding ?? value)
-                    .replacingOccurrences(of: "\\", with: "/")
-                while value.hasPrefix("/") { value.removeFirst() }
-                guard !value.isEmpty, !value.split(separator: "/").contains("..") else { continue }
-                result.insert(value)
-            }
-        }
-        if let srcset = try? NSRegularExpression(
-            pattern: "(?is)\\bsrcset\\s*=\\s*[\"']([^\"']+)[\"']"
-        ) {
-            let ns = text as NSString
-            for match in srcset.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-                let value = ns.substring(with: match.range(at: 1))
-                if value.lowercased().contains("data:") { continue }
-                for candidate in value.split(separator: ",") {
-                    guard let url = candidate.split(whereSeparator: { $0.isWhitespace }).first else { continue }
-                    result.formUnion(localResourceReferences(in: "<img src=\"\(url)\">"))
+            for match in regex.matches(in: css, range: NSRange(location: 0, length: ns.length))
+            where match.numberOfRanges > 1 && match.range(at: 1).location != NSNotFound {
+                if let path = normalizedLocalReference(ns.substring(with: match.range(at: 1))) {
+                    result.insert(path)
                 }
             }
         }
         return result
+    }
+
+    private static func htmlAttributes(in tag: String) -> [String: [String]] {
+        let pattern = #"(?is)(?:^|\s)([a-z_:][a-z0-9_.:-]*)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'`=<>]+))"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [:] }
+        let ns = tag as NSString
+        var result: [String: [String]] = [:]
+        for match in regex.matches(in: tag, range: NSRange(location: 0, length: ns.length)) {
+            guard match.numberOfRanges == 5 else { continue }
+            let name = ns.substring(with: match.range(at: 1)).lowercased()
+            for index in 2 ... 4 where match.range(at: index).location != NSNotFound {
+                result[name, default: []].append(ns.substring(with: match.range(at: index)))
+                break
+            }
+        }
+        return result
+    }
+
+    private static func addSrcsetReferences(_ srcset: String, to result: inout Set<String>) {
+        if srcset.lowercased().contains("data:") { return }
+        for candidate in srcset.split(separator: ",") {
+            guard let raw = candidate.split(whereSeparator: { $0.isWhitespace }).first,
+                  let path = normalizedLocalReference(String(raw))
+            else { continue }
+            result.insert(path)
+        }
+    }
+
+    private static func normalizedLocalReference(_ raw: String) -> String? {
+        var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = value.lowercased()
+        if value.hasPrefix("#") || value.hasPrefix("//") || value.hasPrefix("&")
+            || ["http:", "https:", "entry:", "bword:", "sound:", "data:", "blob:", "javascript:"]
+                .contains(where: lower.hasPrefix) { return nil }
+        if lower.hasPrefix("file://") { value = String(value.dropFirst("file://".count)) }
+        if let query = value.firstIndex(where: { $0 == "?" || $0 == "#" }) {
+            value = String(value[..<query])
+        }
+        value = (value.removingPercentEncoding ?? value)
+            .replacingOccurrences(of: "\\", with: "/")
+        while value.hasPrefix("/") { value.removeFirst() }
+        let components = value.split(separator: "/")
+        guard !value.isEmpty, !components.contains(".."),
+              !(components.first?.contains(":") ?? false)
+        else { return nil }
+        return value
     }
 
     private static func rewriteAttributes(_ html: String) -> String {

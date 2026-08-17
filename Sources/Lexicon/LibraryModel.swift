@@ -14,6 +14,12 @@ import SwiftUI
 /// caches, and two windows writing `history.json` over each other.
 @MainActor
 final class LibraryModel: ObservableObject {
+    struct Notice: Identifiable, Equatable {
+        let id = UUID()
+        let title: String
+        let message: String
+    }
+
     enum DictionaryNetworkPolicy: String, CaseIterable, Identifiable {
         case offlineOnly
         case allowHTTPS
@@ -35,6 +41,7 @@ final class LibraryModel: ObservableObject {
     /// an indeterminate spinner.
     @Published var importFraction: Double?
     @Published var errorMessage: String?
+    @Published private(set) var notice: Notice?
     @Published private(set) var removingDictionaryIDs: Set<Int64> = []
     /// Bumped whenever rendered content may change (dictionary set edited).
     @Published private(set) var contentVersion = 0
@@ -74,7 +81,7 @@ final class LibraryModel: ObservableObject {
         loadSidecarLists()
         reloadDictionaries()
         if let warnings = library?.startupWarnings, !warnings.isEmpty {
-            errorMessage = warnings.joined(separator: "\n")
+            notice = Notice(title: "Library notice", message: warnings.joined(separator: "\n"))
         }
     }
 
@@ -96,6 +103,7 @@ final class LibraryModel: ObservableObject {
         importCancellation = cancellation
         importStatus = "Starting import…"
         importFraction = nil
+        notice = nil
         importQueue.async { [weak self] in
             var failures: [String] = []
             var withoutResources: [String] = []
@@ -135,14 +143,14 @@ final class LibraryModel: ObservableObject {
                 self.importCancellation = nil
                 self.importStatus = ""
                 self.importFraction = nil
-                var problems: [String] = []
+                var warnings: [String] = []
                 if !failures.isEmpty {
-                    problems.append("Import failed for:\n" + failures.joined(separator: "\n"))
+                    self.errorMessage = "Import failed for:\n" + failures.joined(separator: "\n")
                 }
                 if !withoutResources.isEmpty {
                     // Silent resource loss is the most common import mistake:
                     // the .mdd sits somewhere else and only images go missing.
-                    problems.append(
+                    warnings.append(
                         "No images, audio or stylesheets were found for "
                         + withoutResources.map { "“\($0)”" }.joined(separator: ", ")
                         + ". Keep the .mdd files next to the .mdx and import again "
@@ -150,10 +158,13 @@ final class LibraryModel: ObservableObject {
                     )
                 }
                 if !importWarnings.isEmpty {
-                    problems.append("Some referenced files were not found:\n" + importWarnings.joined(separator: "\n"))
+                    warnings.append("Some optional files were not found:\n" + importWarnings.joined(separator: "\n"))
                 }
-                if !problems.isEmpty {
-                    self.errorMessage = problems.joined(separator: "\n\n")
+                if !warnings.isEmpty {
+                    self.notice = Notice(
+                        title: "Import completed with warnings",
+                        message: warnings.joined(separator: "\n\n")
+                    )
                 }
                 self.dictionariesChanged()
             }
@@ -164,6 +175,10 @@ final class LibraryModel: ObservableObject {
         importCancellation?.cancel()
         importStatus = "Cancelling import…"
         importFraction = nil
+    }
+
+    func dismissNotice() {
+        notice = nil
     }
 
     func rename(_ record: DictionaryRecord, to title: String) {

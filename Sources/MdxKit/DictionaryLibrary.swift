@@ -661,7 +661,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
             else { continue }
             let css = Self.decodeTextResource(data, dictionaryEncoding: dictionaryEncoding)
             let base = (relative as NSString).deletingLastPathComponent
-            for nested in EntryPageBuilder.localResourceReferences(in: css) {
+            for nested in EntryPageBuilder.localCSSResourceReferences(in: css) {
                 let combined = (base as NSString).appendingPathComponent(nested)
                 queue.append((combined as NSString).standardizingPath)
             }

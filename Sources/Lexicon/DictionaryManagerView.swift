@@ -68,6 +68,12 @@ struct DictionaryManagerView: View {
                 Divider()
                 importProgress
                     .padding()
+            } else if let notice = libraryModel.notice {
+                Divider()
+                LibraryNoticeView(notice: notice) {
+                    libraryModel.dismissNotice()
+                }
+                .padding(12)
             }
         }
         .frame(minWidth: 460, idealWidth: 560, minHeight: 360, idealHeight: 460)

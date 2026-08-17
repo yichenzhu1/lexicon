@@ -94,6 +94,34 @@ func runPageBuilderTests(_ t: TestHarness) {
         t.expect(out.contains("poster='/poster.jpg'"), "root-relative poster remains dictionary-local")
     }
 
+    t.run("page builder: resource discovery ignores dictionary links and script data") {
+        let source = #"""
+        <script>const data=OPAL_Spoken::Sublist_1; const sample = "url(fake.png)";</script>
+        <a href="&#39;ava">'ava</a><a href=-aholic>-aholic</a>
+        <div data="OPAL_Spoken::Sublist_2"></div>
+        <link rel="stylesheet" href="styles/theme.css">
+        <img src="images/logo.png" srcset="images/logo@2x.png 2x, //cdn.example/logo.png 3x">
+        <object data=file:///media/chart.svg></object>
+        <video poster="images/poster.jpg"></video>
+        <svg><use xlink:href="icons.svg#speaker"></use></svg>
+        <div style="background:url('images/paper.png')"></div>
+        <style>@import "print.css"; .x { mask:url(masks.svg#x) }</style>
+        """#
+        let references = EntryPageBuilder.localResourceReferences(in: source)
+        t.expectEqual(
+            references,
+            [
+                "styles/theme.css", "images/logo.png", "images/logo@2x.png",
+                "media/chart.svg", "images/poster.jpg", "icons.svg",
+                "images/paper.png", "print.css", "masks.svg",
+            ],
+            "only resource-bearing HTML and CSS values are collected"
+        )
+        for falsePositive in ["OPAL_Spoken::Sublist_1", "OPAL_Spoken::Sublist_2", "&#39;ava", "-aholic", "fake.png"] {
+            t.expect(!references.contains(falsePositive), "ignored non-resource value \(falsePositive)")
+        }
+    }
+
     t.run("page builder: entry redirect and empty pages") {
         let redirected = EntryPageBuilder.entryDocument(
             for: "colour", dictionaryUUID: basic.uuid, library: library
