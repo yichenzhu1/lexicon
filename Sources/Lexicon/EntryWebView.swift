@@ -125,6 +125,55 @@ struct EntryWebView: NSViewRepresentable {
                 )
             }
             webView.loadHTMLString(html, baseURL: URL(string: "dict://page/results"))
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["LEXICON_DEBUG_PAGE"] == "1" {
+                // One-shot geometry dump for diagnosing layout issues in the
+                // live window: `LEXICON_DEBUG_PAGE=1 .build/debug/Lexicon`.
+                // LEXICON_DEBUG_SCROLL=<points> scrolls the page first.
+                let scroll = ProcessInfo.processInfo.environment["LEXICON_DEBUG_SCROLL"]
+                    .flatMap(Double.init) ?? 0
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak webView] in
+                    guard scroll > 0 else { return }
+                    webView?.evaluateJavaScript("window.scrollTo(0, \(scroll));") { _, _ in }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak webView] in
+                    webView?.evaluateJavaScript("""
+                    JSON.stringify({
+                      scrollY: Math.round(scrollY), docH: document.documentElement.scrollHeight,
+                      clientH: document.documentElement.clientHeight,
+                      cards: Array.from(document.querySelectorAll('details[data-uuid]')).map(d => ({
+                        uuid: d.dataset.uuid.slice(0, 8), open: d.open,
+                        top: Math.round(d.getBoundingClientRect().top + scrollY),
+                        h: Math.round(d.getBoundingClientRect().height),
+                        summaryH: Math.round(d.querySelector('summary')?.getBoundingClientRect().height || 0),
+                        frameH: Math.round(d.querySelector('iframe')?.getBoundingClientRect().height || 0),
+                        frameSrc: (d.querySelector('iframe')?.getAttribute('src') || 'none').slice(0, 40)
+                      }))
+                    })
+                    """) { value, _ in
+                        let line = "PAGE DUMP: \(value ?? "")\n"
+                        FileHandle.standardOutput.write(Data(line.utf8))
+                    }
+                }
+                // LEXICON_DEBUG_WATCH=1 samples frame heights over time, to
+                // catch oscillating (twitching) frames in the live window.
+                if ProcessInfo.processInfo.environment["LEXICON_DEBUG_WATCH"] == "1" {
+                    for tick in 0 ..< 10 {
+                        DispatchQueue.main.asyncAfter(
+                            deadline: .now() + 3 + Double(tick) * 0.7
+                        ) { [weak webView] in
+                            webView?.evaluateJavaScript("""
+                            JSON.stringify(Array.from(document.querySelectorAll('iframe[data-uuid]'))
+                              .map(f => f.dataset.uuid.slice(0, 8) + '=' + Math.round(f.getBoundingClientRect().height)))
+                            """) { value, _ in
+                                let line = "WATCH \(tick): \(value ?? "")\n"
+                                FileHandle.standardOutput.write(Data(line.utf8))
+                            }
+                        }
+                    }
+                }
+            }
+            #endif
         }
 
         func userContentController(
@@ -320,12 +369,17 @@ struct EntryWebView: NSViewRepresentable {
             return;
           }
 
-          let scheduled = false, settleTimer = 0;
+          let scheduled = false, settleTimer = 0, lastSent = -1;
           function measure(deep) {
             scheduled = false;
             const root = document.documentElement, body = document.body;
             if (!root || !body) return;
-            let height = Math.max(root.scrollHeight, body.scrollHeight, root.offsetHeight, body.offsetHeight);
+            // Measure the body's own box, never scrollHeight/offsetHeight:
+            // those never drop below the viewport, so they feed the frame's
+            // current height back into the measurement — pinning the frame
+            // too tall when content shrinks, or oscillating between the
+            // viewport size and the content size and shaking the page.
+            let height = Math.ceil(body.getBoundingClientRect().height);
             if (deep) {
               let bottom = 0;
               document.querySelectorAll('*').forEach(element => {
@@ -335,7 +389,13 @@ struct EntryWebView: NSViewRepresentable {
               });
               height = Math.max(height, bottom + (parseFloat(getComputedStyle(body).paddingBottom) || 0));
             }
-            send({kind:'height', height:Math.ceil(height)});
+            // Sub-2px churn is ignored: resizing the frame re-fires this very
+            // measurement, so tiny deltas would ping-pong the frame height
+            // and visibly twitch the card.
+            const rounded = Math.ceil(height);
+            if (lastSent >= 0 && Math.abs(rounded - lastSent) < 2) return;
+            lastSent = rounded;
+            send({kind:'height', height:rounded});
           }
           function requestMeasure() {
             if (!scheduled) { scheduled = true; requestAnimationFrame(() => measure(false)); }

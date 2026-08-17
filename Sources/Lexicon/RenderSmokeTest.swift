@@ -16,6 +16,11 @@ enum RenderSmokeTest {
     private static var diagnostics: [String: Diagnostic] = [:]
     private static let word = ProcessInfo.processInfo.environment["LEXICON_SMOKE_WORD"] ?? "apple"
     private static let resizeCycle = ProcessInfo.processInfo.environment["LEXICON_SMOKE_RESIZE_CYCLE"] == "1"
+    /// Geometry probe: LEXICON_SMOKE_PROBE=1 [LEXICON_SMOKE_SIZE=1230x950]
+    /// reports outer card rects and per-frame content bottoms, to diagnose
+    /// oversized iframes (blank tails) without guessing.
+    private static let probe = ProcessInfo.processInfo.environment["LEXICON_SMOKE_PROBE"] == "1"
+    private static var probeReports: [String: String] = [:]
 
     static func run() -> Never {
         let app = NSApplication.shared
@@ -32,8 +37,15 @@ enum RenderSmokeTest {
         // Installed dictionaries may contain arbitrary remote scripts. The
         // smoke test only needs to prove local loading/execution, so never let
         // it make an outbound request regardless of the user's saved policy.
-        bridge.networkPolicyOverride = .offlineOnly
+        // LEXICON_SMOKE_ONLINE=1 lifts this to reproduce online-only layout bugs.
+        if ProcessInfo.processInfo.environment["LEXICON_SMOKE_ONLINE"] != "1" {
+            bridge.networkPolicyOverride = .offlineOnly
+        }
         bridge.diagnosticHandler = { uuid, payload in
+            if let report = payload["probe"] as? String {
+                probeReports[uuid] = report
+                return
+            }
             let styles = payload["styles"] as? [String] ?? []
             let reverseColor = payload["reverseColor"] as? String ?? ""
             let lm6Font = payload["lm6Font"] as? String ?? ""
@@ -86,12 +98,47 @@ enum RenderSmokeTest {
             forMainFrameOnly: false,
             in: EntryWebView.Coordinator.bridgeWorld
         ))
+        if probe {
+            configuration.userContentController.addUserScript(WKUserScript(
+                source: """
+                setTimeout(() => {
+                  if (location.host === 'page') return;
+                  const de = document.documentElement, b = document.body;
+                  let bottom = 0, deepest = '';
+                  document.querySelectorAll('*').forEach(el => {
+                    for (const rect of el.getClientRects()) {
+                      if (rect.bottom > bottom) {
+                        bottom = rect.bottom;
+                        deepest = el.tagName.toLowerCase() + '.' + String(el.className).slice(0, 40);
+                      }
+                    }
+                  });
+                  const hidden = Array.from(document.querySelectorAll('*')).filter(
+                    el => getComputedStyle(el).display === 'none').length;
+                  webkit.messageHandlers.lexiconBridge.postMessage({ kind:'diagnostic',
+                    probe:'scrollH=' + de.scrollHeight + ' bodyH=' + (b ? b.scrollHeight : 0)
+                      + ' deepestBottom=' + Math.round(bottom) + ' deepest=' + deepest
+                      + ' elements=' + document.querySelectorAll('*').length
+                      + ' displayNone=' + hidden });
+                }, 900);
+                """,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: false,
+                in: EntryWebView.Coordinator.bridgeWorld
+            ))
+        }
         let handler = DictSchemeHandler(libraryModel: model)
-        handler.allowHTTPS = false
+        handler.allowHTTPS = ProcessInfo.processInfo.environment["LEXICON_SMOKE_ONLINE"] == "1"
         bridge.schemeHandler = handler
         configuration.setURLSchemeHandler(handler, forURLScheme: DictSchemeHandler.scheme)
 
-        let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 1400), configuration: configuration)
+        let probeSize = ProcessInfo.processInfo.environment["LEXICON_SMOKE_SIZE"]?
+            .split(separator: "x").compactMap { Double($0) }
+        let viewSize = NSSize(
+            width: probeSize?.first ?? 900,
+            height: probeSize?.count ?? 0 > 1 ? probeSize?[1] ?? 1400 : 1400
+        )
+        let view = WKWebView(frame: NSRect(origin: .zero, size: viewSize), configuration: configuration)
         view.navigationDelegate = bridge
         webView = view
         bridge.load(
@@ -128,7 +175,8 @@ enum RenderSmokeTest {
                     !$0.src.isEmpty && $0.height > 44 && $0.state.hasPrefix("ok:") && $0.isolated
                 }
                 let styleReady = frames.allSatisfy { diagnostics[$0.uuid] != nil }
-                if ready && styleReady {
+                let probeReady = !probe || frames.allSatisfy { probeReports[$0.uuid] != nil }
+                if ready && styleReady && probeReady {
                     if word == "苹果" {
                         let reverse = diagnostics.values.first {
                             $0.styles.contains(where: { $0.hasSuffix("/oaldzh.css") })
@@ -174,6 +222,21 @@ enum RenderSmokeTest {
                     }
                     frames.forEach { print("frame \($0.uuid): height=\($0.height) src=\($0.src)") }
                     diagnostics.forEach { print("styles \($0.key): \($0.value)") }
+                    if probe {
+                        probeReports.forEach { print("probe \($0.key): \($0.value)") }
+                        webView.evaluateJavaScript("""
+                        JSON.stringify(Array.from(document.querySelectorAll('details[data-uuid]')).map(d => ({
+                          uuid:d.dataset.uuid, open:d.open,
+                          top:Math.round(d.getBoundingClientRect().top + scrollY),
+                          height:Math.round(d.getBoundingClientRect().height)
+                        })))
+                        """) { value, _ in
+                            print("cards: \(value ?? "")")
+                            print("SMOKE OK: \(frames.count) isolated dictionary frames rendered")
+                            exit(0)
+                        }
+                        return
+                    }
                     print("SMOKE OK: \(frames.count) isolated dictionary frames rendered")
                     exit(0)
                 }

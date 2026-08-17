@@ -6,13 +6,17 @@ struct ContentView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var libraryModel: LibraryModel
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.colorScheme) private var colorScheme
     @FocusState private var searchFocused: Bool
+    /// Drives the sidebar divider's hover highlight.
+    @State private var dividerHovered = false
     @State private var sidebarMode: SidebarMode =
         SidebarMode(rawValue: LibraryModel.storedSidebarMode) ?? .lexicon
     /// The section the user was browsing before a query pulled the sidebar
     /// into results; restored when the search field is cleared.
     @State private var modeBeforeSearch: SidebarMode?
+    /// Direction of the sidebar section slide: sections are ordered
+    /// Lexicon → History → Starred, so a higher destination slides left.
+    @Namespace private var segmentThumb
     @State private var sidebarVisible = LibraryModel.storedSidebarVisible
     @State private var sidebarWidth: CGFloat = LibraryModel.storedSidebarWidth
     @State private var sidebarDragStartWidth: CGFloat?
@@ -34,26 +38,29 @@ struct ContentView: View {
         HStack(spacing: 0) {
             if sidebarVisible {
                 VStack(spacing: 0) {
-                    sidebarTitleBar
-                    interfaceSeparator.frame(height: 1)
+                    sidebarTopRegion
 
                     sidebar
                 }
                 .frame(width: sidebarWidth)
+                // A true sidebar material gives the panel its own depth
+                // against the content area instead of the same flat gray.
+                .background(.regularMaterial)
                 .transition(.move(edge: .leading).combined(with: .opacity))
+            }
 
+            detail
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        // The divider rides the exact sidebar/content boundary, drawn above
+        // both columns so the opaque bars can't cover it, and every
+        // horizontal separator runs flush into it.
+        .overlay(alignment: .topLeading) {
+            if sidebarVisible {
                 sidebarDivider
+                    .offset(x: sidebarWidth)
                     .transition(.opacity)
             }
-
-            VStack(spacing: 0) {
-                browserTabStrip
-                interfaceSeparator.frame(height: 1)
-
-                detail
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .ignoresSafeArea(
             .container,
@@ -121,7 +128,19 @@ struct ContentView: View {
             }
             .hidden()
         }
-        .onAppear { focusSearchField() }
+        .onAppear {
+            focusSearchField()
+            #if DEBUG
+            // Debug hook: auto-look-up a word at launch so layout issues can
+            // be reproduced headlessly: `LEXICON_DEBUG_LOOKUP=hello .build/debug/Lexicon`.
+            if let lookup = ProcessInfo.processInfo.environment["LEXICON_DEBUG_LOOKUP"],
+               !lookup.isEmpty {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    appState.navigate(to: lookup)
+                }
+            }
+            #endif
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { focusSearchField() }
         }
@@ -130,9 +149,9 @@ struct ContentView: View {
             withAnimation(.smooth(duration: 0.18)) {
                 if searching {
                     if sidebarMode != .lexicon { modeBeforeSearch = sidebarMode }
-                    sidebarMode = .lexicon
+                    setSidebarMode(.lexicon)
                 } else if let previous = modeBeforeSearch {
-                    sidebarMode = previous
+                    setSidebarMode(previous)
                     modeBeforeSearch = nil
                 }
             }
@@ -159,6 +178,12 @@ struct ContentView: View {
         )
     }
 
+    /// Routes every section switch through one place so programmatic jumps
+    /// (search results) animate exactly like picker clicks.
+    private func setSidebarMode(_ mode: SidebarMode) {
+        sidebarMode = mode
+    }
+
     /// Briefly surfaces the new entry text size so ⌘+/⌘-/⌘0 have visible
     /// feedback; a plain fade, so Reduce Motion needs no special case.
     private func showZoomHUD() {
@@ -171,33 +196,117 @@ struct ContentView: View {
         }
     }
 
-    private var browserTabStrip: some View {
-        HStack(spacing: 4) {
+    /// The window's toolbar: navigation, the lookup field (centered), and the
+    /// entry controls. Tabs live in their own row below, Safari-style. When
+    /// the sidebar is hidden, the sidebar toggle moves here and the leading
+    /// padding clears the traffic lights.
+    private var toolbarRow: some View {
+        HStack(spacing: 6) {
             if !sidebarVisible {
                 sidebarToggleButton
             }
 
-            BrowserTabBar()
-                .frame(maxWidth: .infinity)
+            ToolbarCapsule {
+                Button {
+                    appState.goBack()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .frame(width: 28, height: 28)
+                        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+                .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
+                .help("Back")
+                .accessibilityLabel("Back")
+                .disabled(!appState.canGoBack)
+                .keyboardShortcut("[", modifiers: .command)
+
+                Button {
+                    appState.goForward()
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .frame(width: 28, height: 28)
+                        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+                .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
+                .help("Forward")
+                .accessibilityLabel("Forward")
+                .disabled(!appState.canGoForward)
+                .keyboardShortcut("]", modifiers: .command)
+            }
+
+            Spacer(minLength: 8)
+            searchField
+                .frame(minWidth: 220, idealWidth: 360, maxWidth: 560)
+            Spacer(minLength: 8)
+
+            // The star acts on the current entry, so it lives with the entry
+            // controls trailing the search field, not with navigation.
+            ToolbarCapsule {
+                Button {
+                    if let word = appState.selectedWord {
+                        libraryModel.toggleStar(word)
+                    }
+                } label: {
+                    Image(systemName: bookmarkIconName)
+                        .scaleEffect(starPulse ? 1.22 : 1)
+                        .frame(width: 28, height: 28)
+                        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+                .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
+                .help(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
+                .accessibilityLabel(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
+                .disabled(appState.selectedWord == nil)
+
+                Button {
+                    appState.showDictionaryManager = true
+                } label: {
+                    Image(systemName: "books.vertical")
+                        .frame(width: 28, height: 28)
+                        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+                .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
+                .help("Manage dictionaries")
+                .accessibilityLabel("Manage dictionaries")
+
+                Button {
+                    appState.openNewTab()
+                } label: {
+                    Image(systemName: "plus")
+                        .frame(width: 28, height: 28)
+                        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+                .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
+                .help("New Tab")
+                .accessibilityLabel("New Tab")
+            }
         }
-        .padding(
-            .leading,
-            sidebarVisible || windowIsFullScreen ? 8 : 82
-        )
+        .font(.system(size: 13, weight: .medium))
+        .padding(.leading, sidebarVisible || windowIsFullScreen ? 8 : 82)
         .padding(.trailing, 8)
         .frame(height: 42)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
-    private var sidebarTitleBar: some View {
+    /// Safari's separate tab bar layout: tabs get their own full-width row
+    /// below the toolbar.
+    private var tabStripRow: some View {
+        BrowserTabBar()
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    /// The strip above the sidebar: the traffic lights float at its leading
+    /// edge and the sidebar toggle sits at its trailing edge, so the control
+    /// that dismisses the sidebar stays on the sidebar itself.
+    private var sidebarTopRegion: some View {
         HStack(spacing: 0) {
-            sidebarToggleButton
             Spacer(minLength: 0)
+            sidebarToggleButton
         }
-        .padding(.leading, windowIsFullScreen ? 8 : 82)
         .padding(.trailing, 8)
         .frame(height: 42)
-        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var sidebarToggleButton: some View {
@@ -218,17 +327,18 @@ struct ContentView: View {
     }
 
     private var sidebarDivider: some View {
-        ZStack {
+        // The visible hairline sits at the leading edge, flush with the
+        // sidebar; the remaining width is invisible drag area into the detail.
+        ZStack(alignment: .leading) {
             Color.clear
             Rectangle()
-                .fill(colorScheme == .dark
-                    ? Color.white.opacity(0.14)
-                    : Color.black.opacity(0.14))
-                .frame(width: 1)
+                .fill(Color(nsColor: .separatorColor).opacity(dividerHovered ? 1 : 0.7))
+                .frame(width: dividerHovered ? 2 : 1)
         }
-        .frame(width: 9)
+        .frame(width: 7)
         .contentShape(Rectangle())
         .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) { dividerHovered = hovering }
             if hovering {
                 NSCursor.resizeLeftRight.set()
             } else {
@@ -268,14 +378,15 @@ struct ContentView: View {
 
     private var interfaceSeparator: some View {
         Rectangle()
-            .fill(colorScheme == .dark
-                ? Color.white.opacity(0.12)
-                : Color.black.opacity(0.12))
+            .fill(Color(nsColor: .separatorColor))
     }
 
     private var detail: some View {
         VStack(spacing: 0) {
-            browserNavigationBar
+            toolbarRow
+            // No separator between the toolbar and the tab strip — Safari
+            // runs them together as one chrome surface.
+            tabStripRow
             interfaceSeparator.frame(height: 1)
             ZStack {
                 ForEach(appState.residentTabs) { tab in
@@ -318,68 +429,6 @@ struct ContentView: View {
         .ignoresSafeArea(edges: .bottom)
     }
 
-    private var browserNavigationBar: some View {
-        HStack(spacing: 3) {
-            Button {
-                appState.goBack()
-            } label: {
-                Image(systemName: "chevron.left")
-                    .frame(width: 28, height: 28)
-                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            }
-            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
-            .help("Back")
-            .accessibilityLabel("Back")
-            .disabled(!appState.canGoBack)
-            .keyboardShortcut("[", modifiers: .command)
-
-            Button {
-                appState.goForward()
-            } label: {
-                Image(systemName: "chevron.right")
-                    .frame(width: 28, height: 28)
-                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            }
-            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
-            .help("Forward")
-            .accessibilityLabel("Forward")
-            .disabled(!appState.canGoForward)
-            .keyboardShortcut("]", modifiers: .command)
-
-            Button {
-                if let word = appState.selectedWord {
-                    libraryModel.toggleStar(word)
-                }
-            } label: {
-                Image(systemName: bookmarkIconName)
-                    .scaleEffect(starPulse ? 1.22 : 1)
-                    .frame(width: 28, height: 28)
-                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            }
-            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
-            .help(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
-            .accessibilityLabel(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
-            .disabled(appState.selectedWord == nil)
-
-            searchField
-
-            Button {
-                appState.showDictionaryManager = true
-            } label: {
-                Image(systemName: "books.vertical")
-                    .frame(width: 28, height: 28)
-                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            }
-            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
-            .help("Manage dictionaries")
-            .accessibilityLabel("Manage dictionaries")
-        }
-        .font(.system(size: 13, weight: .medium))
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color(nsColor: .windowBackgroundColor))
-    }
-
     private var searchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
@@ -412,17 +461,36 @@ struct ContentView: View {
                 }
         }
             .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            // Matches the toolbar capsules (32pt), so the field and the
+            // button groups share one height and one vertical rhythm.
+            .frame(height: 32)
             .background {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color(nsColor: .textBackgroundColor))
+                if #available(macOS 26.0, *) {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(.clear)
+                        .glassEffect(
+                            .regular.interactive(),
+                            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        )
+                } else {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color(nsColor: .textBackgroundColor))
+                }
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(
-                        searchFocused ? Color.accentColor : Color(nsColor: .separatorColor),
-                        lineWidth: searchFocused ? 2 : 1
-                    )
+                if #available(macOS 26.0, *) {
+                    // Glass carries the resting state; only focus gets a ring.
+                    if searchFocused {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color.accentColor, lineWidth: 2)
+                    }
+                } else {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(
+                            searchFocused ? Color.accentColor : Color(nsColor: .separatorColor),
+                            lineWidth: searchFocused ? 2 : 1
+                        )
+                }
             }
             .frame(maxWidth: .infinity)
             .accessibilityLabel("Search all dictionaries")
@@ -463,9 +531,10 @@ struct ContentView: View {
     private var sidebar: some View {
         VStack(spacing: 0) {
             sidebarModePicker
-                .padding(.horizontal, 12)
-                .padding(.top, 11)
-                .padding(.bottom, 6)
+                // Same inset as the list rows (7) and the same row height as
+                // the tab strip (38), so the control shares the tabs' line.
+                .padding(.horizontal, 7)
+                .padding(.vertical, 6)
 
             sidebarStatusBar
 
@@ -502,43 +571,77 @@ struct ContentView: View {
             }
             .scrollIndicators(.automatic)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        // Animates the picker's sliding selection thumb (and the status bar's
+        // arrival); the list content itself swaps without motion.
+        .animation(.smooth(duration: 0.2), value: sidebarMode)
     }
 
+    /// A segmented control in the Safari mold, with the selection thumb
+    /// gliding between segments instead of a hard highlight swap.
     private var sidebarModePicker: some View {
-        Picker("Sidebar section", selection: $sidebarMode) {
+        HStack(spacing: 2) {
             ForEach(SidebarMode.allCases, id: \.self) { mode in
-                Text(mode.title).tag(mode)
+                Button {
+                    setSidebarMode(mode)
+                } label: {
+                    Text(mode.title)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(sidebarMode == mode ? .primary : .secondary)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 22)
+                        .contentShape(Rectangle())
+                        .background {
+                            if sidebarMode == mode {
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(Color(nsColor: .controlBackgroundColor))
+                                    .shadow(color: .black.opacity(0.18), radius: 1, y: 0.5)
+                                    .matchedGeometryEffect(
+                                        id: "sidebar-section-thumb", in: segmentThumb
+                                    )
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(mode.title)
+                .accessibilityAddTraits(sidebarMode == mode ? .isSelected : [])
             }
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
+        .padding(2)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.06))
+        }
         .accessibilityLabel("Sidebar section")
         .accessibilityValue(sidebarMode.title)
     }
 
     @ViewBuilder
     private var sidebarStatusBar: some View {
-        if sidebarMode == .history || (sidebarMode == .lexicon && isSearching) {
+        if sidebarMode == .history || sidebarMode == .starred
+            || (sidebarMode == .lexicon && isSearching) {
             HStack(spacing: 8) {
                 Text(sidebarStatusText)
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .monospacedDigit()
                 Spacer(minLength: 8)
-                Button("Clear") {
-                    if sidebarMode == .history {
-                        libraryModel.clearHistory()
-                    } else {
-                        appState.searchText = ""
+                // Starred words are managed one by one; only the transient
+                // lists (search, history) get a bulk Clear.
+                if sidebarMode != .starred {
+                    Button("Clear") {
+                        if sidebarMode == .history {
+                            libraryModel.clearHistory()
+                        } else {
+                            appState.searchText = ""
+                        }
                     }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                    .disabled(sidebarMode == .history && libraryModel.history.isEmpty)
+                    .help(sidebarMode == .history ? "Clear lookup history" : "Clear the search")
                 }
-                .buttonStyle(.plain)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize()
-                .disabled(sidebarMode == .history && libraryModel.history.isEmpty)
-                .help(sidebarMode == .history ? "Clear lookup history" : "Clear the search")
             }
             .padding(.leading, 16)
             .padding(.trailing, 12)
@@ -627,11 +730,15 @@ struct ContentView: View {
     }
 
     private var sidebarStatusText: String {
-        if sidebarMode == .history {
+        switch sidebarMode {
+        case .history:
             return "\(libraryModel.history.count) recent"
+        case .starred:
+            return "\(libraryModel.starred.count) starred"
+        case .lexicon:
+            let label = showingSuggestions ? "suggestions" : "results"
+            return "\(appState.results.count) \(label)"
         }
-        let label = showingSuggestions ? "suggestions" : "results"
-        return "\(appState.results.count) \(label)"
     }
 
     private var emptyListMessage: String {
@@ -814,16 +921,17 @@ private struct BrowserTabBar: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var libraryModel: LibraryModel
 
-    // Tabs keep a browser-like natural width until the strip fills; after that
-    // they share the available space evenly. 268 points is roughly two-thirds
-    // of the previous cap, leaving room for more entries without feeling dense.
-    private let preferredTabWidth: CGFloat = 268
-    private let plusWidth: CGFloat = 32
     private let spacing: CGFloat = 2
     @Namespace private var activeTabBackground
     @State private var hoveredTabIDs: Set<UUID> = []
     /// The tab a reorder drag is hovering over; drives the insertion indicator.
     @State private var dropTargetTabID: UUID?
+
+    /// Liquid Glass chrome needs macOS 26; older systems get flat fills.
+    private var supportsGlass: Bool {
+        if #available(macOS 26.0, *) { return true }
+        return false
+    }
 
     var body: some View {
         GeometryReader { proxy in
@@ -831,12 +939,11 @@ private struct BrowserTabBar: View {
             let interItemSpacing = spacing * CGFloat(count)
             let availableForTabs = max(
                 CGFloat(count),
-                proxy.size.width - plusWidth - interItemSpacing
+                proxy.size.width - interItemSpacing
             )
-            let tabWidth = min(
-                preferredTabWidth,
-                availableForTabs / CGFloat(count)
-            )
+            // Tabs share the full strip evenly, like Safari's tab bar — a
+            // single tab spans the whole space instead of hugging the left.
+            let tabWidth = max(56, availableForTabs / CGFloat(count))
 
             HStack(spacing: spacing) {
                 ForEach(Array(appState.tabs.enumerated()), id: \.element.id) { index, tab in
@@ -880,25 +987,6 @@ private struct BrowserTabBar: View {
                         }
                 }
 
-                Button {
-                    appState.openNewTab()
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 11, weight: .medium))
-                        .frame(width: 28, height: 28)
-                        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                }
-                .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
-                .help("New Tab")
-                .accessibilityLabel("New Tab")
-                .dropDestination(for: String.self) { items, _ in
-                    guard let first = items.first,
-                          let uuid = UUID(uuidString: first)
-                    else { return false }
-                    appState.moveTab(id: uuid, before: nil)
-                    return true
-                } isTargeted: { _ in }
-
                 Spacer(minLength: 0)
                     .dropDestination(for: String.self) { items, _ in
                         guard let first = items.first,
@@ -910,7 +998,7 @@ private struct BrowserTabBar: View {
             }
             .animation(.smooth(duration: 0.2), value: appState.tabs.map(\.id))
         }
-        .frame(height: 36)
+        .frame(height: 32)
     }
 
     private func tabView(
@@ -957,23 +1045,35 @@ private struct BrowserTabBar: View {
         }
         .padding(.leading, compact ? 6 : 9)
         .padding(.trailing, compact ? 3 : 5)
-        .frame(height: 34)
+        .frame(height: 30)
         .background {
             if isActive {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-                    .matchedGeometryEffect(id: "active-tab", in: activeTabBackground)
+                if #available(macOS 26.0, *) {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(.clear)
+                        .glassEffect(
+                            .regular,
+                            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        )
+                        .matchedGeometryEffect(id: "active-tab", in: activeTabBackground)
+                } else {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                        .matchedGeometryEffect(id: "active-tab", in: activeTabBackground)
+                }
             } else if isHovered {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .fill(Color.primary.opacity(0.055))
             }
         }
         .overlay {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(
-                    Color(nsColor: .separatorColor).opacity(isActive ? 0.55 : 0),
-                    lineWidth: 1
-                )
+            if !supportsGlass {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(
+                        Color(nsColor: .separatorColor).opacity(isActive ? 0.55 : 0),
+                        lineWidth: 1
+                    )
+            }
         }
         .overlay(alignment: .trailing) {
             if showsTrailingDivider {
@@ -1041,6 +1141,26 @@ private final class MiddleClickView: NSView {
     }
 }
 
+/// Safari-style toolbar capsule: a hairline-ringed pill grouping related
+/// buttons (back/forward, entry actions) into one visual unit.
+private struct ToolbarCapsule<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(spacing: 2) { content }
+            .padding(.horizontal, 2)
+            .frame(height: 32)
+            .background {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.primary.opacity(0.04))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+            }
+    }
+}
+
 private struct BrowserIconButtonStyle: ButtonStyle {
     var cornerRadius: CGFloat = 8
     var hitPadding: CGFloat = 2
@@ -1085,12 +1205,13 @@ private struct BrowserIconButtonBody: View {
 private extension View {
     func sidebarRow(selected: Bool) -> some View {
         self
+            .foregroundStyle(selected ? Color.accentColor : Color.primary)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 9)
             .frame(minHeight: 28)
             .background {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(selected ? Color.accentColor.opacity(0.24) : Color.clear)
+                    .fill(selected ? Color.accentColor.opacity(0.3) : Color.clear)
             }
             .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }

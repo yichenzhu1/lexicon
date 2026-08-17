@@ -62,19 +62,19 @@ public enum EntryPageBuilder {
         <style>
           :root { color-scheme:light dark; }
           html { overflow-y:auto; overscroll-behavior:contain; }
-          body { font-family:-apple-system,"Helvetica Neue",sans-serif; margin:0; padding:12px 16px 24px; }
-          h1.lexicon-headword { font-size:20px; font-weight:700; letter-spacing:-0.02em; margin:2px 2px 10px; }
-          details { margin:0 0 10px; padding:4px 10px 10px; background:rgba(128,128,128,.08);
-            border:1px solid rgba(128,128,128,.22); border-radius:10px; }
-          details:not([open]) { padding-bottom:4px; }
-          summary { cursor:pointer; padding:6px; font-weight:600; font-size:13px; user-select:none;
-            border-radius:7px; }
-          summary:hover { background:rgba(128,128,128,.10); }
+          body { font-family:-apple-system,"Helvetica Neue",sans-serif; margin:0; padding:10px 8px 20px; }
+          /* Flat, minimalist stack: no card chrome; dictionaries are separated
+             by a single hairline so the entries themselves carry the page. */
+          details { margin:0; padding:0; background:transparent; border:0; }
+          details + details { border-top:1px solid rgba(128,128,128,.25); margin-top:4px; padding-top:2px; }
+          summary { cursor:pointer; padding:5px 2px; font-weight:600; font-size:13px; user-select:none; }
           iframe { display:block; width:100%; border:0; height:44px; background:transparent; }
           details:not([open]) iframe { display:none; }
           .lexicon-jump { position:sticky; top:0; z-index:5; display:flex; gap:6px; overflow-x:auto;
-            scrollbar-width:none; margin:-12px -16px 8px; padding:8px 16px; background:Canvas;
-            border-bottom:1px solid rgba(128,128,128,.22); }
+            scrollbar-width:none; margin:-10px -8px 6px; padding:8px 8px;
+            background:rgba(255,255,255,.72); backdrop-filter:blur(20px) saturate(180%);
+            -webkit-backdrop-filter:blur(20px) saturate(180%);
+            border-bottom:1px solid rgba(0,0,0,.10); }
           .lexicon-jump::-webkit-scrollbar { display:none; }
           .lexicon-jump button { flex:0 0 auto; font:inherit; font-size:11px; font-weight:600; color:inherit;
             opacity:.65; padding:3px 9px; border:1px solid rgba(128,128,128,.35); border-radius:999px;
@@ -84,10 +84,11 @@ public enum EntryPageBuilder {
           .lexicon-jump-spacer { flex:1 0 auto; }
           .lexicon-jump .lexicon-toggle-all { border-style:none; text-decoration:none; }
           .lexicon-jump .lexicon-toggle-all:hover { background:rgba(128,128,128,.16); }
+          @media (prefers-color-scheme:dark) {
+            .lexicon-jump { background:rgba(34,34,34,.68); border-bottom-color:rgba(255,255,255,.14); }
+          }
           @media (prefers-reduced-motion:reduce) { * { scroll-behavior:auto!important; } }
-        </style></head><body>
-        <h1 class="lexicon-headword">\(escape(normalizedKey))</h1>
-        \(jumpBar)\(cards)
+        </style></head><body>\(jumpBar)\(cards)
         <script>
         (() => {
           const frames = new Map(Array.from(document.querySelectorAll('iframe[data-uuid]'))
@@ -197,7 +198,7 @@ public enum EntryPageBuilder {
           :root { color-scheme:light dark; }
           html,body { overflow:visible!important; }
           body { font-family:-apple-system,"Helvetica Neue",sans-serif; font-size:15px; line-height:1.45;
-            box-sizing:border-box; margin:0!important; padding:12px 14px 22px!important; min-height:0!important;
+            box-sizing:border-box; margin:0!important; padding:6px 0 14px!important; min-height:0!important;
             overflow-wrap:break-word; background-color:rgba(255,255,255,.001)!important; }
           img,video,svg { max-width:100%; height:auto; }
           hr.lexicon-sep { margin:14px 0; opacity:.4; }

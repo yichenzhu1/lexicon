@@ -4,14 +4,33 @@ All notable changes to Lexicon are documented here.
 
 ## Unreleased
 
-- Sidebar sections switch via a segmented control, search results restore the
-  previously browsed section when the field is cleared, Escape clears the
-  search, and the sidebar shows a hint instead of a blank panel when idle.
+- Fixed dictionary frames constantly resizing themselves: the height
+  measurement no longer reads viewport-bound values, and sub-2px changes are
+  ignored so a frame's own resize cannot retrigger itself — this removes both
+  the oversized blank tail below entries and the constant up-down twitching
+  of the lower dictionary sections.
+- Safari-pattern chrome: capsuled toolbar button groups, a separate
+  full-width tab row with Liquid Glass tabs and a Liquid Glass lookup field
+  on macOS 26 (flat fills on older systems), and the new-tab button in the
+  toolbar's trailing capsule.
+- The Lexicon/History/Starred control animates its selection thumb gliding
+  between segments (list content no longer slides), and the control now
+  shares the tab row's height and the list rows' insets.
+- The sidebar divider is back, drawn above both columns exactly on the
+  boundary; the back arrow, tab row, dictionary chips, and entry content
+  share one left inset, and the trailing buttons share one right inset.
+- The lookup field now matches the toolbar capsules' 32pt height and grows
+  wider (up to 560pt).
+- Minimalist entry page: flat dictionary sections separated by hairlines
+  instead of rounded cards, under a translucent sticky jump bar with an
+  expand/collapse-all control; no redundant headword banner.
+- Sidebar: Starred gains a count line like History, and idle sections show
+  guidance text.
+- Search results restore the previously browsed section when the field is
+  cleared, and Escape clears the search.
 - Tabs can be reordered by dragging, closed with a middle click, and managed
   from a context menu (Close Other Tabs, Close Tabs to the Right); ⌘1–⌘9
   switch tabs by position.
-- Dictionary entries render as cards under a headword title, with an
-  expand/collapse-all control and clearer welcome and no-result pages.
 - Sidebar width, visibility, and section are remembered across launches;
   double-clicking the divider resets the width; zoom changes show a brief
   percentage indicator; starring a word animates the bookmark.

@@ -59,10 +59,6 @@ func runPageBuilderTests(_ t: TestHarness) {
         t.expect(collapsed.contains("<details id=\"dict-\(basic.uuid.lowercased())\""), "saved collapse state")
         t.expect(collapsed.contains("<nav class=\"lexicon-jump\""), "jump bar for multiple dictionaries")
         t.expect(collapsed.contains("lexicon-toggle-all"), "expand/collapse-all control for multiple dictionaries")
-        t.expect(
-            collapsed.contains("<h1 class=\"lexicon-headword\">apple</h1>"),
-            "headword title on results page"
-        )
         let anchored = EntryPageBuilder.resultsDocument(
             for: "apple", library: library, collapsedDictionaries: [basic.uuid],
             anchor: "sense-2", preferredDictionaryUUID: basic.uuid
