@@ -379,15 +379,20 @@ struct EntryWebView: NSViewRepresentable {
             // current height back into the measurement — pinning the frame
             // too tall when content shrinks, or oscillating between the
             // viewport size and the content size and shaking the page.
-            let height = Math.ceil(body.getBoundingClientRect().height);
+            const bodyRect = body.getBoundingClientRect();
+            let height = Math.ceil(bodyRect.height);
             if (deep) {
-              let bottom = 0;
+              // DOMRect coordinates already include the body's padding. Scan
+              // for positioned overflow relative to the body, but do not add
+              // paddingBottom again: doing so made the fast and settled paths
+              // alternate forever by exactly the 14px wrapper padding.
+              let bottom = bodyRect.bottom;
               document.querySelectorAll('*').forEach(element => {
                 const style = getComputedStyle(element);
                 if (style.visibility === 'hidden' || style.position === 'fixed') return;
                 for (const rect of element.getClientRects()) bottom = Math.max(bottom, rect.bottom);
               });
-              height = Math.max(height, bottom + (parseFloat(getComputedStyle(body).paddingBottom) || 0));
+              height = Math.max(height, Math.ceil(bottom - bodyRect.top));
             }
             // Sub-2px churn is ignored: resizing the frame re-fires this very
             // measurement, so tiny deltas would ping-pong the frame height

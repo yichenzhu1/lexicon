@@ -13,6 +13,8 @@ enum RenderSmokeTest {
     private static var attempts = 0
     private static var resizePhase = 0
     private static var baselineHeights: [Double] = []
+    private static var stabilityCheckStarted = false
+    private static var stabilityPassed = false
     private static var diagnostics: [String: Diagnostic] = [:]
     private static let word = ProcessInfo.processInfo.environment["LEXICON_SMOKE_WORD"] ?? "apple"
     private static let resizeCycle = ProcessInfo.processInfo.environment["LEXICON_SMOKE_RESIZE_CYCLE"] == "1"
@@ -177,6 +179,22 @@ enum RenderSmokeTest {
                 let styleReady = frames.allSatisfy { diagnostics[$0.uuid] != nil }
                 let probeReady = !probe || frames.allSatisfy { probeReports[$0.uuid] != nil }
                 if ready && styleReady && probeReady {
+                    if resizeCycle, resizePhase == 1 {
+                        let changed = zip(frames.map(\.height), baselineHeights).contains {
+                            abs($0.0 - $0.1) > 10
+                        }
+                        if !changed {
+                            if attempts > 30 {
+                                print("SMOKE FAIL: resize/zoom did not produce a new stable height")
+                                exit(1)
+                            }
+                            return
+                        }
+                    }
+                    guard stabilityPassed else {
+                        if !stabilityCheckStarted { startStabilityCheck() }
+                        return
+                    }
                     if word == "苹果" {
                         let reverse = diagnostics.values.first {
                             $0.styles.contains(where: { $0.hasSuffix("/oaldzh.css") })
@@ -203,34 +221,27 @@ enum RenderSmokeTest {
                         baselineHeights = frames.map(\.height)
                         resizePhase = 1
                         attempts = 0
+                        stabilityCheckStarted = false
+                        stabilityPassed = false
                         webView.frame.size.width = 620
                         webView.pageZoom = 1.35
                         return
                     }
                     if resizeCycle, resizePhase == 1 {
-                        let changed = zip(frames.map(\.height), baselineHeights).contains {
-                            abs($0.0 - $0.1) > 10
-                        }
-                        if !changed {
-                            if attempts > 30 {
-                                print("SMOKE FAIL: resize/zoom did not produce a new stable height")
-                                exit(1)
-                            }
-                            return
-                        }
                         print("SMOKE RESIZE: \(baselineHeights) -> \(frames.map(\.height))")
                     }
                     frames.forEach { print("frame \($0.uuid): height=\($0.height) src=\($0.src)") }
                     diagnostics.forEach { print("styles \($0.key): \($0.value)") }
                     if probe {
                         probeReports.forEach { print("probe \($0.key): \($0.value)") }
-                        webView.evaluateJavaScript("""
-                        JSON.stringify(Array.from(document.querySelectorAll('details[data-uuid]')).map(d => ({
-                          uuid:d.dataset.uuid, open:d.open,
-                          top:Math.round(d.getBoundingClientRect().top + scrollY),
-                          height:Math.round(d.getBoundingClientRect().height)
-                        })))
-                        """) { value, _ in
+                        Task { @MainActor in
+                            let value = try? await webView.evaluateJavaScript("""
+                            JSON.stringify(Array.from(document.querySelectorAll('details[data-uuid]')).map(d => ({
+                              uuid:d.dataset.uuid, open:d.open,
+                              top:Math.round(d.getBoundingClientRect().top + scrollY),
+                              height:Math.round(d.getBoundingClientRect().height)
+                            })))
+                            """)
                             print("cards: \(value ?? "")")
                             print("SMOKE OK: \(frames.count) isolated dictionary frames rendered")
                             exit(0)
@@ -244,6 +255,58 @@ enum RenderSmokeTest {
                     print("SMOKE FAIL: frames did not report stable heights: \(frames)")
                     exit(1)
                 }
+            }
+        }
+    }
+
+    /// Record every height assignment rather than accepting the first
+    /// plausible value. The old 14px feedback loop only occupied a single
+    /// display frame at a time, so the previous 400ms poll could miss it.
+    private static func startStabilityCheck() {
+        guard let webView else { return }
+        stabilityCheckStarted = true
+        Task { @MainActor in
+            do {
+                _ = try await webView.evaluateJavaScript("""
+                (() => {
+                  const frames = Array.from(document.querySelectorAll('iframe[data-uuid]'));
+                  window.__lexiconStabilityRanges = new Map(frames.map(frame => {
+                    const height = frame.getBoundingClientRect().height;
+                    return [frame.dataset.uuid || '', {uuid:frame.dataset.uuid || '', min:height, max:height}];
+                  }));
+                  window.__lexiconOriginalSetFrameHeight ||= window.__lexiconSetFrameHeight;
+                  const original = window.__lexiconOriginalSetFrameHeight;
+                  window.__lexiconSetFrameHeight = (uuid, requested) => {
+                    const id = String(uuid).toLowerCase(), height = Number(requested) || 44;
+                    const range = window.__lexiconStabilityRanges.get(id) || {uuid:id, min:height, max:height};
+                    range.min = Math.min(range.min, height); range.max = Math.max(range.max, height);
+                    window.__lexiconStabilityRanges.set(id, range);
+                    return original(uuid, requested);
+                  };
+                  return true;
+                })()
+                """)
+                try await Task.sleep(for: .seconds(2))
+                let value = try await webView.evaluateJavaScript(
+                    "JSON.stringify(Array.from(window.__lexiconStabilityRanges?.values?.() || []))"
+                )
+                guard let json = value as? String,
+                      let data = json.data(using: .utf8),
+                      let ranges = try? JSONDecoder().decode([HeightRange].self, from: data),
+                      !ranges.isEmpty
+                else {
+                    print("SMOKE FAIL: could not sample iframe stability: invalid result")
+                    exit(1)
+                }
+                let unstable = ranges.filter { $0.max - $0.min > 1 }
+                guard unstable.isEmpty else {
+                    print("SMOKE FAIL: iframe heights oscillated: \(unstable)")
+                    exit(1)
+                }
+                stabilityPassed = true
+            } catch {
+                print("SMOKE FAIL: could not sample iframe stability: \(error.localizedDescription)")
+                exit(1)
             }
         }
     }
@@ -265,5 +328,12 @@ enum RenderSmokeTest {
         let state: String
         let isolated: Bool
         var description: String { "\(uuid):\(height):\(state):isolated=\(isolated)" }
+    }
+
+    private struct HeightRange: Codable, CustomStringConvertible {
+        let uuid: String
+        let min: Double
+        let max: Double
+        var description: String { "\(uuid):\(min)...\(max)" }
     }
 }

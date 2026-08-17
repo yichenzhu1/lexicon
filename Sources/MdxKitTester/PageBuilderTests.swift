@@ -25,6 +25,10 @@ func runPageBuilderTests(_ t: TestHarness) {
         t.expect(html.contains("data-src="), "frames use lazy sources")
         t.expect(html.contains("IntersectionObserver"), "nearby expanded frames load")
         t.expect(html.contains("__lexiconSetFrameHeight"), "child height reports have an outer receiver")
+        t.expect(
+            html.contains("Math.abs(height - oldHeight) < 1"),
+            "unchanged child heights do not retrigger iframe layout"
+        )
         t.expect(!html.contains("10000px"), "no temporary sizing sentinel")
         t.expect(html.contains(#"scrolling="no""#), "one outer scroll surface")
         t.expect(html.contains("overscroll-behavior:contain"), "result page remains scrollable")
@@ -59,6 +63,10 @@ func runPageBuilderTests(_ t: TestHarness) {
         t.expect(collapsed.contains("<details id=\"dict-\(basic.uuid.lowercased())\""), "saved collapse state")
         t.expect(collapsed.contains("<nav class=\"lexicon-jump\""), "jump bar for multiple dictionaries")
         t.expect(collapsed.contains("lexicon-toggle-all"), "expand/collapse-all control for multiple dictionaries")
+        t.expect(collapsed.contains("display:flex; gap:4px"), "jump controls use compact spacing")
+        t.expect(collapsed.contains("padding:6px 8px"), "jump bar uses compact internal padding")
+        t.expect(collapsed.contains("border-radius:7px"), "jump controls match app button corners")
+        t.expect(!collapsed.contains("border-radius:999px"), "jump controls are not tag-style capsules")
         let anchored = EntryPageBuilder.resultsDocument(
             for: "apple", library: library, collapsedDictionaries: [basic.uuid],
             anchor: "sense-2", preferredDictionaryUUID: basic.uuid

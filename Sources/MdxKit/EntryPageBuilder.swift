@@ -70,14 +70,14 @@ public enum EntryPageBuilder {
           summary { cursor:pointer; padding:5px 2px; font-weight:600; font-size:13px; user-select:none; }
           iframe { display:block; width:100%; border:0; height:44px; background:transparent; }
           details:not([open]) iframe { display:none; }
-          .lexicon-jump { position:sticky; top:0; z-index:5; display:flex; gap:6px; overflow-x:auto;
-            scrollbar-width:none; margin:-10px -8px 6px; padding:8px 8px;
+          .lexicon-jump { position:sticky; top:0; z-index:5; display:flex; gap:4px; overflow-x:auto;
+            scrollbar-width:none; margin:-10px -8px 6px; padding:6px 8px;
             background:rgba(255,255,255,.72); backdrop-filter:blur(20px) saturate(180%);
             -webkit-backdrop-filter:blur(20px) saturate(180%);
             border-bottom:1px solid rgba(0,0,0,.10); }
           .lexicon-jump::-webkit-scrollbar { display:none; }
           .lexicon-jump button { flex:0 0 auto; font:inherit; font-size:11px; font-weight:600; color:inherit;
-            opacity:.65; padding:3px 9px; border:1px solid rgba(128,128,128,.35); border-radius:999px;
+            opacity:.65; padding:3px 8px; border:1px solid rgba(128,128,128,.35); border-radius:7px;
             background:transparent; cursor:pointer; }
           .lexicon-jump button:hover,.lexicon-jump button[data-current="1"] { opacity:1; }
           .lexicon-jump button[data-current="1"] { background:rgba(128,128,128,.16); }
@@ -117,6 +117,10 @@ public enum EntryPageBuilder {
               ? Math.max(44, document.documentElement.clientHeight - Math.max(0, frame.getBoundingClientRect().top) - 24)
               : 44;
             const height = Math.max(floor, Math.min(200000, Math.ceil(Number(requested) || 44)));
+            if (Math.abs(height - oldHeight) < 1) {
+              frame.dataset.sizeState = 'ok:' + height;
+              return;
+            }
             frame.style.height = height + 'px';
             frame.dataset.sizeState = 'ok:' + height;
             if (wasAbove && Math.abs(height - oldHeight) > .5) scrollBy(0, height - oldHeight);

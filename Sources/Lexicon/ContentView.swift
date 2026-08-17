@@ -7,8 +7,6 @@ struct ContentView: View {
     @EnvironmentObject private var libraryModel: LibraryModel
     @Environment(\.scenePhase) private var scenePhase
     @FocusState private var searchFocused: Bool
-    /// Drives the sidebar divider's hover highlight.
-    @State private var dividerHovered = false
     @State private var sidebarMode: SidebarMode =
         SidebarMode(rawValue: LibraryModel.storedSidebarMode) ?? .lexicon
     /// The section the user was browsing before a query pulled the sidebar
@@ -281,9 +279,16 @@ struct ContentView: View {
             }
         }
         .font(.system(size: 13, weight: .medium))
-        .padding(.leading, sidebarVisible || windowIsFullScreen ? 8 : 82)
-        .padding(.trailing, 8)
-        .frame(height: 42)
+        .padding(
+            .leading,
+            sidebarVisible || windowIsFullScreen
+                ? ChromeMetrics.horizontalInset : ChromeMetrics.trafficLightInset
+        )
+        .padding(.trailing, ChromeMetrics.horizontalInset)
+        // A one-point optical correction aligns the controls' visible centers
+        // with the denser tab row without changing either row's geometry.
+        .offset(y: ChromeMetrics.toolbarContentVerticalOffset)
+        .frame(height: ChromeMetrics.toolbarRowHeight)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -292,8 +297,8 @@ struct ContentView: View {
     private var tabStripRow: some View {
         BrowserTabBar()
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
+            .padding(.horizontal, ChromeMetrics.horizontalInset)
+            .frame(height: ChromeMetrics.tabStripRowHeight)
             .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -305,8 +310,8 @@ struct ContentView: View {
             Spacer(minLength: 0)
             sidebarToggleButton
         }
-        .padding(.trailing, 8)
-        .frame(height: 42)
+        .padding(.trailing, ChromeMetrics.horizontalInset)
+        .frame(height: ChromeMetrics.toolbarRowHeight)
     }
 
     private var sidebarToggleButton: some View {
@@ -331,14 +336,11 @@ struct ContentView: View {
         // sidebar; the remaining width is invisible drag area into the detail.
         ZStack(alignment: .leading) {
             Color.clear
-            Rectangle()
-                .fill(Color(nsColor: .separatorColor).opacity(dividerHovered ? 1 : 0.7))
-                .frame(width: dividerHovered ? 2 : 1)
+            ChromeSeparator(.vertical)
         }
-        .frame(width: 7)
+        .frame(width: ChromeMetrics.splitterHitWidth)
         .contentShape(Rectangle())
         .onHover { hovering in
-            withAnimation(.easeOut(duration: 0.12)) { dividerHovered = hovering }
             if hovering {
                 NSCursor.resizeLeftRight.set()
             } else {
@@ -376,18 +378,13 @@ struct ContentView: View {
         )
     }
 
-    private var interfaceSeparator: some View {
-        Rectangle()
-            .fill(Color(nsColor: .separatorColor))
-    }
-
     private var detail: some View {
         VStack(spacing: 0) {
             toolbarRow
             // No separator between the toolbar and the tab strip — Safari
             // runs them together as one chrome surface.
             tabStripRow
-            interfaceSeparator.frame(height: 1)
+            ChromeSeparator(.horizontal)
             ZStack {
                 ForEach(appState.residentTabs) { tab in
                     let isActive = tab.id == appState.activeTabID
@@ -463,7 +460,7 @@ struct ContentView: View {
             .padding(.horizontal, 10)
             // Matches the toolbar capsules (32pt), so the field and the
             // button groups share one height and one vertical rhythm.
-            .frame(height: 32)
+            .frame(height: ChromeMetrics.controlHeight)
             .background {
                 if #available(macOS 26.0, *) {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -487,7 +484,7 @@ struct ContentView: View {
                 } else {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .stroke(
-                            searchFocused ? Color.accentColor : Color(nsColor: .separatorColor),
+                            searchFocused ? Color.accentColor : ChromeMetrics.separatorColor,
                             lineWidth: searchFocused ? 2 : 1
                         )
                 }
@@ -534,7 +531,7 @@ struct ContentView: View {
                 // Same inset as the list rows (7) and the same row height as
                 // the tab strip (38), so the control shares the tabs' line.
                 .padding(.horizontal, 7)
-                .padding(.vertical, 6)
+                .frame(height: ChromeMetrics.tabStripRowHeight)
 
             sidebarStatusBar
 
@@ -764,6 +761,55 @@ private struct SavedSidebarWord: Identifiable {
     var id: ID { ID(word: word, isSelected: isSelected) }
 }
 
+/// Shared chrome geometry keeps the toolbar, tab strip, and sidebar edge on
+/// one deliberate rhythm. Separators use one quiet adaptive color everywhere;
+/// their hit areas may be wider, but the visible rule never changes thickness.
+private enum ChromeMetrics {
+    static let toolbarRowHeight: CGFloat = 42
+    static let tabStripRowHeight: CGFloat = 38
+    static let controlHeight: CGFloat = 32
+    static let toolbarContentVerticalOffset: CGFloat = 1
+    static let horizontalInset: CGFloat = 8
+    static let trafficLightInset: CGFloat = 82
+    static let splitterHitWidth: CGFloat = 7
+    static let separatorThickness: CGFloat = 1
+
+    static var separatorColor: Color {
+        Color(nsColor: .separatorColor).opacity(0.62)
+    }
+}
+
+private struct ChromeSeparator: View {
+    enum Orientation {
+        case horizontal
+        case vertical
+    }
+
+    let orientation: Orientation
+
+    init(_ orientation: Orientation) {
+        self.orientation = orientation
+    }
+
+    @ViewBuilder
+    var body: some View {
+        switch orientation {
+        case .horizontal:
+            Rectangle()
+                .fill(ChromeMetrics.separatorColor)
+                .frame(maxWidth: .infinity)
+                .frame(height: ChromeMetrics.separatorThickness)
+                .allowsHitTesting(false)
+        case .vertical:
+            Rectangle()
+                .fill(ChromeMetrics.separatorColor)
+                .frame(width: ChromeMetrics.separatorThickness)
+                .frame(maxHeight: .infinity)
+                .allowsHitTesting(false)
+        }
+    }
+}
+
 /// Keeps custom full-size window chrome aligned with macOS window state.
 /// Normal windows receive a small optical correction for the traffic lights;
 /// fullscreen windows stop ignoring the system safe area and reclaim the space
@@ -936,7 +982,7 @@ private struct BrowserTabBar: View {
     var body: some View {
         GeometryReader { proxy in
             let count = max(1, appState.tabs.count)
-            let interItemSpacing = spacing * CGFloat(count)
+            let interItemSpacing = spacing * CGFloat(max(0, count - 1))
             let availableForTabs = max(
                 CGFloat(count),
                 proxy.size.width - interItemSpacing
@@ -964,7 +1010,7 @@ private struct BrowserTabBar: View {
                             )
                         )
                         // Drag to reorder, like a browser tab strip. Dropping
-                        // on a tab inserts before it; the strip tail appends.
+                        // on a tab inserts before it.
                         .draggable(tab.id.uuidString)
                         .dropDestination(for: String.self) { items, _ in
                             guard let first = items.first,
@@ -986,19 +1032,11 @@ private struct BrowserTabBar: View {
                             }
                         }
                 }
-
-                Spacer(minLength: 0)
-                    .dropDestination(for: String.self) { items, _ in
-                        guard let first = items.first,
-                              let uuid = UUID(uuidString: first)
-                        else { return false }
-                        appState.moveTab(id: uuid, before: nil)
-                        return true
-                    } isTargeted: { _ in }
             }
+            .frame(width: proxy.size.width, alignment: .leading)
             .animation(.smooth(duration: 0.2), value: appState.tabs.map(\.id))
         }
-        .frame(height: 32)
+        .frame(height: ChromeMetrics.controlHeight)
     }
 
     private func tabView(
@@ -1070,7 +1108,7 @@ private struct BrowserTabBar: View {
             if !supportsGlass {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .stroke(
-                        Color(nsColor: .separatorColor).opacity(isActive ? 0.55 : 0),
+                        ChromeMetrics.separatorColor.opacity(isActive ? 1 : 0),
                         lineWidth: 1
                     )
             }
@@ -1078,8 +1116,8 @@ private struct BrowserTabBar: View {
         .overlay(alignment: .trailing) {
             if showsTrailingDivider {
                 Rectangle()
-                    .fill(Color(nsColor: .separatorColor).opacity(0.5))
-                    .frame(width: 1, height: 15)
+                    .fill(ChromeMetrics.separatorColor)
+                    .frame(width: ChromeMetrics.separatorThickness, height: 15)
                     .offset(x: spacing / 2)
             }
         }
@@ -1149,14 +1187,14 @@ private struct ToolbarCapsule<Content: View>: View {
     var body: some View {
         HStack(spacing: 2) { content }
             .padding(.horizontal, 2)
-            .frame(height: 32)
+            .frame(height: ChromeMetrics.controlHeight)
             .background {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .fill(Color.primary.opacity(0.04))
             }
             .overlay {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .stroke(Color(nsColor: .separatorColor), lineWidth: 1)
+                    .stroke(ChromeMetrics.separatorColor, lineWidth: 1)
             }
     }
 }
