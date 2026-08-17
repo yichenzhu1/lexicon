@@ -67,6 +67,18 @@ func runPageBuilderTests(_ t: TestHarness) {
         t.expect(collapsed.contains("padding:6px 8px"), "jump bar uses compact internal padding")
         t.expect(collapsed.contains("border-radius:7px"), "jump controls match app button corners")
         t.expect(!collapsed.contains("border-radius:999px"), "jump controls are not tag-style capsules")
+        t.expect(
+            collapsed.contains("--dictionary-content-indent:16px"),
+            "dictionary content uses the disclosure-title inset"
+        )
+        t.expect(
+            collapsed.contains("width:calc(100% - var(--dictionary-content-indent))"),
+            "indented dictionary frames retain the available width"
+        )
+        t.expect(
+            collapsed.contains("margin-left:var(--dictionary-content-indent)"),
+            "dictionary content aligns with the summary title"
+        )
         let anchored = EntryPageBuilder.resultsDocument(
             for: "apple", library: library, collapsedDictionaries: [basic.uuid],
             anchor: "sense-2", preferredDictionaryUUID: basic.uuid

@@ -60,7 +60,7 @@ public enum EntryPageBuilder {
         <!doctype html><html><head><meta charset="utf-8">
         <meta http-equiv="Content-Security-Policy" content="\(contentSecurityPolicy(allowHTTPS: allowHTTPS, outerPage: true))">
         <style>
-          :root { color-scheme:light dark; }
+          :root { color-scheme:light dark; --dictionary-content-indent:16px; }
           html { overflow-y:auto; overscroll-behavior:contain; }
           body { font-family:-apple-system,"Helvetica Neue",sans-serif; margin:0; padding:10px 8px 20px; }
           /* Flat, minimalist stack: no card chrome; dictionaries are separated
@@ -68,7 +68,10 @@ public enum EntryPageBuilder {
           details { margin:0; padding:0; background:transparent; border:0; }
           details + details { border-top:1px solid rgba(128,128,128,.25); margin-top:4px; padding-top:2px; }
           summary { cursor:pointer; padding:5px 2px; font-weight:600; font-size:13px; user-select:none; }
-          iframe { display:block; width:100%; border:0; height:44px; background:transparent; }
+          /* Match the entry's content edge to the summary title, leaving the
+             native disclosure triangle in its own stable gutter. */
+          iframe { display:block; width:calc(100% - var(--dictionary-content-indent));
+            margin-left:var(--dictionary-content-indent); border:0; height:44px; background:transparent; }
           details:not([open]) iframe { display:none; }
           .lexicon-jump { position:sticky; top:0; z-index:5; display:flex; gap:4px; overflow-x:auto;
             scrollbar-width:none; margin:-10px -8px 6px; padding:6px 8px;
