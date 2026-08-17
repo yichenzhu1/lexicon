@@ -33,24 +33,33 @@ listed in the release notes rather than encoded in the filename.
 
 ## Features
 
-- Unified search across every enabled dictionary (case- and
-  diacritic-insensitive), in tiers: exact and prefix matches first, then
-  substring matches, then near misses when nothing matched literally
-- One collapsible card per dictionary for each looked-up word, rendered with
-  each dictionary's own CSS/images/fonts served straight out of its `.mdd`.
-  Collapsed dictionaries stay collapsed, and a jump bar appears when several
-  dictionaries have the word
-- Text zoom (⌘+ / ⌘− / ⌘0) and look-up-on-double-click, both remembered
-  between launches and customizable in Settings (⌘,)
-- Cross-reference links (`entry://`, `bword://`) and `@@@LINK=` redirects
-- Isolated per-dictionary page origins, in-entry anchors, responsive legacy
-  layouts, and an optional HTTPS-content policy
-- Pronunciation audio (`sound://` links) played from `.mdd` resources
-- Dictionary manager: import, enable/disable, drag to reorder, rename, remove
-- Stable, unique lookup history with a configurable record limit, plus starred
-  words in the sidebar
-- Supports MDX format v1/v2, zlib/LZO/uncompressed blocks, encrypted keyword
-  index (Encrypted=2), UTF-8/UTF-16/GB18030/Big5 encodings, multi-part MDDs
+- **One search box for every dictionary.** Unified, case- and
+  diacritic-insensitive search across all enabled dictionaries, in tiers:
+  exact and prefix matches first, then substring matches, then near misses
+  when nothing matched literally.
+- **Each dictionary keeps its own look.** Entries render with the
+  dictionary's own CSS, images, and fonts served straight out of its `.mdd`,
+  in one collapsible section per dictionary, with a jump bar when several
+  dictionaries have the word.
+- **A browser, not a form.** Windows and tabs with per-tab back/forward
+  navigation, cross-reference links, look-up-on-double-click, and text zoom —
+  all remembered between launches.
+- **Live translation.** Compatible OED/ODE/Longman dictionaries translate
+  definitions and examples via Apple Translation (on-device), Google Cloud,
+  DeepL, or Alibaba DashScope. See *Live translation* below.
+- **Sentence text-to-speech.** System voices or Google Cloud Chirp 3 HD
+  voices, plus pronunciation audio (`sound://`) played from `.mdd` resources.
+  See *Text-to-speech* below.
+- **Offline-first and private.** Imported dictionaries work fully offline;
+  HTTPS content is optional, and API keys live in macOS Keychain, never
+  exposed to dictionary content.
+- **A real dictionary manager.** Import (with automatic `.mdd`/CSS/JS
+  companions), enable/disable, drag to reorder, rename, and remove — plus
+  lookup history and starred words in the sidebar.
+- **Broad MDX support.** MDX v1/v2, zlib/LZO/uncompressed blocks, encrypted
+  keyword indexes, UTF-8/UTF-16/GB18030/Big5, and multi-part MDDs.
+
+The full list of changes in each version is in [`CHANGELOG.md`](CHANGELOG.md).
 
 MDX v3 files (produced by MdxBuilder 4.x) are not supported; rebuild those
 with MdxBuilder 3.x.
@@ -77,26 +86,20 @@ testing only. Override the default version or build number when needed:
 LEXICON_VERSION=0.2.0 LEXICON_BUILD_NUMBER=2 scripts/make_app.sh release
 ```
 
-To create the same optimized ZIP used for GitHub releases, run:
-
-```sh
-scripts/release.sh
-```
-
-This builds the app and writes `dist/Lexicon.zip`. The version remains embedded
-in the app's `Info.plist`, but is not included in the archive filename.
-
 ## GitHub release
 
 1. Update `CHANGELOG.md`, then run `swift run MdxKitTester`.
 2. Build the release archive:
 
    ```sh
-   LEXICON_VERSION=0.2.0 scripts/release.sh
+   LEXICON_VERSION=0.2.0 LEXICON_BUILD_NUMBER=2 scripts/release.sh
    ```
 
-3. Commit all release changes and push `main`.
-4. Tag the exact commit and publish the ZIP:
+   This writes `dist/Lexicon.zip`. The version is embedded in the app's
+   `Info.plist`, not in the archive filename.
+
+3. Commit all release changes.
+4. Tag the exact commit, push, and publish the ZIP:
 
    ```sh
    git tag -a v0.2.0 -m "Lexicon 0.2.0"
@@ -108,14 +111,6 @@ in the app's `Info.plist`, but is not included in the archive filename.
      --title "Lexicon 0.2.0" \
      --generate-notes
    ```
-
-## License
-
-Lexicon is licensed under the
-[Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). See
-`LICENSE` for the full terms and
-[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) for bundled components and
-test tooling.
 
 ## Import dictionaries
 
@@ -137,9 +132,6 @@ manager.
 Every entry page loads an optional `custom.css` from the dictionary's folder
 in `~/Library/Application Support/Lexicon/Dictionaries/<id>/`, after the
 dictionary's own stylesheets — drop a file there to restyle a dictionary.
-The `themes/` directory contains ready-made themes that restyle
-Merriam-Webster (`mw-lm6.css`) and OALD 10 (`oald-lm6.css`) repacks to match
-the Longman 6 look (palette lifted from `lm6.css`, including dark mode).
 
 ## Text-to-speech
 
@@ -251,3 +243,10 @@ LEXICON_ROOT=/tmp/lexicon-smoke swift run -c release Lexicon --smoke-test
 - LZO1X decompression provided by the MIT-licensed
   [lzokay](https://github.com/AxioDL/lzokay) implementation
 - Test fixtures generated with [zhansliu/writemdict](https://github.com/zhansliu/writemdict)
+
+## License
+
+Lexicon is licensed under the
+[Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) — see
+`LICENSE` for the full terms. Third-party dependencies and their licenses
+are disclosed in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
