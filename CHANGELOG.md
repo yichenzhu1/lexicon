@@ -2,8 +2,16 @@
 
 All notable changes to Lexicon are documented here.
 
-## Unreleased
+## 0.2.0 — 2026-08-17
 
+- Live translation for compatible OED/ODE/Longman repacks, with Apple
+  Translation (on-device, default), Google Cloud, DeepL, and Alibaba DashScope
+  providers; dictionary-bundled credentials are intercepted before they can
+  leave the page, and keys are stored in macOS Keychain.
+- Sentence text-to-speech for compatible ODE/OALD repacks using system voices
+  (default) or Google Cloud Chirp 3 HD voices.
+- Reworked Settings with new Speech and Translation sections.
+- Faster dictionary import.
 - Fixed dictionary frames constantly resizing themselves: the height
   measurement no longer reads viewport-bound values, and sub-2px changes are
   ignored so a frame's own resize cannot retrigger itself — this removes both

@@ -13,8 +13,13 @@ dictionary can optionally load under Settings → Dictionary Content.
 Lexicon ships no dictionary content. You supply `.mdx` files (with their
 `.mdd` resource companions) that you have obtained yourself.
 
+Looking for dictionaries? The MDX/MDD files shared by
+[karx on the FreeMdict forum](https://forum.freemdict.com/u/karx/summary)
+are a great fit for Lexicon — browse that page and download whichever
+dictionaries you want.
+
 <p align="center">
-  <img src="docs/images/lexicon-preview.png" alt="Lexicon displaying an entry on macOS">
+  <img src="docs/images/lexicon-0.2.0-preview.png" alt="Lexicon displaying an entry on macOS">
 </p>
 
 ## Install
@@ -69,7 +74,7 @@ Local builds are ad-hoc signed and are for development or trusted internal
 testing only. Override the default version or build number when needed:
 
 ```sh
-LEXICON_VERSION=0.1.0 LEXICON_BUILD_NUMBER=2 scripts/make_app.sh release
+LEXICON_VERSION=0.2.0 LEXICON_BUILD_NUMBER=2 scripts/make_app.sh release
 ```
 
 To create the same optimized ZIP used for GitHub releases, run:
@@ -87,20 +92,20 @@ in the app's `Info.plist`, but is not included in the archive filename.
 2. Build the release archive:
 
    ```sh
-   LEXICON_VERSION=0.1.0 scripts/release.sh
+   LEXICON_VERSION=0.2.0 scripts/release.sh
    ```
 
 3. Commit all release changes and push `main`.
 4. Tag the exact commit and publish the ZIP:
 
    ```sh
-   git tag -a v0.1.0 -m "Lexicon 0.1.0"
+   git tag -a v0.2.0 -m "Lexicon 0.2.0"
    git push origin main
-   git push origin v0.1.0
+   git push origin v0.2.0
    gh auth login
-   gh release create v0.1.0 \
+   gh release create v0.2.0 \
      dist/Lexicon.zip \
-     --title "Lexicon 0.1.0" \
+     --title "Lexicon 0.2.0" \
      --generate-notes
    ```
 

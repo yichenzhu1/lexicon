@@ -204,33 +204,31 @@ struct ContentView: View {
                 sidebarToggleButton
             }
 
-            ToolbarCapsule {
-                Button {
-                    appState.goBack()
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .frame(width: 28, height: 28)
-                        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                }
-                .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
-                .help("Back")
-                .accessibilityLabel("Back")
-                .disabled(!appState.canGoBack)
-                .keyboardShortcut("[", modifiers: .command)
-
-                Button {
-                    appState.goForward()
-                } label: {
-                    Image(systemName: "chevron.right")
-                        .frame(width: 28, height: 28)
-                        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                }
-                .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
-                .help("Forward")
-                .accessibilityLabel("Forward")
-                .disabled(!appState.canGoForward)
-                .keyboardShortcut("]", modifiers: .command)
+            Button {
+                appState.goBack()
+            } label: {
+                Image(systemName: "chevron.left")
+                    .frame(width: 28, height: 28)
+                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             }
+            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
+            .help("Back")
+            .accessibilityLabel("Back")
+            .disabled(!appState.canGoBack)
+            .keyboardShortcut("[", modifiers: .command)
+
+            Button {
+                appState.goForward()
+            } label: {
+                Image(systemName: "chevron.right")
+                    .frame(width: 28, height: 28)
+                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            }
+            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
+            .help("Forward")
+            .accessibilityLabel("Forward")
+            .disabled(!appState.canGoForward)
+            .keyboardShortcut("]", modifiers: .command)
 
             Spacer(minLength: 8)
             searchField
@@ -239,44 +237,42 @@ struct ContentView: View {
 
             // The star acts on the current entry, so it lives with the entry
             // controls trailing the search field, not with navigation.
-            ToolbarCapsule {
-                Button {
-                    if let word = appState.selectedWord {
-                        libraryModel.toggleStar(word)
-                    }
-                } label: {
-                    Image(systemName: bookmarkIconName)
-                        .scaleEffect(starPulse ? 1.22 : 1)
-                        .frame(width: 28, height: 28)
-                        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            Button {
+                if let word = appState.selectedWord {
+                    libraryModel.toggleStar(word)
                 }
-                .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
-                .help(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
-                .accessibilityLabel(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
-                .disabled(appState.selectedWord == nil)
-
-                Button {
-                    appState.showDictionaryManager = true
-                } label: {
-                    Image(systemName: "books.vertical")
-                        .frame(width: 28, height: 28)
-                        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                }
-                .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
-                .help("Manage dictionaries")
-                .accessibilityLabel("Manage dictionaries")
-
-                Button {
-                    appState.openNewTab()
-                } label: {
-                    Image(systemName: "plus")
-                        .frame(width: 28, height: 28)
-                        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                }
-                .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
-                .help("New Tab")
-                .accessibilityLabel("New Tab")
+            } label: {
+                Image(systemName: bookmarkIconName)
+                    .scaleEffect(starPulse ? 1.22 : 1)
+                    .frame(width: 28, height: 28)
+                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             }
+            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
+            .help(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
+            .accessibilityLabel(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
+            .disabled(appState.selectedWord == nil)
+
+            Button {
+                appState.showDictionaryManager = true
+            } label: {
+                Image(systemName: "books.vertical")
+                    .frame(width: 28, height: 28)
+                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            }
+            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
+            .help("Manage dictionaries")
+            .accessibilityLabel("Manage dictionaries")
+
+            Button {
+                appState.openNewTab()
+            } label: {
+                Image(systemName: "plus")
+                    .frame(width: 28, height: 28)
+                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            }
+            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
+            .help("New Tab")
+            .accessibilityLabel("New Tab")
         }
         .font(.system(size: 13, weight: .medium))
         .padding(
@@ -1262,26 +1258,6 @@ private final class MiddleClickView: NSView {
         } else {
             super.otherMouseDown(with: event)
         }
-    }
-}
-
-/// Safari-style toolbar capsule: a hairline-ringed pill grouping related
-/// buttons (back/forward, entry actions) into one visual unit.
-private struct ToolbarCapsule<Content: View>: View {
-    @ViewBuilder let content: Content
-
-    var body: some View {
-        HStack(spacing: 2) { content }
-            .padding(.horizontal, 2)
-            .frame(height: ChromeMetrics.controlHeight)
-            .background {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .fill(Color.primary.opacity(0.04))
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .stroke(ChromeMetrics.separatorColor, lineWidth: 1)
-            }
     }
 }
 
