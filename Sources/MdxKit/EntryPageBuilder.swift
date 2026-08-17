@@ -207,6 +207,11 @@ public enum EntryPageBuilder {
           body { font-family:-apple-system,"Helvetica Neue",sans-serif; font-size:15px; line-height:1.45;
             box-sizing:border-box; margin:0!important; padding:6px 0 14px!important; min-height:0!important;
             overflow-wrap:break-word; background-color:rgba(255,255,255,.001)!important; }
+          /* Longman 6 word-set records hide their root list inline, but their
+             companion script only opens category headings carrying the
+             `.expandable` class. Standalone records use `.topic_head`
+             instead, leaving the entire linked list permanently hidden. */
+          body > .category.lm6 > .content { display:block!important; }
           img,video,svg { max-width:100%; height:auto; }
           hr.lexicon-sep { margin:14px 0; opacity:.4; }
         </style>

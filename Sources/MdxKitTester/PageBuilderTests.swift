@@ -47,6 +47,10 @@ func runPageBuilderTests(_ t: TestHarness) {
         t.expect(online.contains("wss:"), "secure WebSocket requests allowed with HTTPS policy")
         t.expect(!online.contains("webkit.messageHandlers"), "native bridge absent from page world")
         t.expect(online.contains("lexicon-scroll-request"), "scroll compatibility shim")
+        t.expect(
+            online.contains("body > .category.lm6 > .content { display:block!important; }"),
+            "standalone Longman word sets reveal their linked entries"
+        )
 
         let offline = EntryPageBuilder.entryDocument(
             for: "apple", dictionaryUUID: basic.uuid, library: library, allowHTTPS: false

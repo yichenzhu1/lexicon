@@ -52,8 +52,11 @@ enum RenderSmokeTest {
             let reverseColor = payload["reverseColor"] as? String ?? ""
             let lm6Font = payload["lm6Font"] as? String ?? ""
             let lm6JS = payload["lm6JS"] as? Bool ?? false
+            let lm6WordSetItems = payload["lm6WordSetItems"] as? Int ?? 0
+            let lm6WordSetVisible = payload["lm6WordSetVisible"] as? Bool ?? false
             diagnostics[uuid] = Diagnostic(
-                styles: styles, reverseColor: reverseColor, lm6Font: lm6Font, lm6JS: lm6JS
+                styles: styles, reverseColor: reverseColor, lm6Font: lm6Font, lm6JS: lm6JS,
+                lm6WordSetItems: lm6WordSetItems, lm6WordSetVisible: lm6WordSetVisible
             )
         }
         coordinator = bridge
@@ -87,12 +90,15 @@ enum RenderSmokeTest {
               if (location.host === 'page') return;
               const reverse = document.querySelector('.leon-zh-en .headw');
               const lm6 = document.querySelector('.lm6');
+              const lm6WordSet = document.querySelector('body > .category.lm6 > .content');
               webkit.messageHandlers.lexiconBridge.postMessage({
                 kind:'diagnostic',
                 styles:Array.from(document.styleSheets).map(s => s.href || 'inline'),
                 reverseColor:reverse ? getComputedStyle(reverse).color : '',
                 lm6Font:lm6 ? getComputedStyle(lm6).fontFamily : '',
-                lm6JS:document.documentElement.dataset.lexiconSmokeLm6 === '1'
+                lm6JS:document.documentElement.dataset.lexiconSmokeLm6 === '1',
+                lm6WordSetItems:lm6WordSet?.querySelectorAll('a[href]').length || 0,
+                lm6WordSetVisible:!!lm6WordSet && getComputedStyle(lm6WordSet).display !== 'none'
               });
             }, 700);
             """,
@@ -217,6 +223,14 @@ enum RenderSmokeTest {
                             exit(1)
                         }
                     }
+                    if word == "word-set-transport" {
+                        guard diagnostics.values.contains(where: {
+                            $0.lm6WordSetVisible && $0.lm6WordSetItems > 100
+                        }) else {
+                            print("SMOKE FAIL: Longman word-set content stayed hidden: \(diagnostics)")
+                            exit(1)
+                        }
+                    }
                     if resizeCycle, resizePhase == 0 {
                         baselineHeights = frames.map(\.height)
                         resizePhase = 1
@@ -316,8 +330,11 @@ enum RenderSmokeTest {
         let reverseColor: String
         let lm6Font: String
         let lm6JS: Bool
+        let lm6WordSetItems: Int
+        let lm6WordSetVisible: Bool
         var description: String {
-            "styles=\(styles), reverseColor=\(reverseColor), lm6Font=\(lm6Font), lm6JS=\(lm6JS)"
+            "styles=\(styles), reverseColor=\(reverseColor), lm6Font=\(lm6Font), lm6JS=\(lm6JS), "
+                + "lm6WordSetItems=\(lm6WordSetItems), lm6WordSetVisible=\(lm6WordSetVisible)"
         }
     }
 
