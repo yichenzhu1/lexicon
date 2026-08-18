@@ -4,6 +4,9 @@ All notable changes to Lexicon are documented here.
 
 ## Unreleased
 
+- The sidebar toggle now shares the toolbar row's one-point optical vertical
+  correction; it sat 1pt higher than the back/forward and trailing toolbar
+  buttons, so the window's top row of controls reads as one aligned row.
 - Unified every divider on one spec: a 1pt rule in the system separator color
   at full strength. The sidebar/content divider was effectively invisible
   (drawn at 38% strength over a same-tone material seam) and now reads as a

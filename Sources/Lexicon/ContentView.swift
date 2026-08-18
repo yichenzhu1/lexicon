@@ -336,13 +336,16 @@ struct ContentView: View {
 
     /// The strip above the sidebar: the traffic lights float at its leading
     /// edge and the sidebar toggle sits at its trailing edge, so the control
-    /// that dismisses the sidebar stays on the sidebar itself.
+    /// that dismisses the sidebar stays on the sidebar itself. It gets the
+    /// toolbar row's one-point optical correction too — the toggle and the
+    /// toolbar controls form one visual row across the window top.
     private var sidebarTopRegion: some View {
         HStack(spacing: 0) {
             Spacer(minLength: 0)
             sidebarToggleButton
         }
         .padding(.trailing, ChromeMetrics.horizontalInset)
+        .offset(y: ChromeMetrics.toolbarContentVerticalOffset)
         .frame(height: ChromeMetrics.toolbarRowHeight)
     }
 
