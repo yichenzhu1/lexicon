@@ -60,13 +60,16 @@ public enum EntryPageBuilder {
         <!doctype html><html><head><meta charset="utf-8">
         <meta http-equiv="Content-Security-Policy" content="\(contentSecurityPolicy(allowHTTPS: allowHTTPS, outerPage: true))">
         <style>
-          :root { color-scheme:light dark; --dictionary-content-indent:16px; }
+          :root { color-scheme:light dark; --dictionary-content-indent:16px;
+            /* One hairline spec for the whole app: matches NSColor.separatorColor,
+               which the SwiftUI chrome draws at full strength (ChromeMetrics). */
+            --lexicon-hairline:rgba(0,0,0,.10); }
           html { overflow-y:auto; overscroll-behavior:contain; }
           body { font-family:-apple-system,"Helvetica Neue",sans-serif; margin:0; padding:10px 8px 20px; }
           /* Flat, minimalist stack: no card chrome; dictionaries are separated
              by a single hairline so the entries themselves carry the page. */
           details { margin:0; padding:0; background:transparent; border:0; }
-          details + details { border-top:1px solid rgba(128,128,128,.25); margin-top:4px; padding-top:2px; }
+          details + details { border-top:1px solid var(--lexicon-hairline); margin-top:4px; padding-top:2px; }
           summary { cursor:pointer; padding:5px 2px; font-weight:600; font-size:13px; user-select:none; }
           /* Match the entry's content edge to the summary title, leaving the
              native disclosure triangle in its own stable gutter. */
@@ -77,7 +80,7 @@ public enum EntryPageBuilder {
             scrollbar-width:none; margin:-10px -8px 6px; padding:6px 8px;
             background:rgba(255,255,255,.72); backdrop-filter:blur(20px) saturate(180%);
             -webkit-backdrop-filter:blur(20px) saturate(180%);
-            border-bottom:1px solid rgba(0,0,0,.10); }
+            border-bottom:1px solid var(--lexicon-hairline); }
           .lexicon-jump::-webkit-scrollbar { display:none; }
           .lexicon-jump button { flex:0 0 auto; font:inherit; font-size:11px; font-weight:600; color:inherit;
             opacity:.65; padding:3px 8px; border:1px solid rgba(128,128,128,.35); border-radius:7px;
@@ -88,7 +91,8 @@ public enum EntryPageBuilder {
           .lexicon-jump .lexicon-toggle-all { border-style:none; text-decoration:none; }
           .lexicon-jump .lexicon-toggle-all:hover { background:rgba(128,128,128,.16); }
           @media (prefers-color-scheme:dark) {
-            .lexicon-jump { background:rgba(34,34,34,.68); border-bottom-color:rgba(255,255,255,.14); }
+            :root { --lexicon-hairline:rgba(255,255,255,.10); }
+            .lexicon-jump { background:rgba(34,34,34,.68); }
           }
           @media (prefers-reduced-motion:reduce) { * { scroll-behavior:auto!important; } }
         </style></head><body>\(jumpBar)\(cards)

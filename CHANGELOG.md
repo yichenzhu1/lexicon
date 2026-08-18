@@ -2,6 +2,23 @@
 
 All notable changes to Lexicon are documented here.
 
+## Unreleased
+
+- Unified every divider on one spec: a 1pt rule in the system separator color
+  at full strength. The sidebar/content divider was effectively invisible
+  (drawn at 38% strength over a same-tone material seam) and now reads as a
+  real line; the entry page's CSS hairlines (jump-bar edges, dictionary
+  section separators) share the same color via `--lexicon-hairline` instead of
+  three different hard-coded grays.
+- Liquid Glass across the chrome layer on macOS 26: the toolbar's back,
+  forward, bookmark, dictionaries, and new-tab buttons and the sidebar toggle
+  are interactive glass grouped in GlassEffectContainers (neighbors merge and
+  separate as a unit), the Lexicon/History/Starred thumb is a glass segment
+  that morphs between sections, and the zoom HUD and library notice banner
+  float as glass overlays. The dictionary manager's Import, Done, and
+  import-cancel buttons use the system glass button styles, with Done
+  prominent.
+
 ## 0.2.0 — 2026-08-17
 
 - Live translation for compatible OED/ODE/Longman repacks, with Apple

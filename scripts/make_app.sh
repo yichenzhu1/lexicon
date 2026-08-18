@@ -3,8 +3,8 @@
 # Usage: scripts/make_app.sh [debug|release]   (default: release)
 #
 # Optional environment variables:
-#   LEXICON_VERSION           User-facing version (defaults to 0.2.0)
-#   LEXICON_BUILD_NUMBER      Monotonically increasing integer (defaults to 1)
+#   LEXICON_VERSION           User-facing version (defaults to 0.3.0)
+#   LEXICON_BUILD_NUMBER      Monotonically increasing integer (defaults to 3)
 #   LEXICON_SIGNING_IDENTITY  Developer ID identity; unset uses ad-hoc signing
 #
 # CFBundleIdentifier below is how macOS identifies the app (preferences,
@@ -14,8 +14,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CONFIGURATION="${1:-release}"
-VERSION="${LEXICON_VERSION:-0.2.0}"
-BUILD_NUMBER="${LEXICON_BUILD_NUMBER:-1}"
+VERSION="${LEXICON_VERSION:-0.3.0}"
+BUILD_NUMBER="${LEXICON_BUILD_NUMBER:-3}"
 SIGNING_IDENTITY="${LEXICON_SIGNING_IDENTITY:--}"
 
 if [[ "$CONFIGURATION" != "debug" && "$CONFIGURATION" != "release" ]]; then

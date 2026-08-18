@@ -15,6 +15,9 @@ struct ContentView: View {
     /// Direction of the sidebar section slide: sections are ordered
     /// Lexicon → History → Starred, so a higher destination slides left.
     @Namespace private var segmentThumb
+    /// Identifies toolbar glass buttons so neighbors inside a
+    /// GlassEffectContainer merge into one shape and separate on approach.
+    @Namespace private var toolbarGlass
     @State private var sidebarVisible = LibraryModel.storedSidebarVisible
     @State private var sidebarWidth: CGFloat = LibraryModel.storedSidebarWidth
     @State private var sidebarDragStartWidth: CGFloat?
@@ -204,31 +207,45 @@ struct ContentView: View {
                 sidebarToggleButton
             }
 
-            Button {
-                appState.goBack()
-            } label: {
-                Image(systemName: "chevron.left")
-                    .frame(width: 28, height: 28)
-                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            }
-            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
-            .help("Back")
-            .accessibilityLabel("Back")
-            .disabled(!appState.canGoBack)
-            .keyboardShortcut("[", modifiers: .command)
+            GlassEffectContainer(spacing: 6) {
+                HStack(spacing: 6) {
+                    Button {
+                        appState.goBack()
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .frame(width: 28, height: 28)
+                            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .glassEffect(
+                        .regular.interactive(),
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    )
+                    .glassEffectID("back", in: toolbarGlass)
+                    .help("Back")
+                    .accessibilityLabel("Back")
+                    .disabled(!appState.canGoBack)
+                    .keyboardShortcut("[", modifiers: .command)
 
-            Button {
-                appState.goForward()
-            } label: {
-                Image(systemName: "chevron.right")
-                    .frame(width: 28, height: 28)
-                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    Button {
+                        appState.goForward()
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .frame(width: 28, height: 28)
+                            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .glassEffect(
+                        .regular.interactive(),
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    )
+                    .glassEffectID("forward", in: toolbarGlass)
+                    .help("Forward")
+                    .accessibilityLabel("Forward")
+                    .disabled(!appState.canGoForward)
+                    .keyboardShortcut("]", modifiers: .command)
+                }
             }
-            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
-            .help("Forward")
-            .accessibilityLabel("Forward")
-            .disabled(!appState.canGoForward)
-            .keyboardShortcut("]", modifiers: .command)
 
             Spacer(minLength: 8)
             searchField
@@ -237,42 +254,61 @@ struct ContentView: View {
 
             // The star acts on the current entry, so it lives with the entry
             // controls trailing the search field, not with navigation.
-            Button {
-                if let word = appState.selectedWord {
-                    libraryModel.toggleStar(word)
+            GlassEffectContainer(spacing: 6) {
+                HStack(spacing: 6) {
+                    Button {
+                        if let word = appState.selectedWord {
+                            libraryModel.toggleStar(word)
+                        }
+                    } label: {
+                        Image(systemName: bookmarkIconName)
+                            .scaleEffect(starPulse ? 1.22 : 1)
+                            .frame(width: 28, height: 28)
+                            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .glassEffect(
+                        .regular.interactive(),
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    )
+                    .glassEffectID("bookmark", in: toolbarGlass)
+                    .help(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
+                    .accessibilityLabel(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
+                    .disabled(appState.selectedWord == nil)
+
+                    Button {
+                        appState.showDictionaryManager = true
+                    } label: {
+                        Image(systemName: "books.vertical")
+                            .frame(width: 28, height: 28)
+                            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .glassEffect(
+                        .regular.interactive(),
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    )
+                    .glassEffectID("dictionaries", in: toolbarGlass)
+                    .help("Manage dictionaries")
+                    .accessibilityLabel("Manage dictionaries")
+
+                    Button {
+                        appState.openNewTab()
+                    } label: {
+                        Image(systemName: "plus")
+                            .frame(width: 28, height: 28)
+                            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .glassEffect(
+                        .regular.interactive(),
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    )
+                    .glassEffectID("newTab", in: toolbarGlass)
+                    .help("New Tab")
+                    .accessibilityLabel("New Tab")
                 }
-            } label: {
-                Image(systemName: bookmarkIconName)
-                    .scaleEffect(starPulse ? 1.22 : 1)
-                    .frame(width: 28, height: 28)
-                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             }
-            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
-            .help(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
-            .accessibilityLabel(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
-            .disabled(appState.selectedWord == nil)
-
-            Button {
-                appState.showDictionaryManager = true
-            } label: {
-                Image(systemName: "books.vertical")
-                    .frame(width: 28, height: 28)
-                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            }
-            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
-            .help("Manage dictionaries")
-            .accessibilityLabel("Manage dictionaries")
-
-            Button {
-                appState.openNewTab()
-            } label: {
-                Image(systemName: "plus")
-                    .frame(width: 28, height: 28)
-                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            }
-            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
-            .help("New Tab")
-            .accessibilityLabel("New Tab")
         }
         .font(.system(size: 13, weight: .medium))
         .padding(
@@ -321,7 +357,11 @@ struct ContentView: View {
                 .frame(width: 28, height: 28)
                 .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
-        .buttonStyle(BrowserIconButtonStyle(cornerRadius: 7))
+        .buttonStyle(.plain)
+        .glassEffect(
+            .regular.interactive(),
+            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+        )
         .foregroundStyle(.secondary)
         .help(sidebarVisible ? "Hide Sidebar" : "Show Sidebar")
         .accessibilityLabel(sidebarVisible ? "Hide Sidebar" : "Show Sidebar")
@@ -407,8 +447,8 @@ struct ContentView: View {
                         .monospacedDigit()
                         .padding(.horizontal, 12)
                         .padding(.vertical, 7)
-                        .background(
-                            .regularMaterial,
+                        .glassEffect(
+                            .regular,
                             in: RoundedRectangle(cornerRadius: 9, style: .continuous)
                         )
                         .padding(14)
@@ -565,33 +605,14 @@ struct ContentView: View {
     }
 
     /// A segmented control in the Safari mold, with the selection thumb
-    /// gliding between segments instead of a hard highlight swap.
+    /// gliding between segments instead of a hard highlight swap. The thumb
+    /// is glass; the shared glass ID lets it morph from segment to segment.
     private var sidebarModePicker: some View {
-        HStack(spacing: 2) {
-            ForEach(SidebarMode.allCases, id: \.self) { mode in
-                Button {
-                    setSidebarMode(mode)
-                } label: {
-                    Text(mode.title)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(sidebarMode == mode ? .primary : .secondary)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: ChromeMetrics.sidebarModeButtonHeight)
-                        .contentShape(Rectangle())
-                        .background {
-                            if sidebarMode == mode {
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(Color(nsColor: .controlBackgroundColor))
-                                    .shadow(color: .black.opacity(0.18), radius: 1, y: 0.5)
-                                    .matchedGeometryEffect(
-                                        id: "sidebar-section-thumb", in: segmentThumb
-                                    )
-                            }
-                        }
+        GlassEffectContainer(spacing: 2) {
+            HStack(spacing: 2) {
+                ForEach(SidebarMode.allCases, id: \.self) { mode in
+                    sidebarModeButton(mode)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(mode.title)
-                .accessibilityAddTraits(sidebarMode == mode ? .isSelected : [])
             }
         }
         .padding(2)
@@ -601,6 +622,36 @@ struct ContentView: View {
         }
         .accessibilityLabel("Sidebar section")
         .accessibilityValue(sidebarMode.title)
+    }
+
+    /// Glass goes directly on the selected segment's button — not in its
+    /// background — so the container renders it beneath the label text.
+    @ViewBuilder
+    private func sidebarModeButton(_ mode: SidebarMode) -> some View {
+        let button = Button {
+            setSidebarMode(mode)
+        } label: {
+            Text(mode.title)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(sidebarMode == mode ? .primary : .secondary)
+                .frame(maxWidth: .infinity)
+                .frame(height: ChromeMetrics.sidebarModeButtonHeight)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(mode.title)
+        .accessibilityAddTraits(sidebarMode == mode ? .isSelected : [])
+
+        if sidebarMode == mode {
+            button
+                .glassEffect(
+                    .regular,
+                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                )
+                .glassEffectID("sidebar-section-thumb", in: segmentThumb)
+        } else {
+            button
+        }
     }
 
     @ViewBuilder
@@ -833,19 +884,17 @@ struct LibraryNoticeView: View {
                 Image(systemName: "xmark")
                     .frame(width: 20, height: 20)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 6, hitPadding: 2))
             .foregroundStyle(.secondary)
             .help("Dismiss")
             .accessibilityLabel("Dismiss notice")
         }
         .padding(12)
         .frame(maxWidth: 420, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(ChromeMetrics.separatorColor, lineWidth: ChromeMetrics.separatorThickness)
-        }
-        .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+        .glassEffect(
+            .regular,
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
         .accessibilityElement(children: .contain)
     }
 }
@@ -862,8 +911,11 @@ private struct SavedSidebarWord: Identifiable {
 }
 
 /// Shared chrome geometry keeps the toolbar, tab strip, and sidebar edge on
-/// one deliberate rhythm. Separators use one quiet adaptive color everywhere;
-/// their hit areas may be wider, but the visible rule never changes thickness.
+/// one deliberate rhythm. Separators use the system separator color at full
+/// strength everywhere — SwiftUI chrome and the entry page's CSS hairlines
+/// (`--lexicon-hairline` in EntryPageBuilder) are the same 1pt rule, so the
+/// sidebar edge, the tab-strip baseline, and the jump-bar edges read as one
+/// line. Hit areas may be wider, but the visible rule never changes.
 private enum ChromeMetrics {
     static let toolbarRowHeight: CGFloat = 42
     static let tabStripRowHeight: CGFloat = 38
@@ -878,7 +930,7 @@ private enum ChromeMetrics {
     static let separatorThickness: CGFloat = 1
 
     static var separatorColor: Color {
-        Color(nsColor: .separatorColor).opacity(0.62)
+        Color(nsColor: .separatorColor)
     }
 }
 

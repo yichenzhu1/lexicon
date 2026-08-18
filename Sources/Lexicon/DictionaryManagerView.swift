@@ -25,8 +25,10 @@ struct DictionaryManagerView: View {
                 } label: {
                     Label("Import .mdx…", systemImage: "plus")
                 }
+                .buttonStyle(.glass)
                 .disabled(libraryModel.isImporting)
                 Button("Done") { dismiss() }
+                    .buttonStyle(.glassProminent)
                     .keyboardShortcut(.defaultAction)
             }
             .padding()
@@ -148,7 +150,7 @@ struct DictionaryManagerView: View {
                         .foregroundStyle(.secondary)
                 }
                 Button("Cancel") { libraryModel.cancelImport() }
-                    .buttonStyle(.borderless)
+                    .buttonStyle(.glass)
             }
             // Determinate once the entry count is known; the header supplies it.
             if let fraction = libraryModel.importFraction {
