@@ -317,8 +317,10 @@ struct ContentView: View {
                 ? ChromeMetrics.horizontalInset : ChromeMetrics.trafficLightInset
         )
         .padding(.trailing, ChromeMetrics.horizontalInset)
-        // A one-point optical correction aligns the controls' visible centers
-        // with the denser tab row without changing either row's geometry.
+        // A two-point optical correction centers the controls between the
+        // window's top edge and the tab pill below: the row's 10pt of slack
+        // splits 7/3, so the 7pt above the controls matches the 3pt below
+        // plus the tab pill's 4pt top margin.
         .offset(y: ChromeMetrics.toolbarContentVerticalOffset)
         .frame(height: ChromeMetrics.toolbarRowHeight)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -923,7 +925,7 @@ private enum ChromeMetrics {
     static let toolbarRowHeight: CGFloat = 42
     static let tabStripRowHeight: CGFloat = 38
     static let controlHeight: CGFloat = 32
-    static let toolbarContentVerticalOffset: CGFloat = 1
+    static let toolbarContentVerticalOffset: CGFloat = 2
     static let horizontalInset: CGFloat = 8
     static let sidebarContentInset: CGFloat = 7
     static let sidebarModeButtonHeight: CGFloat = 26
