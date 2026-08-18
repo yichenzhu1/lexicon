@@ -37,9 +37,9 @@ jobs:
 
       - name: Build and validate app bundle
         run: |
-          scripts/make_app.sh release
+          scripts/make_app.sh
           plutil -lint build/Lexicon.app/Contents/Info.plist
           test -s build/Lexicon.app/Contents/Resources/Lexicon.icns
           test -s build/Lexicon.app/Contents/Resources/LICENSE.txt
-          test -s build/Lexicon.app/Contents/Resources/THIRD-PARTY-NOTICES.md
+          test -s build/Lexicon.app/Contents/Resources/THIRD_PARTY_NOTICES.md
           codesign --verify --deep --strict --verbose=2 build/Lexicon.app

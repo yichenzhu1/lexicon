@@ -13,10 +13,11 @@ dictionary can optionally load under Settings → Dictionary Content.
 Lexicon ships no dictionary content. You supply `.mdx` files (with their
 `.mdd` resource companions) that you have obtained yourself.
 
-Looking for dictionaries? The MDX/MDD files shared by
-[karx on the FreeMdict forum](https://forum.freemdict.com/u/karx/summary)
-are a great fit for Lexicon — browse that page and download whichever
-dictionaries you want.
+Looking for dictionaries? I've always been a big fan of the dictionary files shared 
+by [karx on the FreeMdict forum](https://forum.freemdict.com/u/karx/summary), 
+and the app has the best dictionary support for them right now. Of course, you can also browse and download dictionaries you like on the forum. 
+If you run into any issues, please feel 
+free to send feedback and I'll do my best to support them.
 
 <p align="center">
   <img src="docs/images/lexicon-0.2.0-preview.png" alt="Lexicon displaying an entry on macOS">
@@ -70,12 +71,8 @@ Requires the current macOS SDK and a Swift compiler paired with that SDK.
 Command Line Tools work when their compiler and SDK were installed together.
 
 ```sh
-# Fast, unoptimized developer build
-scripts/make_app.sh debug
-open build/Lexicon.app
-
 # Optimized internal build
-scripts/make_app.sh release
+scripts/make_app.sh
 open build/Lexicon.app
 ```
 
@@ -83,7 +80,7 @@ Local builds are ad-hoc signed and are for development or trusted internal
 testing only. Override the default version or build number when needed:
 
 ```sh
-LEXICON_VERSION=0.2.0 LEXICON_BUILD_NUMBER=2 scripts/make_app.sh release
+LEXICON_VERSION=0.2.0 LEXICON_BUILD_NUMBER=2 scripts/make_app.sh
 ```
 
 ## GitHub release
@@ -249,4 +246,4 @@ LEXICON_ROOT=/tmp/lexicon-smoke swift run -c release Lexicon --smoke-test
 Lexicon is licensed under the
 [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) — see
 `LICENSE` for the full terms. Third-party dependencies and their licenses
-are disclosed in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+are disclosed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

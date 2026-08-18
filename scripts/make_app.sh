@@ -1,6 +1,7 @@
 #!/bin/bash
-# Builds Lexicon.app into ./build from the SwiftPM executable.
-# Usage: scripts/make_app.sh [debug|release]   (default: release)
+# Builds an optimized release Lexicon.app into ./build from the SwiftPM
+# executable.
+# Usage: scripts/make_app.sh
 #
 # Optional environment variables:
 #   LEXICON_VERSION           User-facing version (defaults to 0.3.0)
@@ -13,15 +14,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-CONFIGURATION="${1:-release}"
 VERSION="${LEXICON_VERSION:-0.3.0}"
 BUILD_NUMBER="${LEXICON_BUILD_NUMBER:-3}"
 SIGNING_IDENTITY="${LEXICON_SIGNING_IDENTITY:--}"
-
-if [[ "$CONFIGURATION" != "debug" && "$CONFIGURATION" != "release" ]]; then
-    echo "error: configuration must be 'debug' or 'release'" >&2
-    exit 2
-fi
 
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "error: version must contain three numeric components, such as 0.1.0" >&2
@@ -33,9 +28,9 @@ if [[ ! "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
-swift build -c "$CONFIGURATION"
+swift build -c release
 
-BINARY=".build/$CONFIGURATION/Lexicon"
+BINARY=".build/release/Lexicon"
 APP="build/Lexicon.app"
 ICON="Assets/Lexicon.icns"
 
@@ -48,7 +43,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/Lexicon"
 cp "$ICON" "$APP/Contents/Resources/Lexicon.icns"
 cp "LICENSE" "$APP/Contents/Resources/LICENSE.txt"
-cp "THIRD-PARTY-NOTICES.md" "$APP/Contents/Resources/THIRD-PARTY-NOTICES.md"
+cp "THIRD_PARTY_NOTICES.md" "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -75,9 +70,7 @@ PLIST
 
 if [[ "$SIGNING_IDENTITY" == "-" ]]; then
     codesign --force --sign - "$APP"
-    if [[ "$CONFIGURATION" == "release" ]]; then
-        echo "warning: built with an ad-hoc signature; do not publish this bundle as a public release" >&2
-    fi
+    echo "warning: built with an ad-hoc signature; do not publish this bundle as a public release" >&2
 else
     codesign \
         --force \

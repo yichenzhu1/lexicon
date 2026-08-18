@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-scripts/make_app.sh release
+scripts/make_app.sh
 
 mkdir -p dist
 rm -f dist/Lexicon.zip
