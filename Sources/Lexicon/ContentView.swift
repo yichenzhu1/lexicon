@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var modeBeforeSearch: SidebarMode?
     /// Direction of the sidebar section slide: sections are ordered
     /// Lexicon → History → Starred, so a higher destination slides left.
+    @State private var sidebarSlideForward = true
     @Namespace private var segmentThumb
     /// Identifies toolbar glass buttons so neighbors inside a
     /// GlassEffectContainer merge into one shape and separate on approach.
@@ -147,14 +148,12 @@ struct ContentView: View {
         }
         .onChange(of: appState.searchText) { _, text in
             let searching = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            withAnimation(.smooth(duration: 0.18)) {
-                if searching {
-                    if sidebarMode != .lexicon { modeBeforeSearch = sidebarMode }
-                    setSidebarMode(.lexicon)
-                } else if let previous = modeBeforeSearch {
-                    setSidebarMode(previous)
-                    modeBeforeSearch = nil
-                }
+            if searching {
+                if sidebarMode != .lexicon { modeBeforeSearch = sidebarMode }
+                setSidebarMode(.lexicon)
+            } else if let previous = modeBeforeSearch {
+                setSidebarMode(previous)
+                modeBeforeSearch = nil
             }
         }
         .onChange(of: appState.activeTabID) { _, _ in
@@ -182,6 +181,8 @@ struct ContentView: View {
     /// Routes every section switch through one place so programmatic jumps
     /// (search results) animate exactly like picker clicks.
     private func setSidebarMode(_ mode: SidebarMode) {
+        guard mode != sidebarMode else { return }
+        sidebarSlideForward = mode.position > sidebarMode.position
         sidebarMode = mode
     }
 
@@ -568,45 +569,72 @@ struct ContentView: View {
                 .padding(.horizontal, ChromeMetrics.sidebarContentInset)
                 .offset(y: ChromeMetrics.sidebarModeVerticalOffset)
                 .frame(height: ChromeMetrics.tabStripRowHeight)
+                // Keep section motion inside the control. Animating the whole
+                // sidebar also animates the status bar's insertion/removal,
+                // which makes otherwise identical empty states travel in
+                // different directions between sections.
+                .animation(.smooth(duration: 0.2), value: sidebarMode)
 
-            sidebarStatusBar
+            ZStack(alignment: .topLeading) {
+                VStack(spacing: 0) {
+                    sidebarStatusBar
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    if sidebarMode == .lexicon {
-                        if !isSearching {
-                            placeholderRow(emptyListMessage)
-                        } else if appState.results.isEmpty {
-                            placeholderRow("No matches")
-                        } else {
-                            if showingSuggestions {
-                                // Nothing matched literally; these are near misses.
-                                Text("Did you mean")
-                                    .font(.caption)
-                                    .foregroundStyle(.tertiary)
-                                    .padding(.horizontal, 9)
-                                    .padding(.vertical, 3)
-                            }
-                            ForEach(appState.results) { result in
-                                resultRow(result)
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 2) {
+                            if sidebarMode == .lexicon {
+                                if !isSearching {
+                                    placeholderRow(emptyListMessage)
+                                } else if appState.results.isEmpty {
+                                    placeholderRow("No matches")
+                                } else {
+                                    if showingSuggestions {
+                                        // Nothing matched literally; these are near misses.
+                                        Text("Did you mean")
+                                            .font(.caption)
+                                            .foregroundStyle(.tertiary)
+                                            .padding(.horizontal, 9)
+                                            .padding(.vertical, 3)
+                                    }
+                                    ForEach(appState.results) { result in
+                                        resultRow(result)
+                                    }
+                                }
+                            } else if savedWords.isEmpty {
+                                placeholderRow(emptyListMessage)
+                            } else {
+                                ForEach(savedWordRows) { item in
+                                    savedWordRow(item)
+                                }
                             }
                         }
-                    } else if savedWords.isEmpty {
-                        placeholderRow(emptyListMessage)
-                    } else {
-                        ForEach(savedWordRows) { item in
-                            savedWordRow(item)
-                        }
+                        .padding(.horizontal, ChromeMetrics.sidebarContentInset)
+                        .padding(.bottom, 8)
                     }
+                    .scrollIndicators(.automatic)
                 }
-                .padding(.horizontal, ChromeMetrics.sidebarContentInset)
-                .padding(.bottom, 8)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .id(sidebarMode)
+                .transition(sidebarSectionTransition)
             }
-            .scrollIndicators(.automatic)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .clipped()
+            // The status row and list move as one pane. Scoping the animation
+            // here prevents their different internal layouts from producing
+            // the old vertical push/pull effect.
+            .animation(.smooth(duration: 0.24), value: sidebarMode)
         }
-        // Animates the picker's sliding selection thumb (and the status bar's
-        // arrival); the list content itself swaps without motion.
-        .animation(.smooth(duration: 0.2), value: sidebarMode)
+    }
+
+    /// A short horizontal travel reads as a section change without making the
+    /// narrow sidebar feel as though an entire page is flying across it.
+    private var sidebarSectionTransition: AnyTransition {
+        let distance: CGFloat = 18
+        return .asymmetric(
+            insertion: .offset(x: sidebarSlideForward ? distance : -distance)
+                .combined(with: .opacity),
+            removal: .offset(x: sidebarSlideForward ? -distance : distance)
+                .combined(with: .opacity)
+        )
     }
 
     /// A segmented control in the Safari mold, with the selection thumb
@@ -1119,6 +1147,14 @@ private enum SidebarMode: String, CaseIterable {
         case .lexicon: "Lexicon"
         case .history: "History"
         case .starred: "Starred"
+        }
+    }
+
+    var position: Int {
+        switch self {
+        case .lexicon: 0
+        case .history: 1
+        case .starred: 2
         }
     }
 }

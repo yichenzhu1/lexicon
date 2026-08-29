@@ -4,6 +4,9 @@ All notable changes to Lexicon are documented here.
 
 ## Unreleased
 
+- Sidebar section changes now use one consistent, direction-aware horizontal
+  transition: the Lexicon/History/Starred thumb glides while each section's
+  status row and list travel together as one pane, without vertical jumping.
 - The toolbar controls now sit 2pt lower (was 1pt), which equalizes the
   visible gaps around the search field: the space above it to the window's
   top edge and the space below it to the tab pill are now both ~7pt, instead
