@@ -153,9 +153,21 @@ struct SettingsView: View {
         settingsPage {
             Form {
                 Section("Live Translation") {
-                    Picker("Provider", selection: $libraryModel.translationProvider) {
-                        ForEach(TranslationProvider.allCases) { provider in
-                            Text(provider.title).tag(provider)
+                    Picker("Method", selection: translationCategoryBinding) {
+                        ForEach(TranslationProviderCategory.allCases) { category in
+                            Text(category.title).tag(category)
+                        }
+                    }
+
+                    let category = libraryModel.translationProvider.category
+                    if category == .translationAPIs || category == .languageModels {
+                        Picker(
+                            category.providerPickerTitle,
+                            selection: $libraryModel.translationProvider
+                        ) {
+                            ForEach(TranslationProvider.providers(in: category)) { provider in
+                                Text(provider.title).tag(provider)
+                            }
                         }
                     }
 
@@ -188,14 +200,19 @@ struct SettingsView: View {
                                         Text(region.title).tag(region)
                                     }
                                 }
+                            }
+
+                            if let model = translationModelBinding {
                                 LabeledContent("Model") {
-                                    TextField("", text: $libraryModel.dashScopeModel)
+                                    TextField("", text: model)
                                         .labelsHidden()
                                         .textFieldStyle(.roundedBorder)
-                                        .accessibilityLabel("DashScope model name")
+                                        .accessibilityLabel(
+                                            "\(libraryModel.translationProvider.title) model name"
+                                        )
                                         .frame(width: 220)
                                 }
-                                Text("Recommended for this region: \(libraryModel.dashScopeRegion.recommendedModel)")
+                                Text(recommendedTranslationModelText)
                                     .settingsNote()
                             }
 
@@ -239,6 +256,34 @@ struct SettingsView: View {
                                             "Open DeepL API keys",
                                             destination: URL(string: "https://www.deepl.com/your-account/keys")!
                                         )
+                                    case .openAI:
+                                        Text("1. Create an OpenAI API key. ChatGPT subscriptions do not include API usage.")
+                                        Text("2. Enter a Responses API-compatible model name and paste the key above.")
+                                        Link(
+                                            "Open OpenAI API keys",
+                                            destination: URL(string: "https://platform.openai.com/api-keys")!
+                                        )
+                                    case .deepSeek:
+                                        Text("1. Create a DeepSeek API key and add API credit if required.")
+                                        Text("2. Enter an available chat model name and paste the key above.")
+                                        Link(
+                                            "Open DeepSeek API keys",
+                                            destination: URL(string: "https://platform.deepseek.com/api_keys")!
+                                        )
+                                    case .gemini:
+                                        Text("1. Create a Gemini API key in Google AI Studio.")
+                                        Text("2. Enter an OpenAI-compatible Gemini model name and paste the key above.")
+                                        Link(
+                                            "Open Google AI Studio API keys",
+                                            destination: URL(string: "https://aistudio.google.com/apikey")!
+                                        )
+                                    case .claude:
+                                        Text("1. Create an API key in the Claude Console.")
+                                        Text("2. Enter a Claude Messages API model name and paste the key above.")
+                                        Link(
+                                            "Open Claude API keys",
+                                            destination: URL(string: "https://platform.claude.com/settings/keys")!
+                                        )
                                     case .dashScope:
                                         Text("1. Create a Model Studio API key for the selected region.")
                                         Text("2. Enter a supported OpenAI-compatible model name, then paste the key above.")
@@ -254,7 +299,7 @@ struct SettingsView: View {
                                 .padding(.top, 4)
                             }
 
-                            Text("Only a passage you click is sent directly from Lexicon to the selected provider. Dictionary pages cannot read the saved key. Output is Simplified Chinese.")
+                            Text("Only the translation prompt triggered by a passage you click is sent directly from Lexicon to the selected provider. Dictionary pages cannot read the saved key. Output is Simplified Chinese.")
                                 .settingsNote()
                         }
                     }
@@ -314,9 +359,42 @@ struct SettingsView: View {
             return "Translates the source passage with Google Cloud Translation. This is predictable and works well for ordinary modern examples."
         case .deepL:
             return "Translates the source passage with DeepL, preserving OED’s supported markup and using the remaining dictionary prompt as translation context."
+        case .openAI:
+            return "Sends the dictionary’s full contextual prompt to an OpenAI GPT model through the Responses API."
+        case .deepSeek:
+            return "Sends the dictionary’s full contextual prompt to a DeepSeek chat model."
+        case .gemini:
+            return "Sends the dictionary’s full contextual prompt to a Gemini model through Google’s OpenAI-compatible endpoint."
+        case .claude:
+            return "Sends the dictionary’s full contextual prompt to Claude through Anthropic’s Messages API."
         case .dashScope:
             return "Sends the dictionary’s complete contextual prompt to an OpenAI-compatible DashScope model. This best preserves OED and ODE’s definition-aware instructions and markup."
         }
+    }
+
+    private var translationCategoryBinding: Binding<TranslationProviderCategory> {
+        Binding(
+            get: { libraryModel.translationProvider.category },
+            set: { libraryModel.selectTranslationCategory($0) }
+        )
+    }
+
+    private var translationModelBinding: Binding<String>? {
+        switch libraryModel.translationProvider {
+        case .openAI: return $libraryModel.openAIModel
+        case .deepSeek: return $libraryModel.deepSeekModel
+        case .gemini: return $libraryModel.geminiModel
+        case .claude: return $libraryModel.claudeModel
+        case .dashScope: return $libraryModel.dashScopeModel
+        case .apple, .googleCloud, .deepL, .disabled: return nil
+        }
+    }
+
+    private var recommendedTranslationModelText: String {
+        if libraryModel.translationProvider == .dashScope {
+            return "Recommended for this region: \(libraryModel.dashScopeRegion.recommendedModel)"
+        }
+        return "Suggested model: \(libraryModel.translationProvider.recommendedModel ?? "")"
     }
 
     private var speechPane: some View {

@@ -157,28 +157,25 @@ bundled credential or passage leaves the page. Choose a provider in
 - **Apple Translation** is the default. It uses the system Translation
   framework on-device and can ask permission to download the English and
   Simplified Chinese language models on first use. It needs no API key.
-- **Google Cloud Translation** extracts only the source passage, accounting
-  for both OED/ODE's source-first prompts and Longman's instruction-first
-  prompts. It is the predictable choice for modern example sentences. Enable
-  the Cloud Translation Basic API and use a key restricted to that API.
-- **DeepL** translates the extracted passage through the v2 API. Free keys
-  ending in `:fx` automatically use the Free endpoint; Pro keys use the Pro
-  endpoint. OED's `<m>`, `<n>`, and `<o>` markup is preserved, with lemma and
-  small-cap tags excluded from translation.
-- **Alibaba DashScope** sends the dictionary's complete contextual prompt to
-  the selected OpenAI-compatible model. This best preserves the OED/ODE
-  repacks' definition-aware instructions and markup. Lexicon suggests
-  `qwen3.7-plus` (or `qwen3.7-plus-us` in Virginia), but leaves the model name
-  editable as regional availability changes.
+- **Translation APIs** contains Google Cloud Translation and DeepL. These
+  dedicated services translate the extracted source passage. Google Cloud is
+  predictable for modern examples; DeepL supports Free and Pro keys and
+  preserves OED's supported markup.
+- **AI Models** contains OpenAI (GPT), DeepSeek, Google Gemini, Anthropic
+  Claude, and Alibaba DashScope. These receive the complete contextual prompt
+  for definition-aware and markup-aware translations. Each provider has its
+  own editable model name and Keychain credential.
 - **Off** disables network and Apple live translation. Bundled bilingual
   content, including OALD's hidden Chinese examples, still works locally.
 
-Cloud translation keys are stored separately in macOS Keychain and are never
-exposed to dictionary JavaScript. At most one translation request is accepted
-per real click, passages are capped at 20 KB, and output is currently Simplified
-Chinese. Provider calls are made by Lexicon itself, so live translation can
-remain under the user's control even when dictionary-page network access is
-disabled.
+Every cloud provider has a separate credential stored in macOS Keychain; keys
+are never exposed to dictionary JavaScript. General language models receive the
+complete dictionary prompt so they can follow definition-aware and markup-aware
+instructions, while dedicated translation APIs receive only the extracted
+source passage. At most one translation request is accepted per real click,
+passages are capped at 20 KB, and output is currently Simplified Chinese.
+Provider calls are made by Lexicon itself, so live translation can remain under
+the user's control even when dictionary-page network access is disabled.
 
 ## Tests
 

@@ -96,6 +96,7 @@ final class LibraryModel: ObservableObject {
         if let warnings = library?.startupWarnings, !warnings.isEmpty {
             notice = Notice(title: "Library notice", message: warnings.joined(separator: "\n"))
         }
+        rememberTranslationProvider()
         refreshTranslationCredentialState()
     }
 
@@ -395,6 +396,7 @@ final class LibraryModel: ObservableObject {
     @Published var translationProvider: TranslationProvider = LibraryModel.storedTranslationProvider() {
         didSet {
             Self.settings.set(translationProvider.rawValue, forKey: Self.translationProviderKey)
+            rememberTranslationProvider()
             refreshTranslationCredentialState()
             translationStatus = nil
         }
@@ -414,6 +416,18 @@ final class LibraryModel: ObservableObject {
         forKey: LibraryModel.dashScopeModelKey
     ) ?? LibraryModel.storedDashScopeRegion().recommendedModel {
         didSet { Self.settings.set(dashScopeModel, forKey: Self.dashScopeModelKey) }
+    }
+    @Published var openAIModel: String = LibraryModel.storedTranslationModel(for: .openAI) {
+        didSet { Self.storeTranslationModel(openAIModel, for: .openAI) }
+    }
+    @Published var deepSeekModel: String = LibraryModel.storedTranslationModel(for: .deepSeek) {
+        didSet { Self.storeTranslationModel(deepSeekModel, for: .deepSeek) }
+    }
+    @Published var geminiModel: String = LibraryModel.storedTranslationModel(for: .gemini) {
+        didSet { Self.storeTranslationModel(geminiModel, for: .gemini) }
+    }
+    @Published var claudeModel: String = LibraryModel.storedTranslationModel(for: .claude) {
+        didSet { Self.storeTranslationModel(claudeModel, for: .claude) }
     }
     @Published private(set) var hasTranslationAPIKey = false
     @Published private(set) var translationStatus: String?
@@ -449,8 +463,11 @@ final class LibraryModel: ObservableObject {
     private static let googleBritishVoiceKey = "googleBritishVoice"
     private static let googleAmericanVoiceKey = "googleAmericanVoice"
     private static let translationProviderKey = "translationProvider"
+    private static let lastTranslationAPIProviderKey = "lastTranslationAPIProvider"
+    private static let lastLanguageModelProviderKey = "lastLanguageModelProvider"
     private static let dashScopeRegionKey = "dashScopeRegion"
     private static let dashScopeModelKey = "dashScopeModel"
+    private static let translationModelKeyPrefix = "translationModel."
     private static let settingsMigrationKey = "migratedFromOrgLexiconSettings"
     private static let sidebarWidthKey = "sidebarWidth"
     private static let sidebarVisibleKey = "sidebarVisible"
@@ -521,9 +538,34 @@ final class LibraryModel: ObservableObject {
         return TranslationProvider(rawValue: raw) ?? .apple
     }
 
+    private static func storedProvider(
+        key: String,
+        category: TranslationProviderCategory,
+        fallback: TranslationProvider
+    ) -> TranslationProvider {
+        guard let raw = settings.string(forKey: key),
+              let provider = TranslationProvider(rawValue: raw),
+              provider.category == category
+        else { return fallback }
+        return provider
+    }
+
     private static func storedDashScopeRegion() -> DashScopeRegion {
         guard let raw = settings.string(forKey: dashScopeRegionKey) else { return .china }
         return DashScopeRegion(rawValue: raw) ?? .china
+    }
+
+    private static func storedTranslationModel(for provider: TranslationProvider) -> String {
+        precondition(provider.isGeneralLanguageModel && provider != .dashScope)
+        return settings.string(forKey: translationModelKeyPrefix + provider.rawValue)
+            ?? provider.recommendedModel!
+    }
+
+    private static func storeTranslationModel(
+        _ model: String,
+        for provider: TranslationProvider
+    ) {
+        settings.set(model, forKey: translationModelKeyPrefix + provider.rawValue)
     }
 
     static func systemVoices(language: String) -> [SystemSpeechVoice] {
@@ -574,11 +616,55 @@ final class LibraryModel: ObservableObject {
         googleBritishVoice = "Algieba"
         googleAmericanVoice = "Algieba"
         translationProvider = .apple
+        Self.settings.removeObject(forKey: Self.lastTranslationAPIProviderKey)
+        Self.settings.removeObject(forKey: Self.lastLanguageModelProviderKey)
+        openAIModel = TranslationProvider.openAI.recommendedModel!
+        deepSeekModel = TranslationProvider.deepSeek.recommendedModel!
+        geminiModel = TranslationProvider.gemini.recommendedModel!
+        claudeModel = TranslationProvider.claude.recommendedModel!
         dashScopeRegion = .china
         dashScopeModel = DashScopeRegion.china.recommendedModel
         if !collapsedDictionaries.isEmpty {
             collapsedDictionaries.removeAll()
             Self.settings.removeObject(forKey: Self.collapsedKey)
+        }
+    }
+
+    func selectTranslationCategory(_ category: TranslationProviderCategory) {
+        switch category {
+        case .apple:
+            translationProvider = .apple
+        case .translationAPIs:
+            translationProvider = Self.storedProvider(
+                key: Self.lastTranslationAPIProviderKey,
+                category: .translationAPIs,
+                fallback: .googleCloud
+            )
+        case .languageModels:
+            translationProvider = Self.storedProvider(
+                key: Self.lastLanguageModelProviderKey,
+                category: .languageModels,
+                fallback: .openAI
+            )
+        case .disabled:
+            translationProvider = .disabled
+        }
+    }
+
+    private func rememberTranslationProvider() {
+        switch translationProvider.category {
+        case .translationAPIs:
+            Self.settings.set(
+                translationProvider.rawValue,
+                forKey: Self.lastTranslationAPIProviderKey
+            )
+        case .languageModels:
+            Self.settings.set(
+                translationProvider.rawValue,
+                forKey: Self.lastLanguageModelProviderKey
+            )
+        case .apple, .disabled:
+            break
         }
     }
 
@@ -818,6 +904,7 @@ final class LibraryModel: ObservableObject {
                     prompt: prompt,
                     provider: provider,
                     apiKey: apiKey,
+                    model: translationModel(for: provider),
                     dashScopeModel: dashScopeModel,
                     dashScopeRegion: dashScopeRegion
                 )
@@ -883,6 +970,17 @@ final class LibraryModel: ObservableObject {
     private func refreshTranslationCredentialState() {
         hasTranslationAPIKey = translationProvider.requiresAPIKey
             && (try? TranslationKeychain.readAPIKey(for: translationProvider)) != nil
+    }
+
+    private func translationModel(for provider: TranslationProvider) -> String {
+        switch provider {
+        case .openAI: return openAIModel
+        case .deepSeek: return deepSeekModel
+        case .gemini: return geminiModel
+        case .claude: return claudeModel
+        case .dashScope: return dashScopeModel
+        case .apple, .googleCloud, .deepL, .disabled: return ""
+        }
     }
 
     private func enqueueAppleTranslation(_ sourceText: String) async throws -> String {
