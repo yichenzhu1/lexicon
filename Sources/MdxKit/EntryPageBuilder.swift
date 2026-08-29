@@ -40,8 +40,10 @@ public enum EntryPageBuilder {
             return """
             <details\(open) id="dict-\(escape(uuid))" data-uuid="\(escape(uuid))">
               <summary>\(escape(dictionary.title))</summary>
-              <iframe data-uuid="\(escape(uuid))" data-src="\(escape(source))"
-                      title="\(escape(dictionary.title))" scrolling="no"></iframe>
+              <div class="lexicon-frame-slot" data-uuid="\(escape(uuid))">
+                <iframe data-uuid="\(escape(uuid))" data-src="\(escape(source))"
+                        title="\(escape(dictionary.title))" scrolling="no"></iframe>
+              </div>
             </details>
             """
         }.joined(separator: "\n")
@@ -73,10 +75,13 @@ public enum EntryPageBuilder {
           summary { cursor:pointer; padding:5px 2px; font-weight:600; font-size:13px; user-select:none; }
           /* Match the entry's content edge to the summary title, leaving the
              native disclosure triangle in its own stable gutter. */
-          iframe { display:block; width:calc(100% - var(--dictionary-content-indent));
-            margin-left:var(--dictionary-content-indent); border:0; height:44px; background:transparent; }
-          details:not([open]) iframe { display:none; }
-          .lexicon-jump { position:sticky; top:0; z-index:5; display:flex; gap:4px; overflow-x:auto;
+          .lexicon-frame-slot { position:relative; width:calc(100% - var(--dictionary-content-indent));
+            height:44px; margin-left:var(--dictionary-content-indent); }
+          .lexicon-frame-slot[data-overlay="1"] { z-index:20; }
+          iframe { position:absolute; inset:0 auto auto 0; display:block; width:100%; margin:0; border:0; height:44px;
+            background:transparent; }
+          details:not([open]) .lexicon-frame-slot { display:none; }
+          .lexicon-jump { position:sticky; top:0; z-index:100; display:flex; gap:4px; overflow-x:auto;
             scrollbar-width:none; margin:-10px -8px 6px; padding:6px 8px;
             background:rgba(255,255,255,.72); backdrop-filter:blur(20px) saturate(180%);
             -webkit-backdrop-filter:blur(20px) saturate(180%);
@@ -100,13 +105,16 @@ public enum EntryPageBuilder {
         (() => {
           const frames = new Map(Array.from(document.querySelectorAll('iframe[data-uuid]'))
             .map(frame => [frame.dataset.uuid, frame]));
+          const slots = new Map(Array.from(document.querySelectorAll('.lexicon-frame-slot[data-uuid]'))
+            .map(slot => [slot.dataset.uuid, slot]));
           let scrollSyncPending = false;
           function syncFrameScrollState() {
             scrollSyncPending = false;
             const states = [];
             frames.forEach(frame => {
               const rect = frame.getBoundingClientRect();
-              const maxLocalY = Math.max(0, rect.height - innerHeight);
+              const flowHeight = frame.parentElement?.getBoundingClientRect().height || rect.height;
+              const maxLocalY = Math.max(0, flowHeight - innerHeight);
               const localY = Math.max(0, Math.min(maxLocalY, -rect.top));
               states.push({uuid:frame.dataset.uuid || '', offset:localY, viewportHeight:innerHeight});
             });
@@ -142,22 +150,35 @@ public enum EntryPageBuilder {
             if (frame.closest('details')?.open && frame.getBoundingClientRect().top < innerHeight + 800) load(frame);
           }));
 
-          window.__lexiconSetFrameHeight = (uuid, requested) => {
+          window.__lexiconSetFrameHeight = (uuid, requestedFlow, requestedVisual) => {
             const frame = frames.get(String(uuid).toLowerCase());
-            if (!frame) return;
-            const oldHeight = frame.getBoundingClientRect().height;
-            const wasAbove = frame.getBoundingClientRect().bottom < 0;
+            const slot = slots.get(String(uuid).toLowerCase());
+            if (!frame || !slot) return;
+            const oldFlowHeight = slot.getBoundingClientRect().height;
+            const wasAbove = slot.getBoundingClientRect().bottom < 0;
             const floor = frames.size === 1
               ? Math.max(44, document.documentElement.clientHeight - Math.max(0, frame.getBoundingClientRect().top) - 24)
               : 44;
-            const height = Math.max(floor, Math.min(200000, Math.ceil(Number(requested) || 44)));
-            if (Math.abs(height - oldHeight) < 1) {
-              frame.dataset.sizeState = 'ok:' + height;
+            const flowHeight = Math.max(floor,
+              Math.min(200000, Math.ceil(Number(requestedFlow) || 44)));
+            let visualHeight = Math.max(flowHeight,
+              Math.min(200000, Math.ceil(Number(requestedVisual) || flowHeight)));
+            if (visualHeight <= flowHeight + 8) visualHeight = flowHeight;
+            const oldVisualHeight = frame.getBoundingClientRect().height;
+            if (Math.abs(flowHeight - oldFlowHeight) < 1
+                && Math.abs(visualHeight - oldVisualHeight) < 1) {
+              frame.dataset.sizeState = 'ok:' + flowHeight;
               return;
             }
-            frame.style.height = height + 'px';
-            frame.dataset.sizeState = 'ok:' + height;
-            if (wasAbove && Math.abs(height - oldHeight) > .5) scrollBy(0, height - oldHeight);
+            slot.style.height = flowHeight + 'px';
+            frame.style.height = visualHeight + 'px';
+            const overlaysFollowingContent = visualHeight > flowHeight + 1;
+            if (overlaysFollowingContent) slot.dataset.overlay = '1';
+            else delete slot.dataset.overlay;
+            frame.dataset.sizeState = 'ok:' + flowHeight;
+            if (wasAbove && Math.abs(flowHeight - oldFlowHeight) > .5) {
+              scrollBy(0, flowHeight - oldFlowHeight);
+            }
             requestFrameScrollSync();
           };
           window.__lexiconScrollFrame = (uuid, offset, behavior) => {

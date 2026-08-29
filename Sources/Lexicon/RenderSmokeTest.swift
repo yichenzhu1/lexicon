@@ -15,6 +15,8 @@ enum RenderSmokeTest {
     private static var baselineHeights: [Double] = []
     private static var stabilityCheckStarted = false
     private static var stabilityPassed = false
+    private static var floatingOverlayCheckStarted = false
+    private static var floatingOverlayPassed = false
     private static var scrollCompatibilityCheckStarted = false
     private static var scrollCompatibilityPassed = false
     private static var scrollSweepCheckStarted = false
@@ -223,6 +225,12 @@ enum RenderSmokeTest {
                         if !stabilityCheckStarted { startStabilityCheck() }
                         return
                     }
+                    guard floatingOverlayPassed else {
+                        if !floatingOverlayCheckStarted {
+                            startFloatingOverlayCheck(frames: frames)
+                        }
+                        return
+                    }
                     guard scrollCompatibilityPassed else {
                         if !scrollCompatibilityCheckStarted {
                             startScrollCompatibilityCheck(frames: frames)
@@ -322,12 +330,13 @@ enum RenderSmokeTest {
                   }));
                   window.__lexiconOriginalSetFrameHeight ||= window.__lexiconSetFrameHeight;
                   const original = window.__lexiconOriginalSetFrameHeight;
-                  window.__lexiconSetFrameHeight = (uuid, requested) => {
-                    const id = String(uuid).toLowerCase(), height = Number(requested) || 44;
+                  window.__lexiconSetFrameHeight = (uuid, requestedFlow, requestedVisual) => {
+                    const id = String(uuid).toLowerCase();
+                    const height = Number(requestedFlow) || 44;
                     const range = window.__lexiconStabilityRanges.get(id) || {uuid:id, min:height, max:height};
                     range.min = Math.min(range.min, height); range.max = Math.max(range.max, height);
                     window.__lexiconStabilityRanges.set(id, range);
-                    return original(uuid, requested);
+                    return original(uuid, requestedFlow, requestedVisual);
                   };
                   return true;
                 })()
@@ -352,6 +361,104 @@ enum RenderSmokeTest {
                 stabilityPassed = true
             } catch {
                 print("SMOKE FAIL: could not sample iframe stability: \(error.localizedDescription)")
+                exit(1)
+            }
+        }
+    }
+
+    /// Oxford repacks place expandable/hoverable controls in absolute and
+    /// fixed hosts. Reproduce both shapes and require the iframe to grow above
+    /// following dictionaries while its in-flow slot remains unchanged.
+    private static func startFloatingOverlayCheck(frames: [Frame]) {
+        guard let webView,
+              let target = frames.first,
+              let frameInfo = coordinator?.dictionaryFrameInfo(for: target.uuid)
+        else {
+            floatingOverlayPassed = true
+            return
+        }
+        floatingOverlayCheckStarted = true
+        Task { @MainActor in
+            do {
+                let baselineValue = try await webView.evaluateJavaScript("""
+                (() => {
+                  const frame = document.querySelector('iframe[data-uuid="\(target.uuid)"]');
+                  const slot = frame?.parentElement;
+                  return JSON.stringify({frame:frame?.getBoundingClientRect().height || 0,
+                    slot:slot?.getBoundingClientRect().height || 0});
+                })()
+                """)
+                guard let baselineJSON = baselineValue as? String,
+                      let baselineData = baselineJSON.data(using: .utf8),
+                      let baseline = try JSONSerialization.jsonObject(with: baselineData)
+                        as? [String: Any],
+                      let baselineFrame = (baseline["frame"] as? NSNumber)?.doubleValue,
+                      let baselineSlot = (baseline["slot"] as? NSNumber)?.doubleValue
+                else { throw SmokeError.invalidFloatingOverlayGeometry }
+                _ = try await callPageNumber(
+                    in: webView,
+                    """
+                    const host = document.createElement('div');
+                    host.id = 'lexicon-fixed-overlay-probe';
+                    host.style.cssText = 'position:fixed;left:0;bottom:0;width:20px;height:20px';
+                    const popup = document.createElement('div');
+                    popup.style.cssText = 'position:absolute;top:100%;left:0;width:20px;height:600px';
+                    host.appendChild(popup);
+                    document.body.appendChild(host);
+                    const anchored = document.createElement('div');
+                    anchored.id = 'lexicon-absolute-overlay-probe';
+                    anchored.style.cssText = 'position:absolute;left:24px;top:'
+                      + Math.max(0, document.body.getBoundingClientRect().height, innerHeight) + 'px;'
+                      + 'width:20px;height:20px';
+                    const menu = document.createElement('div');
+                    menu.style.cssText = 'position:relative;top:100%;width:20px;height:600px';
+                    anchored.appendChild(menu);
+                    document.body.appendChild(anchored);
+                    return 1;
+                    """,
+                    frameInfo: frameInfo
+                )
+                try await Task.sleep(for: .seconds(1))
+                let value = try await webView.evaluateJavaScript("""
+                (() => {
+                  const frame = document.querySelector('iframe[data-uuid="\(target.uuid)"]');
+                  const slot = frame?.parentElement;
+                  return JSON.stringify({frame:frame?.getBoundingClientRect().height || 0,
+                    slot:slot?.getBoundingClientRect().height || 0,
+                    overlay:slot?.dataset.overlay === '1', z:slot ? getComputedStyle(slot).zIndex : ''});
+                })()
+                """)
+                guard let json = value as? String,
+                      let data = json.data(using: .utf8),
+                      let geometry = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let overlayFrame = (geometry["frame"] as? NSNumber)?.doubleValue,
+                      let overlaySlot = (geometry["slot"] as? NSNumber)?.doubleValue,
+                      geometry["overlay"] as? Bool == true,
+                      geometry["z"] as? String == "20"
+                else { throw SmokeError.invalidFloatingOverlayGeometry }
+                _ = try await callPageNumber(
+                    in: webView,
+                    """
+                    document.getElementById('lexicon-fixed-overlay-probe')?.remove();
+                    document.getElementById('lexicon-absolute-overlay-probe')?.remove();
+                    return 1;
+                    """,
+                    frameInfo: frameInfo
+                )
+                try await Task.sleep(for: .milliseconds(500))
+                guard abs(overlaySlot - baselineSlot) <= 1,
+                      overlayFrame > baselineFrame + 400
+                else {
+                    print(
+                        "SMOKE FAIL: floating popup did not overlay its stable slot: "
+                            + "frame \(baselineFrame) -> \(overlayFrame), "
+                            + "slot \(baselineSlot) -> \(overlaySlot)"
+                    )
+                    exit(1)
+                }
+                floatingOverlayPassed = true
+            } catch {
+                print("SMOKE FAIL: floating-popup check errored: \(error.localizedDescription)")
                 exit(1)
             }
         }
@@ -521,6 +628,7 @@ enum RenderSmokeTest {
     }
 
     private enum SmokeError: Error {
+        case invalidFloatingOverlayGeometry
         case nonNumericJavaScriptResult
     }
 

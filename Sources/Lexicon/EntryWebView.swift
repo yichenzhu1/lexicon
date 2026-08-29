@@ -210,9 +210,10 @@ struct EntryWebView: NSViewRepresentable {
                               if (!window.__lexiconHeightLog) {
                                 const log = [];
                                 const orig = window.__lexiconSetFrameHeight;
-                                window.__lexiconSetFrameHeight = (u, h) => {
-                                  log.push(u.slice(0, 8) + '=' + Math.round(Number(h) || 0));
-                                  return orig(u, h);
+                                window.__lexiconSetFrameHeight = (u, flow, visual) => {
+                                  log.push(u.slice(0, 8) + '=' + Math.round(Number(flow) || 0)
+                                    + '/' + Math.round(Number(visual) || Number(flow) || 0));
+                                  return orig(u, flow, visual);
                                 };
                                 window.__lexiconHeightLog = log;
                               }
@@ -286,8 +287,12 @@ struct EntryWebView: NSViewRepresentable {
 
             case "height":
                 guard isDictionaryRootFrame,
-                      let height = payload["height"] as? Double else { return }
-                let script = "window.__lexiconSetFrameHeight?.('\(host)',\(height));"
+                      let flowHeight = (payload["flowHeight"] as? NSNumber)?.doubleValue
+                        ?? (payload["height"] as? NSNumber)?.doubleValue
+                else { return }
+                let visualHeight = (payload["visualHeight"] as? NSNumber)?.doubleValue
+                    ?? flowHeight
+                let script = "window.__lexiconSetFrameHeight?.('\(host)',\(flowHeight),\(visualHeight));"
                 message.webView?.evaluateJavaScript(script)
 
             case "scroll":
@@ -536,7 +541,8 @@ struct EntryWebView: NSViewRepresentable {
             return;
           }
 
-          let scheduled = false, settleTimer = 0, lastSent = -1;
+          let scheduled = false, scheduledDeep = false, settleTimer = 0;
+          let lastFlowSent = -1, lastVisualSent = -1;
           let lastTrustedClick = -Infinity;
           let translationUsedForClick = false;
           addEventListener('click', event => {
@@ -572,6 +578,8 @@ struct EntryWebView: NSViewRepresentable {
           }
           function measure(deep) {
             scheduled = false;
+            deep = deep === true || scheduledDeep;
+            scheduledDeep = false;
             const root = document.documentElement, body = document.body;
             if (!root || !body) return;
             // Measure the body's own box, never scrollHeight/offsetHeight:
@@ -580,7 +588,14 @@ struct EntryWebView: NSViewRepresentable {
             // too tall when content shrinks, or oscillating between the
             // viewport size and the content size and shaking the page.
             const bodyRect = body.getBoundingClientRect();
-            let height = Math.ceil(bodyRect.height);
+            const flowHeight = Math.ceil(bodyRect.height);
+            // Keep a previously measured overlay open through the resize event
+            // caused by enlarging its iframe. Attribute/mutation events request
+            // a deep measurement immediately, so closing it still shrinks on
+            // the next animation frame.
+            let visualHeight = !deep && lastFlowSent >= 0
+              && Math.abs(flowHeight - lastFlowSent) < 2
+              ? Math.max(flowHeight, lastVisualSent) : flowHeight;
             if (deep) {
               // DOMRect coordinates already include the body's padding. Scan
               // for positioned overflow relative to the body, but do not add
@@ -595,53 +610,72 @@ struct EntryWebView: NSViewRepresentable {
               // paths alternated forever and the resize compensation bounced
               // the outer page on every scroll.
               const clipBottoms = new Map();
+              // A bottom-anchored fixed subtree moves when its iframe is made
+              // taller. Normalize it back to the flow viewport so measuring
+              // the overlay cannot recursively grow the frame.
+              const fixedShifts = new Map();
               document.querySelectorAll('*').forEach(element => {
                 const style = getComputedStyle(element);
-                if (style.overflowY !== 'visible') {
-                  clipBottoms.set(element, element.getBoundingClientRect().bottom);
+                let fixedShift = fixedShifts.get(element.parentElement) || 0;
+                if (style.position === 'fixed') {
+                  fixedShift = style.top === 'auto' && style.bottom !== 'auto'
+                    ? Math.max(0, innerHeight - flowHeight) : 0;
+                  fixedShifts.set(element, fixedShift);
+                } else if (fixedShifts.has(element.parentElement)) {
+                  fixedShifts.set(element, fixedShift);
                 }
-                if (style.visibility === 'hidden' || style.position === 'fixed') return;
+                if (style.overflowY !== 'visible') {
+                  clipBottoms.set(element, element.getBoundingClientRect().bottom - fixedShift);
+                }
+                if (style.visibility === 'hidden') return;
                 for (const rect of element.getClientRects()) {
-                  if (rect.bottom <= bottom) continue;
+                  const rectBottom = rect.bottom - fixedShift;
+                  if (rectBottom <= bottom) continue;
                   let clipped = false;
                   for (let p = element.parentElement; p && p !== body; p = p.parentElement) {
                     const clipBottom = clipBottoms.get(p);
-                    if (clipBottom !== undefined && rect.bottom > clipBottom + 1) {
+                    if (clipBottom !== undefined && rectBottom > clipBottom + 1) {
                       clipped = true;
                       break;
                     }
                   }
-                  if (!clipped) bottom = rect.bottom;
+                  if (!clipped) bottom = rectBottom;
                 }
               });
-              height = Math.max(height, Math.ceil(bottom - bodyRect.top));
+              visualHeight = Math.max(flowHeight, Math.ceil(bottom - bodyRect.top));
             }
             // Sub-2px churn is ignored: resizing the frame re-fires this very
             // measurement, so tiny deltas would ping-pong the frame height
             // and visibly twitch the card.
-            const rounded = Math.ceil(height);
-            if (lastSent >= 0 && Math.abs(rounded - lastSent) < 2) return;
-            lastSent = rounded;
-            send({kind:'height', height:rounded});
+            const roundedFlow = Math.ceil(flowHeight);
+            const roundedVisual = Math.ceil(visualHeight);
+            if (lastFlowSent >= 0 && Math.abs(roundedFlow - lastFlowSent) < 2
+                && Math.abs(roundedVisual - lastVisualSent) < 2) return;
+            lastFlowSent = roundedFlow;
+            lastVisualSent = roundedVisual;
+            send({kind:'height', flowHeight:roundedFlow, visualHeight:roundedVisual});
           }
-          function requestMeasure() {
+          function requestMeasure(deepSoon) {
+            scheduledDeep ||= deepSoon === true;
             if (!scheduled) { scheduled = true; requestAnimationFrame(() => measure(false)); }
             clearTimeout(settleTimer); settleTimer = setTimeout(() => measure(true), 240);
           }
           ready(() => {
-            new ResizeObserver(requestMeasure).observe(document.documentElement);
+            new ResizeObserver(() => requestMeasure(false)).observe(document.documentElement);
             if (document.body) {
-              new ResizeObserver(requestMeasure).observe(document.body);
-              new MutationObserver(requestMeasure).observe(document.body,
+              new ResizeObserver(() => requestMeasure(false)).observe(document.body);
+              new MutationObserver(records => requestMeasure(records.some(record =>
+                record.type === 'attributes' || record.type === 'childList'))).observe(document.body,
                 {subtree:true, childList:true, attributes:true, characterData:true});
             }
             document.querySelectorAll('img,video,audio').forEach(item => {
-              item.addEventListener('load', requestMeasure); item.addEventListener('error', requestMeasure);
+              item.addEventListener('load', () => requestMeasure(true));
+              item.addEventListener('error', () => requestMeasure(true));
             });
-            document.fonts?.ready.then(requestMeasure);
+            document.fonts?.ready.then(() => requestMeasure(true));
             ['click','toggle','input','change','transitionend','animationend'].forEach(name =>
-              document.addEventListener(name, requestMeasure, true));
-            requestMeasure();
+              document.addEventListener(name, () => requestMeasure(true), true));
+            requestMeasure(true);
             const anchor = new URLSearchParams(location.search).get('anchor');
             if (anchor) setTimeout(() => {
               let target = document.getElementById(anchor);
@@ -650,8 +684,8 @@ struct EntryWebView: NSViewRepresentable {
                 behavior:'auto'});
             }, 80);
           });
-          addEventListener('resize', requestMeasure);
-          visualViewport?.addEventListener('resize', requestMeasure);
+          addEventListener('resize', () => requestMeasure(false));
+          visualViewport?.addEventListener('resize', () => requestMeasure(false));
           addEventListener('message', event => {
             if (event.source === window && event.data?.kind === 'lexicon-tts-request') {
               forwardTTSRequest(event.data.detail);

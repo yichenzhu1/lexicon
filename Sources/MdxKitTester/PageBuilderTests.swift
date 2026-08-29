@@ -30,8 +30,15 @@ func runPageBuilderTests(_ t: TestHarness) {
             "outer scrolling is synchronized into dictionary frames"
         )
         t.expect(
-            html.contains("Math.abs(height - oldHeight) < 1"),
+            html.contains("Math.abs(flowHeight - oldFlowHeight) < 1")
+                && html.contains("Math.abs(visualHeight - oldVisualHeight) < 1"),
             "unchanged child heights do not retrigger iframe layout"
+        )
+        t.expect(
+            html.contains("class=\"lexicon-frame-slot\"")
+                && html.contains("requestedFlow, requestedVisual")
+                && html.contains("data-overlay"),
+            "floating dictionary chrome overlays a stable in-flow frame slot"
         )
         t.expect(!html.contains("10000px"), "no temporary sizing sentinel")
         t.expect(html.contains(#"scrolling="no""#), "one outer scroll surface")
