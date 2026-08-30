@@ -5,10 +5,12 @@ use warnings;
 @ARGV == 2 or die "usage: make_icon.pl ICONSET OUTPUT\n";
 my ($iconset, $output) = @ARGV;
 
+# Use the scale-aware ICNS representations for small icons. On current macOS,
+# PNG payloads stored in the legacy icp4/icp5/icp6 slots are interpreted as
+# legacy bitmap data and render as an opaque, incorrectly scaled icon. ic11 and
+# ic12 supply the same 32px and 64px data without that decoding ambiguity; the
+# system downsamples them for smaller display sizes when needed.
 my @representations = (
-    ["icp4", "icon_16x16.png"],
-    ["icp5", "icon_32x32.png"],
-    ["icp6", "icon_32x32\@2x.png"],
     ["ic07", "icon_128x128.png"],
     ["ic08", "icon_256x256.png"],
     ["ic09", "icon_512x512.png"],

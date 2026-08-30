@@ -1,5 +1,7 @@
 #!/bin/bash
 # Builds the macOS .icns file from the canonical 1024×1024 PNG.
+# The source must be full-bleed and opaque. macOS 26 places pre-masked legacy
+# icons with transparent corners inside a smaller gray compatibility plate.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -17,9 +19,7 @@ make_size() {
     sips -z "$pixels" "$pixels" "$SOURCE" --out "$ICONSET/$filename" >/dev/null
 }
 
-make_size 16 icon_16x16.png
 make_size 32 icon_16x16@2x.png
-make_size 32 icon_32x32.png
 make_size 64 icon_32x32@2x.png
 make_size 128 icon_128x128.png
 make_size 256 icon_128x128@2x.png
