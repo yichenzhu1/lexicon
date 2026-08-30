@@ -257,6 +257,9 @@ func runLibraryTests(_ t: TestHarness) {
         let results = try library.search(matching: "apple")
         t.expectEqual(results.first?.displayKey, "apple", "exact match leads")
         t.expectEqual(results.first?.matchKind, .exact, "exact match is labelled")
+        let prefetched = try library.searchPrefix(matching: "apple")
+        let reused = try library.search(matching: "apple", prefixResults: prefetched)
+        t.expectEqual(reused, results, "prefetched prefix phase is reused without changing results")
 
         // "ana" appears inside "banana" but starts nothing, so it can only be
         // found by the substring tier.
@@ -286,14 +289,66 @@ func runLibraryTests(_ t: TestHarness) {
             "suggestions are labelled as such"
         )
 
+        // Candidate selection must not depend on the query's opening bytes.
+        // The former prefix bucket could never recover this typo.
+        let openingTypo = try library.search(matching: "xanana")
+        t.expect(
+            openingTypo.contains { $0.displayKey == "banana" },
+            "opening-character typo suggests banana, got \(openingTypo.map(\.displayKey))"
+        )
+
+        // Adjacent key swaps are one human typo, not two unrelated edits.
+        let transposed = try library.search(matching: "bannaa")
+        t.expect(
+            transposed.first?.displayKey == "banana",
+            "transposition ranks banana first, got \(transposed.map(\.displayKey))"
+        )
+
         // Gibberish should still come back empty rather than suggesting noise.
         t.expectEqual(try library.search(matching: "zzzzqqqq").count, 0, "no wild guesses")
+    }
+
+    t.run("library: existing index gains and maintains the trigram search index") {
+        let upgradeRoot = tempRoot.appendingPathComponent("search-index-upgrade")
+        var oldLibrary: DictionaryLibrary? = try DictionaryLibrary(rootURL: upgradeRoot)
+        _ = try oldLibrary!.importDictionary(
+            from: fixturesURL.appendingPathComponent("basic.mdx")
+        )
+        oldLibrary = nil
+
+        // Recreate the shape of a version-4 library, before entry_trigrams
+        // existed, then verify the one-time external-content rebuild.
+        do {
+            let db = try SQLiteDB(path: upgradeRoot.appendingPathComponent("index.sqlite").path)
+            try db.exec("""
+                DROP TRIGGER IF EXISTS entries_trigrams_insert;
+                DROP TRIGGER IF EXISTS entries_trigrams_delete;
+                DROP TRIGGER IF EXISTS entries_trigrams_update;
+                DROP TABLE entry_trigrams;
+                PRAGMA user_version = 4;
+                """)
+        }
+        let upgraded = try DictionaryLibrary(rootURL: upgradeRoot)
+        let suggestions = try upgraded.search(matching: "xanana")
+        t.expect(
+            suggestions.contains { $0.displayKey == "banana" },
+            "upgraded trigram index serves fuzzy candidates"
+        )
+
+        // Entry-delete triggers must remove the matching external-content rows
+        // without corrupting FTS's internal index.
+        let record = try upgraded.dictionaries().first!
+        try upgraded.unregisterDictionary(record)
+        t.expectEqual(try upgraded.search(matching: "xanana").count, 0,
+                      "unregister keeps trigram index consistent")
     }
 
     t.run("library: edit distance abandons past the limit") {
         t.expectEqual(DictionaryLibrary.editDistance("kitten", "sitting", limit: 5), 3)
         t.expectEqual(DictionaryLibrary.editDistance("abc", "abc", limit: 2), 0)
         t.expectEqual(DictionaryLibrary.editDistance("", "abc", limit: 5), 3)
+        t.expectEqual(DictionaryLibrary.editDistance("apple", "appel", limit: 1), 1,
+                      "adjacent transposition is one edit")
         // Beyond the limit the exact value does not matter, only that it is over.
         t.expect(DictionaryLibrary.editDistance("abcdef", "uvwxyz", limit: 2) > 2, "bails out")
     }

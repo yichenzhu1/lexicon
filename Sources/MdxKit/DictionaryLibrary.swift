@@ -187,6 +187,16 @@ public final class DictionaryLibrary: @unchecked Sendable {
             );
             CREATE INDEX IF NOT EXISTS idx_entries_nkey ON entries(nkey);
             CREATE INDEX IF NOT EXISTS idx_entries_dict ON entries(dict, nkey);
+            CREATE VIRTUAL TABLE IF NOT EXISTS entry_trigrams USING fts5(
+                nkey,
+                content='entries',
+                content_rowid='rowid',
+                tokenize='trigram',
+                detail='none'
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS entry_trigrams_vocab USING fts5vocab(
+                entry_trigrams, 'row'
+            );
             CREATE TABLE IF NOT EXISTS resources (
                 dict INTEGER NOT NULL,
                 part INTEGER NOT NULL,
@@ -214,14 +224,52 @@ public final class DictionaryLibrary: @unchecked Sendable {
                     "ALTER TABLE dictionaries ADD COLUMN looseResourceCount INTEGER NOT NULL DEFAULT 0"
                 )
             }
+            if previousSchemaVersion < 5 {
+                // A failed/aborted first migration may have left these behind.
+                // Until the initial rebuild completes, deletes must not emit
+                // FTS delete records for rows the empty index never contained.
+                try db.exec("""
+                    DROP TRIGGER IF EXISTS entries_trigrams_insert;
+                    DROP TRIGGER IF EXISTS entries_trigrams_delete;
+                    DROP TRIGGER IF EXISTS entries_trigrams_update;
+                    """)
+            }
         }
         try reconcileFilesystem()
+        var earlierMigrationsSucceeded = true
         if previousSchemaVersion < 4 {
             let partsRebuilt = migrateResourcePartOrdering()
             let looseCountsUpdated = refreshLooseResourceCounts()
-            if partsRebuilt && looseCountsUpdated {
-                try pool.write { db in try db.exec("PRAGMA user_version = 4") }
+            earlierMigrationsSucceeded = partsRebuilt && looseCountsUpdated
+        }
+        if previousSchemaVersion < 5 {
+            // Creating an external-content FTS table does not index rows that
+            // already exist. Rebuild once for upgraded libraries; the triggers
+            // installed below keep imports and removals synchronized afterwards.
+            try pool.write { db in
+                try db.exec("INSERT INTO entry_trigrams(entry_trigrams) VALUES('rebuild')")
+                if earlierMigrationsSucceeded { try db.exec("PRAGMA user_version = 5") }
             }
+        }
+        try installSearchIndexTriggers()
+    }
+
+    private func installSearchIndexTriggers() throws {
+        try pool.write { db in
+            try db.exec("""
+                CREATE TRIGGER IF NOT EXISTS entries_trigrams_insert AFTER INSERT ON entries BEGIN
+                    INSERT INTO entry_trigrams(rowid, nkey) VALUES (new.rowid, new.nkey);
+                END;
+                CREATE TRIGGER IF NOT EXISTS entries_trigrams_delete AFTER DELETE ON entries BEGIN
+                    INSERT INTO entry_trigrams(entry_trigrams, rowid, nkey)
+                    VALUES ('delete', old.rowid, old.nkey);
+                END;
+                CREATE TRIGGER IF NOT EXISTS entries_trigrams_update AFTER UPDATE OF nkey ON entries BEGIN
+                    INSERT INTO entry_trigrams(entry_trigrams, rowid, nkey)
+                    VALUES ('delete', old.rowid, old.nkey);
+                    INSERT INTO entry_trigrams(rowid, nkey) VALUES (new.rowid, new.nkey);
+                END;
+                """)
         }
     }
 
@@ -897,6 +945,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
     /// costs exactly what the old prefix-only search did.
     public func search(
         matching query: String, limit: Int = 60,
+        prefixResults: [SearchResult]? = nil,
         cancellation: SearchCancellationToken? = nil
     ) throws -> [SearchResult] {
         let normalized = Self.normalizeKey(query)
@@ -906,7 +955,10 @@ public final class DictionaryLibrary: @unchecked Sendable {
         var seen = Set<String>()
         var results: [SearchResult] = []
 
-        for match in try prefixMatches(normalized, limit: limit)
+        // The app paints an indexed prefix phase immediately. Accepting that
+        // phase here avoids issuing the same SQL range query a second time.
+        let indexedPrefix = try prefixResults ?? prefixMatches(normalized, limit: limit)
+        for match in indexedPrefix
         where seen.insert(match.normalizedKey).inserted {
             results.append(match)
         }
@@ -967,17 +1019,41 @@ public final class DictionaryLibrary: @unchecked Sendable {
     }
 
     /// Headwords containing the query somewhere other than the start.
-    ///
-    /// No index can serve this, so it is only reached when the prefix tier came
-    /// up short, and the LIMIT bounds how much of the scan SQLite performs.
+    /// Queries of at least three scalars use SQLite's trigram FTS index. Very
+    /// short queries keep the old scan fallback; in practice their prefix tier
+    /// normally fills the result limit before this method is reached.
     private func substringMatches(
         _ normalized: String, limit: Int, cancellation: SearchCancellationToken?
     ) throws -> [SearchResult] {
         guard limit > 0 else { return [] }
-        let pattern = Self.escapedLikePattern(normalized)
+        let scalarCount = normalized.unicodeScalars.count
         return try pool.read { db in
             try db.withProgressCancellation({ cancellation?.isCancelled ?? false }) {
-                try db.query(
+                if scalarCount >= 3 {
+                    let pattern = Self.escapedGlobPattern(normalized)
+                    return try db.query(
+                    """
+                    SELECT e.nkey, MIN(e.key), COUNT(DISTINCT e.dict)
+                    FROM entry_trigrams
+                    JOIN entries e ON e.rowid = entry_trigrams.rowid
+                    JOIN dictionaries d ON d.id = e.dict AND d.enabled = 1
+                    WHERE entry_trigrams.nkey GLOB ?
+                      AND entry_trigrams.nkey NOT GLOB ?
+                    GROUP BY e.nkey
+                    ORDER BY length(e.nkey), e.nkey
+                    LIMIT ?
+                    """,
+                    [.text("*" + pattern + "*"), .text(pattern + "*"), .int(Int64(limit))]
+                    ) { row in
+                        SearchResult(
+                            normalizedKey: row.text(0), displayKey: row.text(1),
+                            dictionaryCount: Int(row.int(2)), matchKind: .substring
+                        )
+                    }
+                }
+
+                let pattern = Self.escapedLikePattern(normalized)
+                return try db.query(
                 """
                 SELECT e.nkey, MIN(e.key), COUNT(DISTINCT e.dict)
                 FROM entries e
@@ -998,65 +1074,267 @@ public final class DictionaryLibrary: @unchecked Sendable {
         }
     }
 
-    /// Near misses, ranked by edit distance.
+    /// Near misses, ranked by bounded optimal-string-alignment distance.
     ///
-    /// Candidates come from an indexed range of headwords sharing the query's
-    /// opening characters, narrowed further by length. Longer queries use a
-    /// two-character bucket: with a one-character bucket a dictionary whose
-    /// headwords share an opening letter degenerates into a full-table scan.
-    ///
-    /// The cost is that a typo inside the bucket prefix is not caught. That is
-    /// the trade for never scanning the whole table to produce a suggestion.
+    /// The trigram index supplies candidates sharing pieces anywhere in the
+    /// word, so mistakes in the opening characters no longer hide the correct
+    /// result. A small prefix bucket improves recall after dense transpositions;
+    /// very short words use a length-bounded fallback because they have fewer
+    /// than three scalars and therefore cannot produce trigram tokens.
     private func fuzzyMatches(
         _ normalized: String, limit: Int, cancellation: SearchCancellationToken?
     ) throws -> [SearchResult] {
         guard !normalized.isEmpty else { return [] }
-        let queryLength = normalized.count
-        let bucketLength = queryLength >= 6 ? 2 : 1
-        let bucket = String(normalized.prefix(bucketLength))
-        let tolerance = queryLength <= 4 ? 1 : 2
-        let candidates = try pool.read { db in
+        let queryScalars = Array(normalized.unicodeScalars)
+        let queryLength = queryScalars.count
+        let tolerance: Int
+        switch queryLength {
+        case ...5: tolerance = 1
+        case ...10: tolerance = 2
+        default: tolerance = 3
+        }
+        let candidates = try fuzzyCandidateKeys(
+            scalars: queryScalars, tolerance: tolerance,
+            cancellation: cancellation
+        )
+
+        // Fold the query once. Building `[Character]` per candidate dominated
+        // the old loop; Unicode scalars are both faster and match SQLite's
+        // length/trigram semantics.
+        var scored: [(distance: Int, sourceOrder: Int, key: String)] = []
+        scored.reserveCapacity(min(candidates.count, 128))
+        for (index, candidate) in candidates.enumerated() {
+            if index.isMultiple(of: 128), cancellation?.isCancelled == true {
+                throw CancellationError()
+            }
+            let candidateScalars = Array(candidate.unicodeScalars)
+            guard abs(candidateScalars.count - queryScalars.count) <= tolerance else { continue }
+            let distance = Self.editDistance(queryScalars, candidateScalars, limit: tolerance)
+            if distance > 0, distance <= tolerance {
+                scored.append((distance, index, candidate))
+            }
+        }
+
+        // Resolve labels and dictionary counts only for the best candidates.
+        // This keeps aggregation off the broad FTS candidate query.
+        let shortlist = scored
+            .sorted { ($0.distance, $0.sourceOrder, $0.key) < ($1.distance, $1.sourceOrder, $1.key) }
+            .prefix(max(48, limit * 4))
+        guard !shortlist.isEmpty else { return [] }
+        let keys = shortlist.map(\.key)
+        let placeholders = Array(repeating: "?", count: keys.count).joined(separator: ",")
+        let details = try pool.read { db in
+            try db.query(
+                """
+                SELECT e.nkey, MIN(e.key), COUNT(DISTINCT e.dict)
+                FROM entries e
+                JOIN dictionaries d ON d.id = e.dict AND d.enabled = 1
+                WHERE e.nkey IN (\(placeholders))
+                GROUP BY e.nkey
+                """,
+                keys.map { .text($0) }
+            ) { row in
+                (key: row.text(0), display: row.text(1), count: Int(row.int(2)))
+            }
+        }
+        let detailsByKey = Dictionary(uniqueKeysWithValues: details.map { ($0.key, $0) })
+        return shortlist.compactMap { item -> (Int, Int, Int, SearchResult)? in
+            guard let detail = detailsByKey[item.key] else { return nil }
+            return (
+                item.distance, -detail.count, item.sourceOrder,
+                SearchResult(
+                    normalizedKey: item.key, displayKey: detail.display,
+                    dictionaryCount: detail.count, matchKind: .fuzzy
+                )
+            )
+        }
+        .sorted {
+            ($0.0, $0.1, $0.2, $0.3.normalizedKey)
+                < ($1.0, $1.1, $1.2, $1.3.normalizedKey)
+        }
+        .prefix(limit)
+        .map(\.3)
+    }
+
+    /// Indexed fuzzy candidate generation. FTS rank naturally favors words
+    /// sharing more query trigrams; exact edit distance remains the final
+    /// authority, so common fragments alone never become suggestions.
+    private func fuzzyCandidateKeys(
+        scalars: [Unicode.Scalar], tolerance: Int,
+        cancellation: SearchCancellationToken?
+    ) throws -> [String] {
+        let minLength = max(1, scalars.count - tolerance)
+        let maxLength = scalars.count + tolerance
+        var keys: [String] = []
+        var seen = Set<String>()
+
+        func append(_ rows: [String]) {
+            for key in rows where seen.insert(key).inserted { keys.append(key) }
+        }
+
+        if scalars.count >= 3 {
+            var terms: [String] = []
+            var seenTerms = Set<String>()
+            for index in 0 ... scalars.count - 3 {
+                let term = Self.string(from: scalars[index ..< index + 3])
+                if seenTerms.insert(term).inserted { terms.append(term) }
+            }
+            let selectedTerms = try fuzzyTrigramsByRarity(terms)
+            if !selectedTerms.isEmpty {
+                let match = Self.fuzzyFTSExpression(selectedTerms)
+                let rows = try pool.read { db in
+                    try db.withProgressCancellation({ cancellation?.isCancelled ?? false }) {
+                        try db.query(
+                        """
+                        SELECT e.nkey
+                        FROM entry_trigrams
+                        JOIN entries e ON e.rowid = entry_trigrams.rowid
+                        JOIN dictionaries d ON d.id = e.dict AND d.enabled = 1
+                        WHERE entry_trigrams MATCH ?
+                          AND length(e.nkey) BETWEEN ? AND ?
+                        ORDER BY rank
+                        LIMIT 6000
+                        """,
+                        [.text(match), .int(Int64(minLength)), .int(Int64(maxLength))]
+                        ) { $0.text(0) }
+                    }
+                }
+                append(rows)
+            }
+        }
+
+        // A bounded range remains cheap and catches candidates for which a
+        // short transposition destroyed most contiguous trigrams.
+        let bucket = Self.string(from: scalars[0 ..< 1])
+        let bucketRows = try pool.read { db in
             try db.withProgressCancellation({ cancellation?.isCancelled ?? false }) {
                 try db.query(
                 """
-                SELECT e.nkey, MIN(e.key), COUNT(DISTINCT e.dict)
+                SELECT e.nkey
                 FROM entries e
                 JOIN dictionaries d ON d.id = e.dict AND d.enabled = 1
                 WHERE e.nkey >= ? AND e.nkey < ?
                   AND length(e.nkey) BETWEEN ? AND ?
                 GROUP BY e.nkey
-                LIMIT 4000
+                LIMIT 2500
                 """,
                 [
                     .text(bucket), .text(bucket + "\u{10FFFF}"),
-                    .int(Int64(max(1, queryLength - tolerance))),
-                    .int(Int64(queryLength + tolerance)),
+                    .int(Int64(minLength)), .int(Int64(maxLength)),
                 ]
-                ) { row in
-                    (key: row.text(0), display: row.text(1), count: Int(row.int(2)))
-                }
+                ) { $0.text(0) }
             }
         }
+        append(bucketRows)
 
-        // Fold the query once. Building `[Character]` per candidate dominated
-        // this loop: grapheme breaking is far more expensive than the distance.
-        let queryScalars = Array(normalized.unicodeScalars)
-        let scored = candidates.compactMap { candidate -> (Int, SearchResult)? in
-            let candidateScalars = Array(candidate.key.unicodeScalars)
-            guard abs(candidateScalars.count - queryScalars.count) <= tolerance else { return nil }
-            let distance = Self.editDistance(queryScalars, candidateScalars, limit: tolerance)
-            guard distance <= tolerance else { return nil }
-            return (distance, SearchResult(
-                normalizedKey: candidate.key,
-                displayKey: candidate.display,
-                dictionaryCount: candidate.count,
-                matchKind: .fuzzy
-            ))
+        // Trigram indexes cannot represent one- and two-scalar fragments. A
+        // capped length scan gives short spelling corrections useful coverage
+        // without making normal (longer) searches pay for a table scan.
+        if scalars.count <= 4 {
+            let rows = try pool.read { db in
+                try db.withProgressCancellation({ cancellation?.isCancelled ?? false }) {
+                    try db.query(
+                    """
+                    SELECT e.nkey
+                    FROM entries e
+                    JOIN dictionaries d ON d.id = e.dict AND d.enabled = 1
+                    WHERE length(e.nkey) BETWEEN ? AND ?
+                    GROUP BY e.nkey
+                    LIMIT 30000
+                    """,
+                    [.int(Int64(minLength)), .int(Int64(maxLength))]
+                    ) { $0.text(0) }
+                }
+            }
+            append(rows)
         }
-        return scored
-            .sorted { ($0.0, $0.1.normalizedKey) < ($1.0, $1.1.normalizedKey) }
-            .prefix(limit)
-            .map(\.1)
+        return keys
+    }
+
+    /// Orders query trigrams by corpus rarity before building the FTS OR
+    /// expression. Common fragments such as "ing" can occur in hundreds of
+    /// thousands of headwords; asking BM25 to rank every one of those rows is
+    /// slower and less discriminating than starting with the rare fragments.
+    private func fuzzyTrigramsByRarity(_ terms: [String]) throws -> [String] {
+        guard !terms.isEmpty else { return [] }
+        // Keep pathological, extremely long headwords below SQLite's binding
+        // and FTS expression limits while sampling across the whole word.
+        let sampled: [String]
+        if terms.count <= 64 {
+            sampled = terms
+        } else {
+            let stride = max(1, terms.count / 64)
+            sampled = terms.enumerated().compactMap { index, term in
+                index.isMultiple(of: stride) ? term : nil
+            }.prefix(64).map(\.self)
+        }
+
+        let placeholders = Array(repeating: "?", count: sampled.count).joined(separator: ",")
+        let rows = try pool.read { db in
+            try db.query(
+                "SELECT term, doc FROM entry_trigrams_vocab WHERE term IN (\(placeholders))",
+                sampled.map { .text($0) }
+            ) { (term: $0.text(0), documents: Int($0.int(1))) }
+        }
+        let frequency = Dictionary(uniqueKeysWithValues: rows.map { ($0.term, $0.documents) })
+        let present = sampled.compactMap { term -> (String, Int)? in
+            guard let documents = frequency[term], documents > 0 else { return nil }
+            return (term, documents)
+        }
+        .sorted { ($0.1, $0.0) < ($1.1, $1.0) }
+
+        if present.count <= 4 { return present.map(\.0) }
+        var selected: [String] = []
+        var documentBudget = 0
+        for (term, documents) in present {
+            // At least two independent fragments preserve recall; beyond that,
+            // stop broadening once the summed postings become expensive.
+            if selected.count >= 2, documentBudget + documents > 120_000 { break }
+            selected.append(term)
+            documentBudget += documents
+            if selected.count == 8 { break }
+        }
+        return selected
+    }
+
+    private static func fuzzyFTSExpression(_ terms: [String]) -> String {
+        let quoted = terms.map(quotedFTSTerm)
+        guard quoted.count >= 5 else { return quoted.joined(separator: " OR ") }
+
+        // For longer words, require any two of the rare selected trigrams.
+        // This preserves normal typo recall while preventing one common
+        // fragment from making BM25 rank an enormous postings list.
+        var pairs: [String] = []
+        pairs.reserveCapacity(quoted.count * (quoted.count - 1) / 2)
+        for left in 0 ..< quoted.count - 1 {
+            for right in left + 1 ..< quoted.count {
+                pairs.append("(\(quoted[left]) AND \(quoted[right]))")
+            }
+        }
+        return pairs.joined(separator: " OR ")
+    }
+
+    private static func string(from scalars: ArraySlice<Unicode.Scalar>) -> String {
+        var result = ""
+        result.unicodeScalars.append(contentsOf: scalars)
+        return result
+    }
+
+    private static func quotedFTSTerm(_ value: String) -> String {
+        "\"" + value.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+    }
+
+    private static func escapedGlobPattern(_ value: String) -> String {
+        var escaped = ""
+        for scalar in value.unicodeScalars {
+            switch scalar {
+            case "*": escaped += "[*]"
+            case "?": escaped += "[?]"
+            case "[": escaped += "[[]"
+            default: escaped.unicodeScalars.append(scalar)
+            }
+        }
+        return escaped
     }
 
     private static func escapedLikePattern(_ value: String) -> String {
@@ -1067,7 +1345,9 @@ public final class DictionaryLibrary: @unchecked Sendable {
         return escaped
     }
 
-    /// Levenshtein distance, abandoned as soon as it exceeds `limit`.
+    /// Restricted Damerau-Levenshtein (optimal string alignment) distance,
+    /// abandoned as soon as it exceeds `limit`. An adjacent transposition is
+    /// one edit, which better reflects ordinary typing errors.
     public static func editDistance(_ a: String, _ b: String, limit: Int) -> Int {
         editDistance(Array(a.unicodeScalars), Array(b.unicodeScalars), limit: limit)
     }
@@ -1081,18 +1361,29 @@ public final class DictionaryLibrary: @unchecked Sendable {
         if lhs.isEmpty { return rhs.count }
         if rhs.isEmpty { return lhs.count }
 
-        var previous = Array(0 ... rhs.count)
-        var current = [Int](repeating: 0, count: rhs.count + 1)
+        let outside = limit + 1
+        var previousPrevious = [Int](repeating: outside, count: rhs.count + 1)
+        var previous = (0 ... rhs.count).map { min($0, outside) }
+        var current = [Int](repeating: outside, count: rhs.count + 1)
         for i in 1 ... lhs.count {
-            current[0] = i
-            var rowBest = current[0]
-            for j in 1 ... rhs.count {
+            current[0] = min(i, outside)
+            let lower = max(1, i - limit)
+            let upper = min(rhs.count, i + limit)
+            if lower > 1 { current[lower - 1] = outside }
+            var rowBest = outside
+            if lower > upper { return outside }
+            for j in lower ... upper {
                 let substitution = previous[j - 1] + (lhs[i - 1] == rhs[j - 1] ? 0 : 1)
                 current[j] = min(substitution, previous[j] + 1, current[j - 1] + 1)
+                if i > 1, j > 1,
+                   lhs[i - 1] == rhs[j - 2], lhs[i - 2] == rhs[j - 1] {
+                    current[j] = min(current[j], previousPrevious[j - 2] + 1)
+                }
                 rowBest = min(rowBest, current[j])
             }
-            // Every later row can only grow, so this row settles the question.
-            if rowBest > limit { return limit + 1 }
+            if upper < rhs.count { current[upper + 1] = outside }
+            if rowBest > limit { return outside }
+            swap(&previousPrevious, &previous)
             swap(&previous, &current)
         }
         return previous[rhs.count]

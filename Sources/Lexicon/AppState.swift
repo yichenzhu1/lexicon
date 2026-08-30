@@ -86,7 +86,7 @@ final class AppState: ObservableObject {
         let generation = searchGeneration
         let query = searchText
         searchTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(120))
+            try? await Task.sleep(for: .milliseconds(75))
             guard !Task.isCancelled else { return }
             await self?.performSearch(query, generation: generation, cancellation: cancellation)
         }
@@ -122,7 +122,10 @@ final class AppState: ObservableObject {
             results = initial
 
             let found = try await Task.detached(priority: .userInitiated) {
-                try library.search(matching: trimmed, limit: 80, cancellation: cancellation)
+                try library.search(
+                    matching: trimmed, limit: 80,
+                    prefixResults: initial, cancellation: cancellation
+                )
             }.value
             guard generation == searchGeneration, !Task.isCancelled else { return }
             results = found

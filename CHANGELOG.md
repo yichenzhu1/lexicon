@@ -4,6 +4,9 @@ All notable changes to Lexicon are documented here.
 
 ## Unreleased
 
+- Search now uses an indexed trigram path for substring and typo candidates,
+  recognizes adjacent-letter transpositions, catches mistakes at the start of
+  a word, and avoids repeating the prefix query between incremental phases.
 - Sidebar section changes now use one consistent, direction-aware horizontal
   transition: the Lexicon/History/Starred thumb glides while each section's
   status row and list travel together as one pane, without vertical jumping.
