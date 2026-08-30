@@ -216,13 +216,16 @@ struct ContentView: View {
                         appState.goBack()
                     } label: {
                         Image(systemName: "chevron.left")
-                            .frame(width: 28, height: 28)
-                            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .frame(
+                                width: ChromeMetrics.toolbarButtonSize,
+                                height: ChromeMetrics.toolbarButtonSize
+                            )
+                            .contentShape(toolbarButtonShape)
                     }
                     .buttonStyle(.plain)
                     .glassEffect(
                         .regular.interactive(),
-                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        in: toolbarButtonShape
                     )
                     .glassEffectID("back", in: toolbarGlass)
                     .help("Back")
@@ -234,13 +237,16 @@ struct ContentView: View {
                         appState.goForward()
                     } label: {
                         Image(systemName: "chevron.right")
-                            .frame(width: 28, height: 28)
-                            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .frame(
+                                width: ChromeMetrics.toolbarButtonSize,
+                                height: ChromeMetrics.toolbarButtonSize
+                            )
+                            .contentShape(toolbarButtonShape)
                     }
                     .buttonStyle(.plain)
                     .glassEffect(
                         .regular.interactive(),
-                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        in: toolbarButtonShape
                     )
                     .glassEffectID("forward", in: toolbarGlass)
                     .help("Forward")
@@ -252,7 +258,10 @@ struct ContentView: View {
 
             WindowDragRegion(minLength: 8)
             searchField
-                .frame(minWidth: 220, idealWidth: 360, maxWidth: 560)
+                .frame(minWidth: 260, idealWidth: 400, maxWidth: 640)
+                // Prefer a comfortably wide lookup target before handing
+                // spare toolbar space to the surrounding drag regions.
+                .layoutPriority(1)
             WindowDragRegion(minLength: 8)
 
             // The star acts on the current entry, so it lives with the entry
@@ -266,13 +275,16 @@ struct ContentView: View {
                     } label: {
                         Image(systemName: bookmarkIconName)
                             .scaleEffect(starPulse ? 1.22 : 1)
-                            .frame(width: 28, height: 28)
-                            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .frame(
+                                width: ChromeMetrics.toolbarButtonSize,
+                                height: ChromeMetrics.toolbarButtonSize
+                            )
+                            .contentShape(toolbarButtonShape)
                     }
                     .buttonStyle(.plain)
                     .glassEffect(
                         .regular.interactive(),
-                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        in: toolbarButtonShape
                     )
                     .glassEffectID("bookmark", in: toolbarGlass)
                     .help(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
@@ -283,13 +295,16 @@ struct ContentView: View {
                         appState.showDictionaryManager = true
                     } label: {
                         Image(systemName: "books.vertical")
-                            .frame(width: 28, height: 28)
-                            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .frame(
+                                width: ChromeMetrics.toolbarButtonSize,
+                                height: ChromeMetrics.toolbarButtonSize
+                            )
+                            .contentShape(toolbarButtonShape)
                     }
                     .buttonStyle(.plain)
                     .glassEffect(
                         .regular.interactive(),
-                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        in: toolbarButtonShape
                     )
                     .glassEffectID("dictionaries", in: toolbarGlass)
                     .help("Manage dictionaries")
@@ -299,13 +314,16 @@ struct ContentView: View {
                         appState.openNewTab()
                     } label: {
                         Image(systemName: "plus")
-                            .frame(width: 28, height: 28)
-                            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .frame(
+                                width: ChromeMetrics.toolbarButtonSize,
+                                height: ChromeMetrics.toolbarButtonSize
+                            )
+                            .contentShape(toolbarButtonShape)
                     }
                     .buttonStyle(.plain)
                     .glassEffect(
                         .regular.interactive(),
-                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        in: toolbarButtonShape
                     )
                     .glassEffectID("newTab", in: toolbarGlass)
                     .help("New Tab")
@@ -321,9 +339,8 @@ struct ContentView: View {
         )
         .padding(.trailing, ChromeMetrics.horizontalInset)
         // A two-point optical correction centers the controls between the
-        // window's top edge and the tab pill below: the row's 10pt of slack
-        // splits 7/3, so the 7pt above the controls matches the 3pt below
-        // plus the tab pill's 4pt top margin.
+        // window's top edge and the tab pill below while accounting for the
+        // tab pill's top margin.
         .offset(y: ChromeMetrics.toolbarContentVerticalOffset)
         .frame(height: ChromeMetrics.toolbarRowHeight)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -362,13 +379,16 @@ struct ContentView: View {
         } label: {
             Image(systemName: "sidebar.left")
                 .font(.system(size: 13, weight: .medium))
-                .frame(width: 28, height: 28)
-                .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .frame(
+                    width: ChromeMetrics.toolbarButtonSize,
+                    height: ChromeMetrics.toolbarButtonSize
+                )
+                .contentShape(toolbarButtonShape)
         }
         .buttonStyle(.plain)
         .glassEffect(
             .regular.interactive(),
-            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            in: toolbarButtonShape
         )
         .foregroundStyle(.secondary)
         .help(sidebarVisible ? "Hide Sidebar" : "Show Sidebar")
@@ -508,9 +528,9 @@ struct ContentView: View {
                 }
         }
             .padding(.horizontal, 10)
-            // Matches the toolbar capsules (32pt), so the field and the
+            // Matches the Safari-sized toolbar capsules, so the field and the
             // button groups share one height and one vertical rhythm.
-            .frame(height: ChromeMetrics.controlHeight)
+            .frame(height: ChromeMetrics.toolbarControlHeight)
             .background {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(.clear)
@@ -560,6 +580,13 @@ struct ContentView: View {
 
     private var bookmarkIconName: String {
         isCurrentWordStarred ? "bookmark.fill" : "bookmark"
+    }
+
+    private var toolbarButtonShape: RoundedRectangle {
+        RoundedRectangle(
+            cornerRadius: ChromeMetrics.toolbarButtonCornerRadius,
+            style: .continuous
+        )
     }
 
     /// The sidebar behaves like a browser side panel: lookup results, history
@@ -955,15 +982,26 @@ private struct SavedSidebarWord: Identifiable {
 /// sidebar edge, the tab-strip baseline, and the jump-bar edges read as one
 /// line. Hit areas may be wider, but the visible rule never changes.
 private enum ChromeMetrics {
-    static let toolbarRowHeight: CGFloat = 42
+    static let toolbarRowHeight: CGFloat = 50
     static let tabStripRowHeight: CGFloat = 38
-    static let controlHeight: CGFloat = 32
+    static let toolbarControlHeight: CGFloat = 36
+    static let tabStripContentHeight: CGFloat = 32
+    static let toolbarButtonSize: CGFloat = 36
+    static let toolbarButtonCornerRadius: CGFloat = 10
     static let toolbarContentVerticalOffset: CGFloat = 2
     static let horizontalInset: CGFloat = 8
     static let sidebarContentInset: CGFloat = 7
     static let sidebarModeButtonHeight: CGFloat = 26
     static let sidebarModeVerticalOffset: CGFloat = -1
     static let trafficLightInset: CGFloat = 82
+    static let trafficLightHorizontalOffset: CGFloat = 8
+    /// AppKit lays out the native controls against its compact title-bar row.
+    /// Center them in Lexicon's taller custom toolbar without resizing their
+    /// system-standard artwork or spacing.
+    static let trafficLightReferenceRowHeight: CGFloat = 32
+    static var trafficLightVerticalOffset: CGFloat {
+        -(toolbarRowHeight - trafficLightReferenceRowHeight) / 2
+    }
     static let splitterHitWidth: CGFloat = 7
     static let separatorThickness: CGFloat = 1
 
@@ -1060,7 +1098,7 @@ private struct ChromeSeparator: View {
 }
 
 /// Keeps custom full-size window chrome aligned with macOS window state.
-/// Normal windows receive a small optical correction for the traffic lights;
+/// Normal windows center their native traffic lights in Lexicon's toolbar;
 /// fullscreen windows stop ignoring the system safe area and reclaim the space
 /// that those controls occupied.
 private struct WindowChromeBridge: NSViewRepresentable {
@@ -1190,8 +1228,8 @@ private final class WindowChromeProbeView: NSView {
                 originalButtonFrames[type] = button.frame
             }
             guard var target = originalButtonFrames[type] else { continue }
-            target.origin.x += 8
-            target.origin.y -= 5
+            target.origin.x += ChromeMetrics.trafficLightHorizontalOffset
+            target.origin.y += ChromeMetrics.trafficLightVerticalOffset
 
             if animated {
                 NSAnimationContext.runAnimationGroup { context in
@@ -1295,7 +1333,7 @@ private struct BrowserTabBar: View {
             .frame(width: proxy.size.width, alignment: .leading)
             .animation(.smooth(duration: 0.2), value: appState.tabs.map(\.id))
         }
-        .frame(height: ChromeMetrics.controlHeight)
+        .frame(height: ChromeMetrics.tabStripContentHeight)
     }
 
     private func tabView(
