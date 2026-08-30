@@ -27,7 +27,7 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // Command Line Tools ship neither XCTest nor swift-testing, so unit
-        // tests run through this standalone executable: `swift run mdxkit-tests`
+        // tests run through this standalone executable: `swift run MdxKitTester`
         .executableTarget(
             name: "MdxKitTester",
             dependencies: ["MdxKit"],

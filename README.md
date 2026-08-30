@@ -13,11 +13,12 @@ dictionary can optionally load under Settings → Dictionary Content.
 Lexicon ships no dictionary content. You supply `.mdx` files (with their
 `.mdd` resource companions) that you have obtained yourself.
 
-Looking for dictionaries? I've always been a big fan of the dictionary files shared 
-by [karx on the FreeMdict forum](https://forum.freemdict.com/u/karx/summary), 
-and the app has the best dictionary support for them right now. Of course, you can also browse and download dictionaries you like on the forum. 
-If you run into any issues, please feel 
-free to send feedback and I'll do my best to support them.
+Looking for dictionaries? I've always been a big fan of the dictionary files
+shared by [karx on the FreeMdict forum](https://forum.freemdict.com/u/karx/summary),
+and the app has the best dictionary support for them right now. Of course, you
+can also browse and download dictionaries you like on the forum. If you run
+into any issues, please feel free to send feedback and I'll do my best to
+support them.
 
 <p align="center">
   <img src="docs/images/lexicon-0.2.0-preview.png" alt="Lexicon displaying an entry on macOS">
@@ -47,7 +48,8 @@ listed in the release notes rather than encoded in the filename.
   all remembered between launches.
 - **Live translation.** Compatible OED/ODE/Longman dictionaries translate
   definitions and examples via Apple Translation (on-device), Google Cloud,
-  DeepL, or Alibaba DashScope. See *Live translation* below.
+  DeepL, OpenAI, DeepSeek, Gemini, Claude, or Alibaba DashScope. See *Live
+  translation* below.
 - **Sentence text-to-speech.** System voices or Google Cloud Chirp 3 HD
   voices, plus pronunciation audio (`sound://`) played from `.mdd` resources.
   See *Text-to-speech* below.
@@ -80,32 +82,67 @@ Local builds are ad-hoc signed and are for development or trusted internal
 testing only. Override the default version or build number when needed:
 
 ```sh
-LEXICON_VERSION=0.2.0 LEXICON_BUILD_NUMBER=2 scripts/make_app.sh
+LEXICON_VERSION=0.4.0 LEXICON_BUILD_NUMBER=4 scripts/make_app.sh
 ```
 
 ## GitHub release
 
-1. Update `CHANGELOG.md`, then run `swift run MdxKitTester`.
-2. Build the release archive:
+1. Update `CHANGELOG.md`, then run the complete release checks:
 
    ```sh
-   LEXICON_VERSION=0.2.0 LEXICON_BUILD_NUMBER=2 scripts/release.sh
+   swift build -Xswiftc -warnings-as-errors
+   swift run -Xswiftc -warnings-as-errors MdxKitTester
+   swift run -Xswiftc -warnings-as-errors Lexicon --tab-state-test
+   swift run -Xswiftc -warnings-as-errors Lexicon --tab-webview-test
+   swift run MdxKitTester seed /tmp/lexicon-smoke
+   LEXICON_ROOT=/tmp/lexicon-smoke swift run -c release Lexicon --smoke-test
    ```
 
-   This writes `dist/Lexicon.zip`. The version is embedded in the app's
-   `Info.plist`, not in the archive filename.
+2. Store notarization credentials once, then build a Developer ID-signed,
+   hardened-runtime, notarized archive:
+
+   ```sh
+   xcrun notarytool store-credentials lexicon-notary \
+     --apple-id "you@example.com" \
+     --team-id "YOUR_TEAM_ID"
+
+   LEXICON_VERSION=0.4.0 \
+   LEXICON_BUILD_NUMBER=4 \
+   LEXICON_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+   LEXICON_NOTARY_PROFILE=lexicon-notary \
+   scripts/release.sh
+   ```
+
+   `notarytool` prompts securely for the app-specific password instead of
+   placing it in shell history.
+
+   This writes `dist/Lexicon.zip` and `dist/Lexicon.zip.sha256`. The script
+   verifies the signature, waits for Apple notarization, staples and validates
+   the ticket, runs a Gatekeeper assessment, and creates the final archive.
+   The version is embedded in the app's `Info.plist`, not in the filename.
+
+   Verify a downloaded archive and checksum from the directory containing both:
+
+   ```sh
+   shasum -a 256 -c Lexicon.zip.sha256
+   ```
+
+   Running `scripts/release.sh` without both release credentials still creates
+   an ad-hoc-signed archive for internal testing, but that artifact must not be
+   published.
 
 3. Commit all release changes.
 4. Tag the exact commit, push, and publish the ZIP:
 
    ```sh
-   git tag -a v0.2.0 -m "Lexicon 0.2.0"
+   git tag -a v0.4.0 -m "Lexicon 0.4.0"
    git push origin main
-   git push origin v0.2.0
+   git push origin v0.4.0
    gh auth login
-   gh release create v0.2.0 \
+   gh release create v0.4.0 \
      dist/Lexicon.zip \
-     --title "Lexicon 0.2.0" \
+     dist/Lexicon.zip.sha256 \
+     --title "Lexicon 0.4.0" \
      --generate-notes
    ```
 

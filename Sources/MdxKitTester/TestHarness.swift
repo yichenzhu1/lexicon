@@ -2,7 +2,7 @@ import Foundation
 
 /// Minimal test harness: Xcode Command Line Tools ship neither XCTest nor
 /// swift-testing, so MdxKit is verified by this standalone runner
-/// (`swift run mdxkit-tests`).
+/// (`swift run MdxKitTester`).
 final class TestHarness {
     private(set) var failures = 0
     private(set) var passed = 0

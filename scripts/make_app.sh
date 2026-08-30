@@ -4,8 +4,8 @@
 # Usage: scripts/make_app.sh
 #
 # Optional environment variables:
-#   LEXICON_VERSION           User-facing version (defaults to 0.3.0)
-#   LEXICON_BUILD_NUMBER      Monotonically increasing integer (defaults to 3)
+#   LEXICON_VERSION           User-facing version (defaults to 0.4.0)
+#   LEXICON_BUILD_NUMBER      Monotonically increasing integer (defaults to 4)
 #   LEXICON_SIGNING_IDENTITY  Developer ID identity; unset uses ad-hoc signing
 #
 # CFBundleIdentifier below is how macOS identifies the app (preferences,
@@ -14,8 +14,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="${LEXICON_VERSION:-0.3.0}"
-BUILD_NUMBER="${LEXICON_BUILD_NUMBER:-3}"
+VERSION="${LEXICON_VERSION:-0.4.0}"
+BUILD_NUMBER="${LEXICON_BUILD_NUMBER:-4}"
 SIGNING_IDENTITY="${LEXICON_SIGNING_IDENTITY:--}"
 
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -63,13 +63,16 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSApplicationCategoryType</key> <string>public.app-category.reference</string>
     <key>LSMinimumSystemVersion</key>    <string>26.0</string>
     <key>NSHighResolutionCapable</key>   <true/>
+    <key>NSHumanReadableCopyright</key>  <string>Copyright © 2026 Yichen Zhu</string>
     <key>NSPrincipalClass</key>          <string>NSApplication</string>
 </dict>
 </plist>
 PLIST
 
 if [[ "$SIGNING_IDENTITY" == "-" ]]; then
-    codesign --force --sign - "$APP"
+    # Exercise the same runtime restrictions as the public build even when a
+    # local machine does not have a Developer ID certificate.
+    codesign --force --options runtime --sign - "$APP"
     echo "warning: built with an ad-hoc signature; do not publish this bundle as a public release" >&2
 else
     codesign \
@@ -80,5 +83,7 @@ else
         "$APP"
 fi
 
+plutil -lint "$APP/Contents/Info.plist"
+codesign --verify --deep --strict --verbose=2 "$APP"
 ARCHITECTURES="$(lipo -archs "$APP/Contents/MacOS/Lexicon")"
 echo "Built $APP ($VERSION, build $BUILD_NUMBER, $ARCHITECTURES)"

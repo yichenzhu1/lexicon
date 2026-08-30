@@ -391,11 +391,9 @@ enum DictionaryTranslationService {
         guard !source.isEmpty else {
             throw TranslationServiceError(message: "The dictionary supplied no text to translate.")
         }
-        var components = URLComponents(
+        guard let url = URL(
             string: "https://translation.googleapis.com/language/translate/v2"
-        )!
-        components.queryItems = [URLQueryItem(name: "key", value: apiKey)]
-        guard let url = components.url else {
+        ) else {
             throw TranslationServiceError(message: "Could not construct the Google request.")
         }
 
@@ -407,6 +405,10 @@ enum DictionaryTranslationService {
         request.httpMethod = "POST"
         request.timeoutInterval = 30
         request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        // Keep credentials out of the URL, where proxies and diagnostic logs
+        // commonly record them. Google recommends this header for REST API
+        // keys and Cloud Translation v2 accepts it.
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.httpBody = try JSONEncoder().encode(
             GoogleRequest(q: [source], format: containsMarkup ? "html" : "text")
         )

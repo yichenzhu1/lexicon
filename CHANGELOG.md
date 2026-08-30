@@ -4,9 +4,24 @@ All notable changes to Lexicon are documented here.
 
 ## Unreleased
 
+## 0.4.0 — 2026-08-31
+
 - Search now uses an indexed trigram path for substring and typo candidates,
   recognizes adjacent-letter transpositions, catches mistakes at the start of
-  a word, and avoids repeating the prefix query between incremental phases.
+  a word, cancels obsolete work, and avoids repeating the prefix query between
+  incremental phases. Existing libraries upgrade their search index in place.
+- Added OpenAI, DeepSeek, Google Gemini, and Anthropic Claude as live
+  translation providers alongside Alibaba DashScope. Each provider has an
+  editable model name and its own API key stored in macOS Keychain.
+- Google Cloud Translation credentials are now sent in the recommended
+  `x-goog-api-key` header instead of being embedded in request URLs.
+- Fixed Oxford `OX` controls colliding across dictionary frames, including
+  entries from multiple dictionaries, while preserving per-frame scrolling,
+  anchors, and native translation compatibility.
+- Toolbar controls no longer initiate accidental window dragging, the search
+  row has more usable width, and duplicate focus changes on scene activation
+  have been removed.
+- Updated the app icon.
 - Sidebar section changes now use one consistent, direction-aware horizontal
   transition: the Lexicon/History/Starred thumb glides while each section's
   status row and list travel together as one pane, without vertical jumping.
@@ -31,6 +46,9 @@ All notable changes to Lexicon are documented here.
   float as glass overlays. The dictionary manager's Import, Done, and
   import-cancel buttons use the system glass button styles, with Done
   prominent.
+- Release packaging now validates the bundle signature, supports Developer ID
+  notarization and ticket stapling, and emits a SHA-256 checksum alongside the
+  archive.
 
 ## 0.2.0 — 2026-08-17
 
