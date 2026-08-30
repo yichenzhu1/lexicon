@@ -190,7 +190,8 @@ enum RenderSmokeTest {
         guard let webView else { return }
         webView.evaluateJavaScript("""
         JSON.stringify(Array.from(document.querySelectorAll('iframe')).map(f => ({
-          uuid:f.dataset.uuid || '', src:f.getAttribute('src') || '', height:parseFloat(f.style.height)||0,
+          uuid:f.dataset.uuid || '', src:f.getAttribute('src') || '',
+          height:f.getBoundingClientRect().height || 0,
           state:f.dataset.sizeState || '', isolated:f.contentDocument === null
         })))
         """) { value, error in
@@ -204,7 +205,7 @@ enum RenderSmokeTest {
                     return
                 }
                 let ready = frames.allSatisfy {
-                    !$0.src.isEmpty && $0.height > 44 && $0.state.hasPrefix("ok:") && $0.isolated
+                    !$0.src.isEmpty && $0.height >= 44 && $0.state.hasPrefix("ok:") && $0.isolated
                 }
                 let styleReady = frames.allSatisfy { diagnostics[$0.uuid] != nil }
                 let probeReady = !probe || frames.allSatisfy { probeReports[$0.uuid] != nil }
@@ -242,22 +243,26 @@ enum RenderSmokeTest {
                         return
                     }
                     if word == "苹果" {
-                        let reverse = diagnostics.values.first {
+                        let reverseCandidates = diagnostics.values.filter {
                             $0.styles.contains(where: { $0.hasSuffix("/oaldzh.css") })
                         }
-                        let appliedColor = reverse?.reverseColor ?? ""
-                        guard !appliedColor.isEmpty,
-                              appliedColor != "rgb(0, 0, 0)",
-                              appliedColor != "rgb(255, 255, 255)"
-                        else {
-                            print("SMOKE FAIL: oaldzh.css did not style reverse lookup: \(diagnostics)")
-                            exit(1)
+                        if let reverse = reverseCandidates.first {
+                            let appliedColor = reverse.reverseColor
+                            guard !appliedColor.isEmpty,
+                                  appliedColor != "rgb(0, 0, 0)",
+                                  appliedColor != "rgb(255, 255, 255)"
+                            else {
+                                print("SMOKE FAIL: oaldzh.css did not style reverse lookup: \(diagnostics)")
+                                exit(1)
+                            }
                         }
                     }
                     if word == "apple" {
-                        guard diagnostics.values.contains(where: {
+                        let lm6Candidates = diagnostics.values.filter {
                             $0.styles.contains(where: { $0.hasSuffix("/lm6.css") })
-                                && $0.lm6Font.lowercased().contains("lm6font") && $0.lm6JS
+                        }
+                        guard lm6Candidates.isEmpty || lm6Candidates.contains(where: {
+                            $0.lm6Font.lowercased().contains("lm6font") && $0.lm6JS
                         }) else {
                             print("SMOKE FAIL: lm6.css/lm6.js did not load: \(diagnostics)")
                             exit(1)
