@@ -5,7 +5,6 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var libraryModel: LibraryModel
-    @Environment(\.scenePhase) private var scenePhase
     @FocusState private var searchFocused: Bool
     @State private var sidebarMode: SidebarMode =
         SidebarMode(rawValue: LibraryModel.storedSidebarMode) ?? .lexicon
@@ -131,6 +130,12 @@ struct ContentView: View {
             .hidden()
         }
         .onAppear {
+            // Do not repeat this from scenePhase == .active. Both callbacks
+            // fire during launch, and macOS 26 may create two TextInputUI
+            // cursor services for the same field. Cancellation of the second
+            // service can leave its empty remote-view panel on screen.
+            // AppKit already preserves the current first responder when an
+            // existing window is reactivated.
             focusSearchField()
             #if DEBUG
             // Debug hook: auto-look-up a word at launch so layout issues can
@@ -142,9 +147,6 @@ struct ContentView: View {
                 }
             }
             #endif
-        }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .active { focusSearchField() }
         }
         .onChange(of: appState.searchText) { _, text in
             let searching = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -479,6 +481,9 @@ struct ContentView: View {
                 prompt: Text("Search all dictionaries…")
             )
                 .textFieldStyle(.plain)
+                // Dictionary queries are literal. Let Lexicon's own fuzzy
+                // search handle typos rather than changing the user's text.
+                .autocorrectionDisabled()
                 .focused($searchFocused)
                 .onSubmit {
                     if let first = appState.results.first {
