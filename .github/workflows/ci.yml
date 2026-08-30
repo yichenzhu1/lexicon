@@ -42,6 +42,6 @@ jobs:
           test -s build/Lexicon.app/Contents/Resources/Lexicon.icns
           test -s build/Lexicon.app/Contents/Resources/LICENSE.txt
           test -s build/Lexicon.app/Contents/Resources/THIRD_PARTY_NOTICES.md
-          test "$(plutil -extract CFBundleShortVersionString raw build/Lexicon.app/Contents/Info.plist)" = "0.4.0"
-          test "$(plutil -extract CFBundleVersion raw build/Lexicon.app/Contents/Info.plist)" = "4"
+          test "$(plutil -extract CFBundleShortVersionString raw build/Lexicon.app/Contents/Info.plist)" = "0.3.0"
+          test "$(plutil -extract CFBundleVersion raw build/Lexicon.app/Contents/Info.plist)" = "3"
           codesign --verify --deep --strict --verbose=2 build/Lexicon.app

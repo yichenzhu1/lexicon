@@ -4,7 +4,7 @@ All notable changes to Lexicon are documented here.
 
 ## Unreleased
 
-## 0.4.0 — 2026-08-31
+## 0.3.0 — 2026-08-31
 
 - Search now uses an indexed trigram path for substring and typo candidates,
   recognizes adjacent-letter transpositions, catches mistakes at the start of

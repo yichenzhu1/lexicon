@@ -82,7 +82,7 @@ Local builds are ad-hoc signed and are for development or trusted internal
 testing only. Override the default version or build number when needed:
 
 ```sh
-LEXICON_VERSION=0.4.0 LEXICON_BUILD_NUMBER=4 scripts/make_app.sh
+LEXICON_VERSION=0.3.0 LEXICON_BUILD_NUMBER=3 scripts/make_app.sh
 ```
 
 ## GitHub release
@@ -106,8 +106,8 @@ LEXICON_VERSION=0.4.0 LEXICON_BUILD_NUMBER=4 scripts/make_app.sh
      --apple-id "you@example.com" \
      --team-id "YOUR_TEAM_ID"
 
-   LEXICON_VERSION=0.4.0 \
-   LEXICON_BUILD_NUMBER=4 \
+   LEXICON_VERSION=0.3.0 \
+   LEXICON_BUILD_NUMBER=3 \
    LEXICON_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
    LEXICON_NOTARY_PROFILE=lexicon-notary \
    scripts/release.sh
@@ -135,14 +135,14 @@ LEXICON_VERSION=0.4.0 LEXICON_BUILD_NUMBER=4 scripts/make_app.sh
 4. Tag the exact commit, push, and publish the ZIP:
 
    ```sh
-   git tag -a v0.4.0 -m "Lexicon 0.4.0"
+   git tag -a v0.3.0 -m "Lexicon 0.3.0"
    git push origin main
-   git push origin v0.4.0
+   git push origin v0.3.0
    gh auth login
-   gh release create v0.4.0 \
+   gh release create v0.3.0 \
      dist/Lexicon.zip \
      dist/Lexicon.zip.sha256 \
-     --title "Lexicon 0.4.0" \
+     --title "Lexicon 0.3.0" \
      --generate-notes
    ```
 
