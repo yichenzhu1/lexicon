@@ -27,6 +27,11 @@ struct LexiconApp: App {
         }
         .defaultSize(width: 1000, height: 680)
         .windowStyle(.hiddenTitleBar)
+        // The custom chrome extends through the hidden title bar. Automatic
+        // background dragging makes controls in that area move the window
+        // when a click turns into a drag, so only explicit blank regions in
+        // ContentView can move the window instead.
+        .windowBackgroundDragBehavior(.disabled)
         .commands {
             LexiconCommands()
         }

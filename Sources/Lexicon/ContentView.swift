@@ -250,10 +250,10 @@ struct ContentView: View {
                 }
             }
 
-            Spacer(minLength: 8)
+            WindowDragRegion(minLength: 8)
             searchField
                 .frame(minWidth: 220, idealWidth: 360, maxWidth: 560)
-            Spacer(minLength: 8)
+            WindowDragRegion(minLength: 8)
 
             // The star acts on the current entry, so it lives with the entry
             // controls trailing the search field, not with navigation.
@@ -346,7 +346,7 @@ struct ContentView: View {
     /// toolbar controls form one visual row across the window top.
     private var sidebarTopRegion: some View {
         HStack(spacing: 0) {
-            Spacer(minLength: 0)
+            WindowDragRegion()
             sidebarToggleButton
         }
         .padding(.trailing, ChromeMetrics.horizontalInset)
@@ -972,6 +972,62 @@ private enum ChromeMetrics {
     }
 }
 
+/// A deliberately non-functional part of the custom title bar that can move
+/// the window. Window background dragging is disabled at the scene level so
+/// controls and tabs never inherit this gesture accidentally.
+private struct WindowDragRegion: View {
+    var minLength: CGFloat = 0
+
+    var body: some View {
+        ExplicitWindowDragRegion()
+            .frame(minWidth: minLength, maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct ExplicitWindowDragRegion: NSViewRepresentable {
+    func makeNSView(context: Context) -> ExplicitWindowDragRegionView {
+        ExplicitWindowDragRegionView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: ExplicitWindowDragRegionView, context: Context) {}
+}
+
+/// The one native hit-test target that is allowed to begin window movement.
+/// The window itself is non-movable, so this view updates its frame directly
+/// while the pointer is held. No control can enter this code path.
+private final class ExplicitWindowDragRegionView: NSView {
+    private var dragStartMouseLocation: NSPoint?
+    private var dragStartWindowOrigin: NSPoint?
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        dragStartMouseLocation = NSEvent.mouseLocation
+        dragStartWindowOrigin = window.frame.origin
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let window,
+              let dragStartMouseLocation,
+              let dragStartWindowOrigin
+        else { return }
+
+        let mouseLocation = NSEvent.mouseLocation
+        window.setFrameOrigin(NSPoint(
+            x: dragStartWindowOrigin.x + mouseLocation.x - dragStartMouseLocation.x,
+            y: dragStartWindowOrigin.y + mouseLocation.y - dragStartMouseLocation.y
+        ))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        dragStartMouseLocation = nil
+        dragStartWindowOrigin = nil
+    }
+}
+
 private struct ChromeSeparator: View {
     enum Orientation {
         case horizontal
@@ -1055,6 +1111,14 @@ private final class WindowChromeProbeView: NSView {
         observedWindow = window
         originalButtonFrames.removeAll()
         guard let window else { return }
+
+        // The transparent NSHostingView beneath pure SwiftUI buttons reports
+        // mouseDownCanMoveWindow == true in a hidden title bar. Disable native
+        // movement for the entire window so no functional control can ever
+        // become a title-bar drag source. ExplicitWindowDragRegionView is the
+        // sole code path that changes the frame in response to a pointer drag.
+        window.isMovableByWindowBackground = false
+        window.isMovable = false
 
         NotificationCenter.default.addObserver(
             self,
