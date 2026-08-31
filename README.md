@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Assets/AppIcon.png" alt="Lexicon app icon" width="128">
+  <img src="Assets/AppIcon.png" alt="Lexicon app icon" width="200">
 </p>
 
 <h1 align="center">Lexicon</h1>
