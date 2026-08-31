@@ -1,11 +1,12 @@
 #!/bin/bash
-# Builds the macOS .icns file from the canonical 1024×1024 PNG.
-# The source must be full-bleed and opaque. macOS 26 places pre-masked legacy
-# icons with transparent corners inside a smaller gray compatibility plate.
+# Builds the macOS .icns file from the canonical full-bleed 1024×1024 source.
+# Assets/AppIcon.png is the rounded presentation image used by README. The
+# install source must stay opaque and unmasked so macOS can apply its native
+# icon shape without placing the artwork inside a compatibility plate.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SOURCE="Assets/AppIcon.png"
+SOURCE="Assets/AppIconSource.png"
 OUTPUT="Assets/Lexicon.icns"
 TEMP_DIR="$(mktemp -d /tmp/lexicon-icon.XXXXXX)"
 ICONSET="$TEMP_DIR/Lexicon.iconset"

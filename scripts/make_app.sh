@@ -34,7 +34,7 @@ BINARY=".build/release/Lexicon"
 APP="build/Lexicon.app"
 ICON="Assets/Lexicon.icns"
 
-if [[ ! -f "$ICON" || "Assets/AppIcon.png" -nt "$ICON" ]]; then
+if [[ ! -f "$ICON" || "Assets/AppIconSource.png" -nt "$ICON" ]]; then
     scripts/make_icon.sh
 fi
 
