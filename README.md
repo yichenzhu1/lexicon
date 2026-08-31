@@ -21,7 +21,7 @@ into any issues, please feel free to send feedback and I'll do my best to
 support them.
 
 <p align="center">
-  <img src="docs/images/lexicon-0.2.0-preview.png" alt="Lexicon displaying an entry on macOS">
+  <img src="docs/images/lexicon-0.3.0-preview-macos26.png" alt="Lexicon displaying an entry on macOS">
 </p>
 
 ## Install
