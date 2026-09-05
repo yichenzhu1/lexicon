@@ -15,7 +15,6 @@ struct DataReader {
     }
 
     var remaining: Int { data.count - offset }
-    var isAtEnd: Bool { remaining <= 0 }
 
     mutating func skip(_ count: Int) throws {
         guard count >= 0, offset + count <= data.count else {

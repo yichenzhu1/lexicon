@@ -315,10 +315,6 @@ final class LibraryModel: ObservableObject {
         contentVersion += 1
     }
 
-    func reloadRenderedContent() {
-        contentVersion += 1
-    }
-
     // MARK: - Reading preferences
 
     /// Settings live in a named suite so they are the same whether the app runs
@@ -390,7 +386,7 @@ final class LibraryModel: ObservableObject {
     ) {
         didSet { Self.settings.set(googleAmericanVoice, forKey: Self.googleAmericanVoiceKey) }
     }
-    @Published private(set) var hasGoogleAPIKey = (try? TTSKeychain.readAPIKey()) != nil
+    @Published private(set) var hasGoogleAPIKey = (try? APIKeychain.googleCloudTTS.read()) != nil
     @Published private(set) var ttsStatus: String?
 
     @Published var translationProvider: TranslationProvider = LibraryModel.storedTranslationProvider() {
@@ -603,6 +599,7 @@ final class LibraryModel: ObservableObject {
         historyLimit = value
         Self.settings.set(value, forKey: Self.historyLimitKey)
         trimHistoryToLimit()
+        save(history, to: historyURL)
     }
 
     func restoreDefaultSettings() {
@@ -677,7 +674,7 @@ final class LibraryModel: ObservableObject {
         let resolved = try? library?.entries(forNormalizedKey: normalizedKey).first?.key
         // Cache the fallback too, so an unknown word is not re-queried on
         // every render pass.
-        let display = (resolved ?? nil) ?? normalizedKey
+        let display = resolved ?? normalizedKey
         displayWordCache[normalizedKey] = display
         return display
     }
@@ -733,7 +730,6 @@ final class LibraryModel: ObservableObject {
     private func trimHistoryToLimit() {
         guard history.count > historyLimit else { return }
         history.removeLast(history.count - historyLimit)
-        save(history, to: historyURL)
     }
 
     func removeFromHistory(_ word: String) {
@@ -801,7 +797,7 @@ final class LibraryModel: ObservableObject {
             ttsStatus = "Speaking with System Voice."
 
         case .googleCloud:
-            guard let apiKey = try? TTSKeychain.readAPIKey(), !apiKey.isEmpty else {
+            guard let apiKey = try? APIKeychain.googleCloudTTS.read(), !apiKey.isEmpty else {
                 ttsStatus = "Google Cloud needs an API key."
                 errorMessage = "Add a Google Cloud Text-to-Speech API key in Settings."
                 return
@@ -838,7 +834,7 @@ final class LibraryModel: ObservableObject {
             return false
         }
         do {
-            try TTSKeychain.saveAPIKey(value)
+            try APIKeychain.googleCloudTTS.save(value)
             hasGoogleAPIKey = true
             ttsStatus = "Google Cloud API key saved in Keychain."
             return true
@@ -850,7 +846,7 @@ final class LibraryModel: ObservableObject {
 
     func removeGoogleAPIKey() {
         do {
-            try TTSKeychain.removeAPIKey()
+            try APIKeychain.googleCloudTTS.remove()
             hasGoogleAPIKey = false
             ttsStatus = "Google Cloud API key removed."
             if ttsProvider == .googleCloud { stopSpeech() }
@@ -893,7 +889,7 @@ final class LibraryModel: ObservableObject {
                 }
                 result = try await enqueueAppleTranslation(source)
             } else {
-                guard let apiKey = try? TranslationKeychain.readAPIKey(for: provider),
+                guard let apiKey = try? provider.keychain?.read(),
                       !apiKey.isEmpty
                 else {
                     throw TranslationServiceError(
@@ -921,7 +917,7 @@ final class LibraryModel: ObservableObject {
     @discardableResult
     func saveTranslationAPIKey(_ rawValue: String) -> Bool {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard translationProvider.requiresAPIKey else {
+        guard let keychain = translationProvider.keychain else {
             errorMessage = "The selected translation provider does not use an API key."
             return false
         }
@@ -930,7 +926,7 @@ final class LibraryModel: ObservableObject {
             return false
         }
         do {
-            try TranslationKeychain.saveAPIKey(value, for: translationProvider)
+            try keychain.save(value)
             hasTranslationAPIKey = true
             translationStatus = "\(translationProvider.title) API key saved in Keychain."
             return true
@@ -941,9 +937,9 @@ final class LibraryModel: ObservableObject {
     }
 
     func removeTranslationAPIKey() {
-        guard translationProvider.requiresAPIKey else { return }
+        guard let keychain = translationProvider.keychain else { return }
         do {
-            try TranslationKeychain.removeAPIKey(for: translationProvider)
+            try keychain.remove()
             hasTranslationAPIKey = false
             translationStatus = "\(translationProvider.title) API key removed."
         } catch {
@@ -968,8 +964,7 @@ final class LibraryModel: ObservableObject {
     }
 
     private func refreshTranslationCredentialState() {
-        hasTranslationAPIKey = translationProvider.requiresAPIKey
-            && (try? TranslationKeychain.readAPIKey(for: translationProvider)) != nil
+        hasTranslationAPIKey = (try? translationProvider.keychain?.read()) != nil
     }
 
     private func translationModel(for provider: TranslationProvider) -> String {

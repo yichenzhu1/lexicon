@@ -274,12 +274,9 @@ public enum EntryPageBuilder {
         (() => {
           const emit = (kind,value,behavior) => dispatchEvent(new CustomEvent('lexicon-scroll-request',
             { detail:{ kind, value:Number(value)||0, behavior:behavior === 'smooth' ? 'smooth' : 'auto' } }));
-          const nativeTo = window.scrollTo.bind(window), nativeBy = window.scrollBy.bind(window);
           window.scrollTo = function(a,b) { const y = typeof a === 'object' ? a.top : b; emit('to',y,typeof a === 'object' ? a.behavior : 'auto'); };
           window.scrollBy = function(a,b) { const y = typeof a === 'object' ? a.top : b; emit('by',y,typeof a === 'object' ? a.behavior : 'auto'); };
-          const nativeInto = Element.prototype.scrollIntoView;
           Element.prototype.scrollIntoView = function(options) { emit('element',this.getBoundingClientRect().top,options?.behavior); };
-          window.__lexiconNativeScroll = { to:nativeTo, by:nativeBy, into:nativeInto };
         })();
         </script></head><body>\(content)
         <link rel="stylesheet" href="custom.css"><script src="custom.js"></script>

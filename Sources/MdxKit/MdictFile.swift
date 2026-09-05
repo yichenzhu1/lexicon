@@ -37,8 +37,6 @@ public final class MdictFile {
     // Keyword section geometry.
     private struct KeyBlockInfo {
         let entryCount: UInt64
-        let firstKey: String
-        let lastKey: String
         let compressedSize: UInt64
         let decompressedSize: UInt64
         let fileOffset: UInt64 // absolute offset of the block in the file
@@ -172,8 +170,8 @@ public final class MdictFile {
         var runningOffset = keyBlocksStart
         for _ in 0 ..< keyBlockCount {
             let blockEntryCount = try indexReader.readNumber(width: numberWidth)
-            let firstKey = try Self.readIndexText(&indexReader, width: numberWidth, encoding: encoding)
-            let lastKey = try Self.readIndexText(&indexReader, width: numberWidth, encoding: encoding)
+            _ = try Self.readIndexText(&indexReader, width: numberWidth, encoding: encoding)
+            _ = try Self.readIndexText(&indexReader, width: numberWidth, encoding: encoding)
             let compSize = try indexReader.readNumber(width: numberWidth)
             let decompSize = try indexReader.readNumber(width: numberWidth)
             guard decompSize <= UInt64(Self.maxBlockSize) else {
@@ -181,8 +179,6 @@ public final class MdictFile {
             }
             infos.append(KeyBlockInfo(
                 entryCount: blockEntryCount,
-                firstKey: firstKey,
-                lastKey: lastKey,
                 compressedSize: compSize,
                 decompressedSize: decompSize,
                 fileOffset: runningOffset

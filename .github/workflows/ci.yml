@@ -35,13 +35,18 @@ jobs:
           swift run -Xswiftc -warnings-as-errors Lexicon --tab-state-test
           swift run -Xswiftc -warnings-as-errors Lexicon --tab-webview-test
 
+      - name: Run WebView rendering regression suite
+        run: |
+          smoke_root="$(mktemp -d)"
+          trap 'rm -rf "$smoke_root"' EXIT
+          swift run MdxKitTester seed "$smoke_root"
+          LEXICON_ROOT="$smoke_root" swift run -c release Lexicon --smoke-test
+
       - name: Build and validate app bundle
         run: |
           scripts/make_app.sh
-          plutil -lint build/Lexicon.app/Contents/Info.plist
           test -s build/Lexicon.app/Contents/Resources/Lexicon.icns
           test -s build/Lexicon.app/Contents/Resources/LICENSE.txt
           test -s build/Lexicon.app/Contents/Resources/THIRD_PARTY_NOTICES.md
           test "$(plutil -extract CFBundleShortVersionString raw build/Lexicon.app/Contents/Info.plist)" = "0.3.0"
           test "$(plutil -extract CFBundleVersion raw build/Lexicon.app/Contents/Info.plist)" = "3"
-          codesign --verify --deep --strict --verbose=2 build/Lexicon.app

@@ -459,8 +459,7 @@ struct ContentView: View {
                         preferredDictionaryUUID: tab.location?.preferredDictionaryUUID,
                         initialScrollOffset: tab.scrollOffset,
                         contentVersion: libraryModel.contentVersion,
-                        zoom: libraryModel.entryZoom,
-                        collapsedDictionaries: libraryModel.collapsedDictionaries
+                        zoom: libraryModel.entryZoom
                     )
                     .opacity(isActive ? 1 : 0)
                     .allowsHitTesting(isActive)
@@ -1301,10 +1300,7 @@ private struct BrowserTabBar: View {
                     )
                         .frame(width: tabWidth)
                         .transition(
-                            .asymmetric(
-                                insertion: .opacity.combined(with: .scale(scale: 0.96)),
-                                removal: .opacity.combined(with: .scale(scale: 0.96))
-                            )
+                            .opacity.combined(with: .scale(scale: 0.96))
                         )
                         // Drag to reorder, like a browser tab strip. Dropping
                         // on a tab inserts before it.

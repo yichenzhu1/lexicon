@@ -128,8 +128,4 @@ final class DictSchemeHandler: NSObject, WKURLSchemeHandler {
         }
         return nil
     }
-
-    nonisolated static func mimeType(forPath path: String) -> String {
-        DictionaryLibrary.mimeType(forPath: path)
-    }
 }

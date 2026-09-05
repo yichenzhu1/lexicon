@@ -1,5 +1,4 @@
 import Foundation
-import Security
 import SwiftUI
 import Translation
 
@@ -62,6 +61,11 @@ enum TranslationProvider: String, CaseIterable, Identifiable {
             return true
         case .apple, .disabled: return false
         }
+    }
+
+    var keychain: APIKeychain? {
+        requiresAPIKey
+            ? APIKeychain(service: "com.yichenzhu.Lexicon.translation.\(rawValue)") : nil
     }
 
     var category: TranslationProviderCategory {
@@ -162,12 +166,8 @@ enum DictionaryTranslationService {
     }
 
     private struct DashScopeRequest: Encodable {
-        struct Message: Encodable {
-            let role: String
-            let content: String
-        }
         let model: String
-        let messages: [Message]
+        let messages: [ChatMessage]
         let stream = false
         let temperature = 0.1
         let enableThinking = false
@@ -208,15 +208,11 @@ enum DictionaryTranslationService {
     }
 
     private struct ClaudeRequest: Encodable {
-        struct Message: Encodable {
-            let role: String
-            let content: String
-        }
         let model: String
         let maxTokens = 8_192
         let system = "Follow the dictionary translation request exactly. "
             + "Return only the requested translation and preserve any requested markup."
-        let messages: [Message]
+        let messages: [ChatMessage]
 
         enum CodingKeys: String, CodingKey {
             case model, system, messages
@@ -606,65 +602,6 @@ enum DictionaryTranslationService {
             throw TranslationServiceError(
                 message: message ?? "\(service) returned HTTP \(http.statusCode)."
             )
-        }
-    }
-}
-
-enum TranslationKeychain {
-    static func readAPIKey(for provider: TranslationProvider) throws -> String? {
-        guard provider.requiresAPIKey else { return nil }
-        var query = baseQuery(for: provider)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess,
-              let data = item as? Data,
-              let value = String(data: data, encoding: .utf8)
-        else { throw KeychainError(status: status) }
-        return value
-    }
-
-    static func saveAPIKey(_ value: String, for provider: TranslationProvider) throws {
-        guard provider.requiresAPIKey else { return }
-        let data = Data(value.utf8)
-        let query = baseQuery(for: provider)
-        let status = SecItemUpdate(
-            query as CFDictionary,
-            [kSecValueData as String: data] as CFDictionary
-        )
-        if status == errSecItemNotFound {
-            var item = query
-            item[kSecValueData as String] = data
-            let addStatus = SecItemAdd(item as CFDictionary, nil)
-            guard addStatus == errSecSuccess else { throw KeychainError(status: addStatus) }
-        } else if status != errSecSuccess {
-            throw KeychainError(status: status)
-        }
-    }
-
-    static func removeAPIKey(for provider: TranslationProvider) throws {
-        guard provider.requiresAPIKey else { return }
-        let status = SecItemDelete(baseQuery(for: provider) as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw KeychainError(status: status)
-        }
-    }
-
-    private static func baseQuery(for provider: TranslationProvider) -> [String: Any] {
-        [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.yichenzhu.Lexicon.translation.\(provider.rawValue)",
-            kSecAttrAccount as String: "api-key",
-        ]
-    }
-
-    private struct KeychainError: LocalizedError {
-        let status: OSStatus
-        var errorDescription: String? {
-            SecCopyErrorMessageString(status, nil) as String?
-                ?? "Keychain error \(status)"
         }
     }
 }

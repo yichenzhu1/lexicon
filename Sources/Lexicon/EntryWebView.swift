@@ -17,7 +17,6 @@ struct EntryWebView: NSViewRepresentable {
     let initialScrollOffset: Double
     let contentVersion: Int
     let zoom: Double
-    let collapsedDictionaries: Set<String>
 
     func makeCoordinator() -> Coordinator {
         Coordinator(tabID: tabID, appState: appState, libraryModel: libraryModel)
@@ -259,18 +258,11 @@ struct EntryWebView: NSViewRepresentable {
             guard message.name == Self.bridgeMessageName else { return }
 
             if host == "page" {
-                if kind == "pageScroll",
-                   let offset = (payload["offset"] as? NSNumber)?.doubleValue {
-                    recordPageScroll(offset)
-                } else if kind == "frameScroll" {
-                    synchronizeDictionaryScroll(
-                        payload["frames"] as? [[String: Any]] ?? [], webView: message.webView
-                    )
-                } else if kind == "collapse",
-                          appState.isActiveTab(tabID),
-                          let uuid = payload["dictionaryUUID"] as? String,
-                          let collapsed = payload["collapsed"] as? Bool,
-                          libraryModel.library?.isKnownDictionaryUUID(uuid) == true {
+                if kind == "collapse",
+                   appState.isActiveTab(tabID),
+                   let uuid = payload["dictionaryUUID"] as? String,
+                   let collapsed = payload["collapsed"] as? Bool,
+                   libraryModel.library?.isKnownDictionaryUUID(uuid) == true {
                     libraryModel.setDictionary(uuid, collapsed: collapsed)
                 }
                 return
@@ -383,8 +375,6 @@ struct EntryWebView: NSViewRepresentable {
                 else { continue }
                 webView.callAsyncJavaScript(
                     """
-                    window.__lexiconVirtualScrollY = offset;
-                    window.__lexiconVirtualViewportHeight = viewportHeight;
                     window.__lexiconReceiveScrollState?.(offset, viewportHeight);
                     return true;
                     """,
@@ -452,7 +442,7 @@ struct EntryWebView: NSViewRepresentable {
             let scheme = trimmed.split(separator: ":", maxSplits: 1).first?.lowercased() ?? ""
             switch scheme {
             case "entry", "bword":
-                let target = referencedName(in: trimmed, keepFragment: true)
+                let target = referencedName(in: trimmed)
                 let pieces = target.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)
                 let word = pieces.first.map(String.init) ?? ""
                 let anchor = pieces.count > 1 ? String(pieces[1]) : nil
@@ -463,7 +453,7 @@ struct EntryWebView: NSViewRepresentable {
                 }
             case "sound":
                 guard let dictionaryUUID else { return }
-                let path = referencedName(in: trimmed, keepFragment: true)
+                let path = referencedName(in: trimmed)
                 if !path.isEmpty { libraryModel.playAudio(path: path, dictionaryUUID: dictionaryUUID) }
             case "http", "https", "mailto":
                 if let url = URL(string: trimmed) { NSWorkspace.shared.open(url) }
@@ -508,11 +498,10 @@ struct EntryWebView: NSViewRepresentable {
             webView?.evaluateJavaScript(script)
         }
 
-        private func referencedName(in rawLink: String, keepFragment: Bool) -> String {
+        private func referencedName(in rawLink: String) -> String {
             var name = rawLink
             if let colon = name.firstIndex(of: ":") { name = String(name[name.index(after: colon)...]) }
             while name.hasPrefix("/") { name.removeFirst() }
-            if !keepFragment, let hash = name.firstIndex(of: "#") { name = String(name[..<hash]) }
             if let query = name.firstIndex(of: "?") { name = String(name[..<query]) }
             return (name.removingPercentEncoding ?? name)
                 .trimmingCharacters(in: CharacterSet(charactersIn: "/ "))

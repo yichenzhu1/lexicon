@@ -743,9 +743,8 @@ public final class DictionaryLibrary: @unchecked Sendable {
                 looseResourceCount: looseResourceCount
             )
         } catch {
-            // Entry indexing commits before resource indexing begins. If a
-            // damaged sibling MDD fails later, remove that already-committed
-            // row and its entries as well as the copied folder.
+            // Indexing commits before loose-asset copying and finalization.
+            // Roll back the committed rows if either of those later steps fails.
             if let registeredDictionaryID {
                 try? deleteIndexRows(forDictionaryID: registeredDictionaryID)
             }
@@ -811,8 +810,8 @@ public final class DictionaryLibrary: @unchecked Sendable {
 
     /// True when entry HTML might point at a loose file that is neither part
     /// of the same-basename MDX package nor discoverable through sibling CSS.
-    /// Hidden files and alternate nested CSS/JS themes do not justify decoding
-    /// every dictionary entry merely to prove they are unused.
+    /// Top-level companions are already copied. Nested files still need entry
+    /// discovery, even when their extensions match those top-level companions.
     private func sourceHasPotentialLooseAssets(
         _ siblings: [URL], baseName: String
     ) -> Bool {
@@ -848,9 +847,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
                       candidateValues.isRegularFile == true,
                       candidateValues.isSymbolicLink != true
                 else { continue }
-                if !intrinsicallyDiscoveredExtensions.contains(candidate.pathExtension.lowercased()) {
-                    return true
-                }
+                return true
             }
         }
         return false
@@ -1596,7 +1593,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
         let part: Int64
         let offset: Int64
         let length: Int64
-        let path: String?
+        let path: String
     }
 
     /// Single-row resource lookup. Written against `prepare`/`step` rather than
@@ -1611,7 +1608,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
             guard try statement.step() else { return nil }
             return ResourceLocation(
                 part: statement.int(0), offset: statement.int(1), length: statement.int(2),
-                path: statement.optionalText(3)
+                path: statement.text(3)
             )
         }
     }
@@ -1659,10 +1656,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
     /// First resource whose path starts with `prefix` followed by '#' or '.'
     /// (used to complete extension-less sound references).
     private func indexedResource(prefix: String, record: DictionaryRecord) throws -> ResolvedResource? {
-        var escaped = prefix
-        for (symbol, replacement) in [("\\", "\\\\"), ("%", "\\%"), ("_", "\\_")] {
-            escaped = escaped.replacingOccurrences(of: symbol, with: replacement)
-        }
+        let escaped = Self.escapedLikePattern(prefix)
         let location = try resourceLocation(
             sql: """
                 SELECT part, offset, length, path FROM resources
@@ -1673,9 +1667,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
         )
         guard let location else { return nil }
         guard let data = try readResource(location, uuid: record.uuid) else { return nil }
-        // Prefix completion is used for audio. Keep the requested prefix when
-        // SQLite's small location helper does not project the path itself.
-        return ResolvedResource(data: data, path: location.path ?? prefix)
+        return ResolvedResource(data: data, path: location.path)
     }
 
     private func makeResource(

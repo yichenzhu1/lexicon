@@ -216,7 +216,13 @@ struct SettingsView: View {
                                     .settingsNote()
                             }
 
-                            translationCredentialRow
+                            APIKeyRow(
+                                draft: $translationAPIKey,
+                                hasSavedKey: libraryModel.hasTranslationAPIKey,
+                                fieldLabel: "Translation API key",
+                                save: libraryModel.saveTranslationAPIKey,
+                                remove: libraryModel.removeTranslationAPIKey
+                            )
 
                             HStack {
                                 Label(
@@ -309,41 +315,6 @@ struct SettingsView: View {
                     Section("Status") {
                         Text(status).settingsNote()
                     }
-                }
-            }
-        }
-    }
-
-    private var translationCredentialRow: some View {
-        LabeledContent("API key") {
-            HStack(spacing: 8) {
-                ZStack(alignment: .leading) {
-                    SecureField("", text: $translationAPIKey)
-                        .labelsHidden()
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("Translation API key")
-
-                    if translationAPIKey.isEmpty {
-                        Text(libraryModel.hasTranslationAPIKey
-                            ? "Replacement key" : "Paste API key")
-                            .foregroundStyle(.tertiary)
-                            .padding(.leading, 7)
-                            .allowsHitTesting(false)
-                    }
-                }
-                .frame(width: 220)
-
-                Button("Save") {
-                    if libraryModel.saveTranslationAPIKey(translationAPIKey) {
-                        translationAPIKey = ""
-                    }
-                }
-                .disabled(
-                    translationAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                )
-
-                if libraryModel.hasTranslationAPIKey {
-                    Button("Remove") { libraryModel.removeTranslationAPIKey() }
                 }
             }
         }
@@ -445,36 +416,13 @@ struct SettingsView: View {
 
     private var googleCloudSection: some View {
         Section("Google Cloud") {
-            LabeledContent("API key") {
-                HStack(spacing: 8) {
-                    ZStack(alignment: .leading) {
-                        SecureField("", text: $googleAPIKey)
-                            .labelsHidden()
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityLabel("Google Cloud API key")
-
-                        if googleAPIKey.isEmpty {
-                            Text(libraryModel.hasGoogleAPIKey
-                                ? "Replacement key" : "Paste API key")
-                                .foregroundStyle(.tertiary)
-                                .padding(.leading, 7)
-                                .allowsHitTesting(false)
-                        }
-                    }
-                    .frame(width: 220)
-
-                    Button("Save") {
-                        if libraryModel.saveGoogleAPIKey(googleAPIKey) {
-                            googleAPIKey = ""
-                        }
-                    }
-                    .disabled(googleAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                    if libraryModel.hasGoogleAPIKey {
-                        Button("Remove") { libraryModel.removeGoogleAPIKey() }
-                    }
-                }
-            }
+            APIKeyRow(
+                draft: $googleAPIKey,
+                hasSavedKey: libraryModel.hasGoogleAPIKey,
+                fieldLabel: "Google Cloud API key",
+                save: libraryModel.saveGoogleAPIKey,
+                remove: libraryModel.removeGoogleAPIKey
+            )
 
             HStack {
                 Label(
@@ -595,5 +543,41 @@ private extension View {
         font(.caption)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+private struct APIKeyRow: View {
+    @Binding var draft: String
+    let hasSavedKey: Bool
+    let fieldLabel: String
+    let save: (String) -> Bool
+    let remove: () -> Void
+
+    var body: some View {
+        LabeledContent("API key") {
+            HStack(spacing: 8) {
+                ZStack(alignment: .leading) {
+                    SecureField("", text: $draft)
+                        .labelsHidden()
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityLabel(fieldLabel)
+
+                    if draft.isEmpty {
+                        Text(hasSavedKey ? "Replacement key" : "Paste API key")
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 7)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .frame(width: 220)
+
+                Button("Save") {
+                    if save(draft) { draft = "" }
+                }
+                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                if hasSavedKey { Button("Remove", action: remove) }
+            }
+        }
     }
 }

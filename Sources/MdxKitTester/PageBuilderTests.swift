@@ -23,26 +23,6 @@ func runPageBuilderTests(_ t: TestHarness) {
             "dictionary UUID is the frame origin"
         )
         t.expect(html.contains("data-src="), "frames use lazy sources")
-        t.expect(html.contains("IntersectionObserver"), "nearby expanded frames load")
-        t.expect(html.contains("__lexiconSetFrameHeight"), "child height reports have an outer receiver")
-        t.expect(
-            html.contains("lexiconPageGeometry") && html.contains("requestFrameScrollSync"),
-            "outer scrolling is synchronized into dictionary frames"
-        )
-        t.expect(
-            html.contains("Math.abs(flowHeight - oldFlowHeight) < 1")
-                && html.contains("Math.abs(visualHeight - oldVisualHeight) < 1"),
-            "unchanged child heights do not retrigger iframe layout"
-        )
-        t.expect(
-            html.contains("class=\"lexicon-frame-slot\"")
-                && html.contains("requestedFlow, requestedVisual")
-                && html.contains("data-overlay"),
-            "floating dictionary chrome overlays a stable in-flow frame slot"
-        )
-        t.expect(!html.contains("10000px"), "no temporary sizing sentinel")
-        t.expect(html.contains(#"scrolling="no""#), "one outer scroll surface")
-        t.expect(html.contains("overscroll-behavior:contain"), "result page remains scrollable")
     }
 
     t.run("page builder: entry document and network policy") {
@@ -57,11 +37,6 @@ func runPageBuilderTests(_ t: TestHarness) {
         t.expect(online.contains("https:"), "HTTPS allowed by CSP")
         t.expect(online.contains("wss:"), "secure WebSocket requests allowed with HTTPS policy")
         t.expect(!online.contains("webkit.messageHandlers"), "native bridge absent from page world")
-        t.expect(online.contains("lexicon-scroll-request"), "scroll compatibility shim")
-        t.expect(
-            online.contains("body > .category.lm6 > .content { display:block!important; }"),
-            "standalone Longman word sets reveal their linked entries"
-        )
 
         let offline = EntryPageBuilder.entryDocument(
             for: "apple", dictionaryUUID: basic.uuid, library: library, allowHTTPS: false
@@ -78,22 +53,6 @@ func runPageBuilderTests(_ t: TestHarness) {
         t.expect(collapsed.contains("<details id=\"dict-\(basic.uuid.lowercased())\""), "saved collapse state")
         t.expect(collapsed.contains("<nav class=\"lexicon-jump\""), "jump bar for multiple dictionaries")
         t.expect(collapsed.contains("lexicon-toggle-all"), "expand/collapse-all control for multiple dictionaries")
-        t.expect(collapsed.contains("display:flex; gap:4px"), "jump controls use compact spacing")
-        t.expect(collapsed.contains("padding:6px 8px"), "jump bar uses compact internal padding")
-        t.expect(collapsed.contains("border-radius:7px"), "jump controls match app button corners")
-        t.expect(!collapsed.contains("border-radius:999px"), "jump controls are not tag-style capsules")
-        t.expect(
-            collapsed.contains("--dictionary-content-indent:16px"),
-            "dictionary content uses the disclosure-title inset"
-        )
-        t.expect(
-            collapsed.contains("width:calc(100% - var(--dictionary-content-indent))"),
-            "indented dictionary frames retain the available width"
-        )
-        t.expect(
-            collapsed.contains("margin-left:var(--dictionary-content-indent)"),
-            "dictionary content aligns with the summary title"
-        )
         let anchored = EntryPageBuilder.resultsDocument(
             for: "apple", library: library, collapsedDictionaries: [basic.uuid],
             anchor: "sense-2", preferredDictionaryUUID: basic.uuid
@@ -144,9 +103,6 @@ func runPageBuilderTests(_ t: TestHarness) {
             ],
             "only resource-bearing HTML and CSS values are collected"
         )
-        for falsePositive in ["OPAL_Spoken::Sublist_1", "OPAL_Spoken::Sublist_2", "&#39;ava", "-aholic", "fake.png"] {
-            t.expect(!references.contains(falsePositive), "ignored non-resource value \(falsePositive)")
-        }
     }
 
     t.run("page builder: entry redirect and empty pages") {

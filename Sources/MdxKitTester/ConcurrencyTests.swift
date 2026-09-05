@@ -52,47 +52,66 @@ func runConcurrencyTests(_ t: TestHarness) {
 
     t.run("concurrency: searches keep working during an import") {
         let library = library!
-        // With one full-mutex connection this blocks behind the import's bulk
-        // insert transaction; with a pool and WAL the reads proceed.
+        let transactionHeld = DispatchSemaphore(value: 0)
+        let resumeImport = DispatchSemaphore(value: 0)
         let importDone = DispatchSemaphore(value: 0)
         let importFailure = Locked("")
-        let importFinished = Locked(false)
         DispatchQueue.global(qos: .userInitiated).async {
+            defer { importDone.signal() }
             do {
                 try library.importDictionary(
                     from: fixturesURL.appendingPathComponent("utf16.mdx")
-                )
+                ) { update in
+                    // This callback runs after entry insertion, while the
+                    // import still owns the writer transaction.
+                    if update.stage == "Indexing resources", update.completed == 0 {
+                        transactionHeld.signal()
+                        if resumeImport.wait(timeout: .now() + 10) == .timedOut {
+                            importFailure.mutate { $0 = "timed out waiting to resume import" }
+                        }
+                    }
+                }
             } catch {
                 importFailure.mutate { $0 = "\(error)" }
             }
-            importFinished.mutate { $0 = true }
-            importDone.signal()
         }
 
-        // Poll a flag rather than the semaphore: the semaphore is signalled
-        // once, so consuming it here would leave the wait below hanging.
-        var searchesCompleted = 0
-        var searchFailure: String?
-        while !importFinished.value {
+        let held = transactionHeld.wait(timeout: .now() + 5) == .success
+        t.expect(held, "import reached its open transaction")
+        let readDone = DispatchSemaphore(value: 0)
+        let readFailure = Locked("")
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer { readDone.signal() }
             do {
-                // The dictionary being imported may or may not be visible yet;
-                // the one already present must be, on every single pass.
+                let results = try library.search(matching: "app")
                 let hits = try library.entries(forNormalizedKey: "apple")
-                if !hits.contains(where: { $0.dictionaryTitle == "Basic Test Dictionary" }) {
-                    searchFailure = "existing dictionary vanished mid-import"
-                    break
+                guard results.contains(where: { $0.displayKey == "apple" }),
+                      hits.count == 1,
+                      let hit = hits.first,
+                      try library.entryText(for: hit).contains("a round fruit")
+                else {
+                    readFailure.mutate { $0 = "existing dictionary was unreadable during import" }
+                    return
                 }
-                searchesCompleted += 1
             } catch {
-                searchFailure = "\(error)"
-                break
+                readFailure.mutate { $0 = "\(error)" }
             }
         }
-        importDone.wait()
-
+        let readWhileImportHeld = readDone.wait(timeout: .now() + 2) == .success
+        // Always release the writer, including when a regression blocked the
+        // reader, so the test can report a failure without hanging.
+        resumeImport.signal()
+        guard importDone.wait(timeout: .now() + 5) == .success else {
+            print("FAIL: import did not finish after releasing its transaction")
+            exit(1)
+        }
+        if !readWhileImportHeld, readDone.wait(timeout: .now() + 5) != .success {
+            print("FAIL: reader did not finish after releasing the import")
+            exit(1)
+        }
+        t.expect(readWhileImportHeld, "search and entry read finished before releasing the writer")
         t.expectEqual(importFailure.value, "", "import succeeded")
-        t.expectEqual(searchFailure ?? "", "", "reads stayed available during import")
-        t.expect(searchesCompleted > 0, "at least one search ran while importing")
+        t.expectEqual(readFailure.value, "", "reads remained correct during import")
 
         // The newly imported dictionary is visible once the import returns.
         let hits = try library.entries(forNormalizedKey: "apple")

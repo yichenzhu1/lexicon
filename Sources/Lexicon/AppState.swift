@@ -92,19 +92,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    func runSearchNow() {
-        searchTask?.cancel()
-        searchCancellation?.cancel()
-        let cancellation = SearchCancellationToken()
-        searchCancellation = cancellation
-        searchGeneration += 1
-        let generation = searchGeneration
-        let query = searchText
-        searchTask = Task { [weak self] in
-            await self?.performSearch(query, generation: generation, cancellation: cancellation)
-        }
-    }
-
     private func performSearch(
         _ query: String, generation: Int, cancellation: SearchCancellationToken
     ) async {
@@ -134,10 +121,6 @@ final class AppState: ObservableObject {
             libraryModel.errorMessage = error.localizedDescription
             results = []
         }
-    }
-
-    func displayWord(for normalizedKey: String?) -> String? {
-        libraryModel.displayWord(for: normalizedKey)
     }
 
     func navigate(
@@ -303,8 +286,6 @@ final class AppState: ObservableObject {
         synchronizeSearchText(to: destination.word)
     }
 
-    func reloadActiveEntry() { libraryModel.reloadRenderedContent() }
-
     func setTabScrollOffset(_ offset: Double, for tabID: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
         tabs[index].scrollOffset = max(0, offset)
@@ -337,6 +318,6 @@ final class AppState: ObservableObject {
     }
 
     private func synchronizeSearchText(to word: String?) {
-        searchText = displayWord(for: word) ?? word ?? ""
+        searchText = libraryModel.displayWord(for: word) ?? word ?? ""
     }
 }

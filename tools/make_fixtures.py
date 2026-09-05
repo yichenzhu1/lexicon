@@ -126,6 +126,12 @@ def main():
     ))
     FixtureDate.fixture_day = 4
 
+    write("nested.mdx", MDictWriter(
+        {"apple": '<img src="assets/picture.svg"><p>Nested asset example</p>'},
+        title="Nested Asset Dictionary",
+        description="Entry-only reference to a nested loose asset",
+    ))
+
     write("multipart.mdx", MDictWriter(
         {
             "reverse": '<link rel="stylesheet" href="reverse.css"><div class="reverse">reverse</div>',

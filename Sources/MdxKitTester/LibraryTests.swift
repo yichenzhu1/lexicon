@@ -116,6 +116,26 @@ func runLibraryTests(_ t: TestHarness) {
         )
     }
 
+    t.run("library: entry-only references import nested loose assets") {
+        let source = tempRoot.appendingPathComponent("nested-source")
+        try FileManager.default.createDirectory(
+            at: source.appendingPathComponent("assets"), withIntermediateDirectories: true
+        )
+        try FileManager.default.copyItem(
+            at: fixturesURL.appendingPathComponent("nested.mdx"),
+            to: source.appendingPathComponent("nested.mdx")
+        )
+        let image = Data("<svg xmlns='http://www.w3.org/2000/svg'/>".utf8)
+        try image.write(to: source.appendingPathComponent("assets/picture.svg"))
+        let nestedLibrary = try DictionaryLibrary(rootURL: tempRoot.appendingPathComponent("nested"))
+        let record = try nestedLibrary.importDictionary(from: source.appendingPathComponent("nested.mdx"))
+        t.expectEqual(record.looseResourceCount, 1, "nested asset discovered without CSS or MDD")
+        t.expectEqual(
+            try nestedLibrary.resource(path: "assets/picture.svg", dictionaryUUID: record.uuid)?.data,
+            image, "nested asset copied and served intact"
+        )
+    }
+
     t.run("library: top-level static companions import without entry discovery") {
         let source = tempRoot.appendingPathComponent("static-source")
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
@@ -165,7 +185,7 @@ func runLibraryTests(_ t: TestHarness) {
         t.expectEqual(copiedFolders.count, 0, "failed import leaves no copied folder")
     }
 
-    t.run("library: cancelled import rolls back staging and index") {
+    t.run("library: pre-cancelled import leaves staging empty") {
         let cancelRoot = tempRoot.appendingPathComponent("cancelled")
         let cancelLibrary = try DictionaryLibrary(rootURL: cancelRoot)
         let cancellation = ImportCancellationToken()
@@ -181,6 +201,38 @@ func runLibraryTests(_ t: TestHarness) {
         t.expectEqual(
             try FileManager.default.contentsOfDirectory(at: staging, includingPropertiesForKeys: nil).count,
             0, "cancelled import cleans staging"
+        )
+    }
+
+    t.run("library: cancellation after entry insertion rolls back the transaction") {
+        let cancelRoot = tempRoot.appendingPathComponent("cancelled-during-indexing")
+        let cancelLibrary = try DictionaryLibrary(rootURL: cancelRoot)
+        let cancellation = ImportCancellationToken()
+        var reachedResources = false
+        t.expectThrows("cancelled after entries were inserted") {
+            try cancelLibrary.importDictionary(
+                from: fixturesURL.appendingPathComponent("basic.mdx"), cancellation: cancellation
+            ) { update in
+                if update.stage == "Indexing resources" {
+                    reachedResources = true
+                    cancellation.cancel()
+                }
+            }
+        }
+        t.expect(reachedResources, "cancellation occurred inside the indexing transaction")
+        let db = try SQLiteDB(path: cancelRoot.appendingPathComponent("index.sqlite").path, readOnly: true)
+        for table in ["dictionaries", "entries", "resources"] {
+            t.expectEqual(
+                try db.query("SELECT COUNT(*) FROM \(table)") { $0.int(0) }.first,
+                0, "partial \(table) rows rolled back"
+            )
+        }
+        t.expectEqual(
+            try FileManager.default.contentsOfDirectory(
+                at: cancelLibrary.dictionariesURL.appendingPathComponent(".staging"),
+                includingPropertiesForKeys: nil
+            ).count,
+            0, "partially indexed import cleans staging"
         )
     }
 
@@ -245,12 +297,36 @@ func runLibraryTests(_ t: TestHarness) {
         t.expectEqual(try library.search(matching: "  ").count, 0, "blank query")
     }
 
-    t.run("library: obsolete search can be cancelled") {
+    t.run("library: pre-cancelled search is rejected") {
         let cancellation = SearchCancellationToken()
         cancellation.cancel()
         t.expectThrows("cancelled search") {
             _ = try library.search(matching: "zzzz", cancellation: cancellation)
         }
+    }
+
+    t.run("SQLite: cancellation interrupts an active scan and removes its handler") {
+        let db = try SQLiteDB(path: tempRoot.appendingPathComponent("scan.sqlite").path)
+        let cancellation = SearchCancellationToken()
+        let scan = """
+            WITH RECURSIVE numbers(n) AS (
+                VALUES(1) UNION ALL SELECT n + 1 FROM numbers WHERE n < 10000
+            ) SELECT SUM(n) FROM numbers
+            """
+        t.expectThrows("running SQLite VM is interrupted") {
+            try db.withProgressCancellation({
+                // Invoked by SQLite only after the statement has begun running.
+                cancellation.cancel()
+                return cancellation.isCancelled
+            }) {
+                _ = try db.query(scan) { $0.int(0) }
+            }
+        }
+        t.expect(cancellation.isCancelled, "scan reached the VM progress callback")
+        t.expectEqual(
+            try db.query(scan) { $0.int(0) }.first,
+            50_005_000, "the same connection can scan again after cancellation"
+        )
     }
 
     t.run("library: search tiers rank exact over prefix over substring") {
@@ -270,11 +346,14 @@ func runLibraryTests(_ t: TestHarness) {
         )
 
         // Prefix matches must still outrank substring ones.
-        let mixed = try library.search(matching: "an")
-        if let firstSubstring = mixed.firstIndex(where: { $0.matchKind == .substring }),
-           let lastPrefix = mixed.lastIndex(where: { $0.matchKind <= .prefix }) {
-            t.expect(lastPrefix < firstSubstring, "prefix matches sort above substring")
+        let mixed = try library.search(matching: "a")
+        guard let firstSubstring = mixed.firstIndex(where: { $0.matchKind == .substring }),
+              let lastPrefix = mixed.lastIndex(where: { $0.matchKind <= .prefix })
+        else {
+            t.expect(false, "fixture must produce both prefix and substring matches")
+            return
         }
+        t.expect(lastPrefix < firstSubstring, "prefix matches sort above substring")
     }
 
     t.run("library: near misses are suggested when nothing matches") {
