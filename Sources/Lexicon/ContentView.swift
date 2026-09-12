@@ -68,6 +68,11 @@ struct ContentView: View {
             edges: windowIsFullScreen ? [] : .top
         )
         .background(Color(nsColor: .windowBackgroundColor))
+        // Focus once this view is installed. SwiftUI owns and cancels this
+        // task; tab commands below update focus without queuing another task.
+        .task {
+            searchFocused = true
+        }
         .animation(.smooth(duration: 0.22), value: sidebarVisible)
         .animation(.smooth(duration: 0.24), value: windowIsFullScreen)
         .background {
@@ -129,15 +134,8 @@ struct ContentView: View {
             }
             .hidden()
         }
+        #if DEBUG
         .onAppear {
-            // Do not repeat this from scenePhase == .active. Both callbacks
-            // fire during launch, and macOS 26 may create two TextInputUI
-            // cursor services for the same field. Cancellation of the second
-            // service can leave its empty remote-view panel on screen.
-            // AppKit already preserves the current first responder when an
-            // existing window is reactivated.
-            focusSearchField()
-            #if DEBUG
             // Debug hook: auto-look-up a word at launch so layout issues can
             // be reproduced headlessly: `LEXICON_DEBUG_LOOKUP=hello .build/debug/Lexicon`.
             if let lookup = ProcessInfo.processInfo.environment["LEXICON_DEBUG_LOOKUP"],
@@ -146,8 +144,8 @@ struct ContentView: View {
                     appState.navigate(to: lookup)
                 }
             }
-            #endif
         }
+        #endif
         .onChange(of: appState.searchText) { _, text in
             let searching = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             if searching {
@@ -159,7 +157,7 @@ struct ContentView: View {
             }
         }
         .onChange(of: appState.activeTabID) { _, _ in
-            focusSearchField()
+            searchFocused = true
         }
         .onChange(of: sidebarVisible) { _, _ in persistSidebarLayout() }
         .onChange(of: sidebarMode) { _, _ in persistSidebarLayout() }
@@ -542,17 +540,7 @@ struct ContentView: View {
                 }
             }
             .frame(maxWidth: .infinity)
-            .background {
-                SearchFocusDismissBridge(isFocused: $searchFocused)
-            }
             .accessibilityLabel("Search all dictionaries")
-    }
-
-    private func focusSearchField() {
-        Task { @MainActor in
-            await Task.yield()
-            searchFocused = true
-        }
     }
 
     private var isCurrentWordStarred: Bool {
@@ -827,72 +815,6 @@ struct ContentView: View {
         case .lexicon: return "Type in the search field to look up a word"
         case .history: return "No lookup history yet"
         case .starred: return "Star a word to keep it here"
-        }
-    }
-}
-
-/// SwiftUI's focus state doesn't automatically resign when an AppKit-backed
-/// view (notably WKWebView) receives a click. This unobtrusive bridge watches
-/// the containing window and releases search focus on any click outside the
-/// search field without consuming the click meant for the destination view.
-private struct SearchFocusDismissBridge: NSViewRepresentable {
-    let isFocused: FocusState<Bool>.Binding
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(isFocused: isFocused)
-    }
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        context.coordinator.hostView = view
-        context.coordinator.installMonitor()
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        context.coordinator.hostView = nsView
-        context.coordinator.isFocused = isFocused
-    }
-
-    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
-        coordinator.removeMonitor()
-    }
-
-    @MainActor
-    final class Coordinator {
-        weak var hostView: NSView?
-        var isFocused: FocusState<Bool>.Binding
-        private var eventMonitor: Any?
-
-        init(isFocused: FocusState<Bool>.Binding) {
-            self.isFocused = isFocused
-        }
-
-        func installMonitor() {
-            guard eventMonitor == nil else { return }
-            eventMonitor = NSEvent.addLocalMonitorForEvents(
-                matching: [.leftMouseDown, .rightMouseDown]
-            ) { [weak self] event in
-                guard let self,
-                      isFocused.wrappedValue,
-                      let hostView,
-                      let window = hostView.window,
-                      event.window === window
-                else { return event }
-
-                let point = hostView.convert(event.locationInWindow, from: nil)
-                guard !hostView.bounds.contains(point) else { return event }
-
-                isFocused.wrappedValue = false
-                return event
-            }
-        }
-
-        func removeMonitor() {
-            if let eventMonitor {
-                NSEvent.removeMonitor(eventMonitor)
-            }
-            eventMonitor = nil
         }
     }
 }

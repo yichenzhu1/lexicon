@@ -314,6 +314,12 @@ final class LibraryModel: ObservableObject {
     /// has no bundle identifier and would otherwise get its own domain.
     /// The suite is derived from `CFBundleIdentifier` in `scripts/make_app.sh`.
     static let settings: UserDefaults = {
+        // UI regressions use disposable preferences as well as a disposable
+        // library, so exercising the real views cannot change user settings.
+        if let suite = ProcessInfo.processInfo.environment["LEXICON_SETTINGS_SUITE"],
+           !suite.isEmpty, let isolated = UserDefaults(suiteName: suite) {
+            return isolated
+        }
         let current = UserDefaults(suiteName: "com.yichenzhu.Lexicon.settings") ?? .standard
 
         // Preserve preferences created before the app adopted its permanent

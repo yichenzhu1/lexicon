@@ -233,7 +233,14 @@ swift run MdxKitTester
 swift run Lexicon --tab-state-test
 swift run Lexicon --translation-test
 swift run Lexicon --tab-webview-test
+swift run Lexicon --search-focus-test
 ```
+
+The search-focus test uses a disposable library and preferences, opens temporary
+windows, and requires an active macOS desktop session. It checks initial focus,
+window transitions, application hide/reactivation, selection, outside-click
+dismissal, tab changes racing with dismissal, and marked-text
+composition in the actual search field.
 
 For repeatable parser, HTML, and resource-access performance measurements:
 
@@ -271,6 +278,9 @@ The suite also covers several things worth knowing about:
   WebKit checks exercise the dictionary adapters and request cleanup.
 - **Tab isolation.** The app-state test checks the three-view MRU limit,
   eviction and closure, per-tab history, and delayed WebKit scroll messages.
+- **Search focus.** The foreground-window test rejects delayed focus requests
+  that steal focus after dismissal and checks that view updates preserve
+  marked-text composition.
 - **Recovery.** Imports use a staging directory and one index transaction;
   cancellation and startup-reconciliation tests require partial work to be
   removed or moved to the recoverable `Dictionaries/Recovery` directory.
@@ -381,6 +391,12 @@ Search runs outside `MainActor`, publishes prefix results before the broader
 search, and checks cancellation before updating the UI. New queries clear the
 previous query's selectable results immediately. Changes to the dictionary
 library trigger a fresh search.
+
+Initial search focus uses a SwiftUI lifecycle task after the view is installed;
+tab commands update focus directly. Native controls handle focus transfer,
+including clicks into the reading page. The app neither clears focus through a
+window-wide mouse monitor nor reassigns it on activation. Tab changes do not
+enqueue delayed work that could override a later click or dismissal.
 
 Page loading captures the destination and rendering preferences, constructs
 HTML in a background task, then loads it into WebKit. The coordinator tracks

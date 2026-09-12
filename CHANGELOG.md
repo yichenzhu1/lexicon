@@ -4,6 +4,10 @@ All notable changes to Lexicon are documented here.
 
 ## Unreleased
 
+- Fixed delayed tab-focus requests overriding outside clicks. Initial search
+  focus now uses a SwiftUI lifecycle task, and native clicks handle focus
+  transfer without a window-wide mouse monitor. Added real-scene regressions
+  for activation, selection, dismissal races, and marked-text composition.
 - Simplified tab and search state around one location per tab. New queries
   immediately clear stale results, Return keeps the keyboard-selected result,
   and dictionary changes refresh searches. Repeated navigation preserves scroll.

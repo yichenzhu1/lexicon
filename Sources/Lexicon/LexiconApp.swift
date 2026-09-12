@@ -12,6 +12,8 @@ enum Entry {
                 exit(servicePassed && applePassed && modelPassed ? 0 : 1)
             }
             dispatchMain()
+        } else if CommandLine.arguments.contains("--search-focus-test") {
+            SearchFocusTests.run() // never returns
         } else if CommandLine.arguments.contains("--tab-state-test") {
             Task { @MainActor in exit(await TabStateTests.run() ? 0 : 1) }
             dispatchMain()
