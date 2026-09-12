@@ -85,6 +85,11 @@ testing only. Override the default version or build number when needed:
 LEXICON_VERSION=0.3.0 LEXICON_BUILD_NUMBER=3 scripts/make_app.sh
 ```
 
+The packaging script prefers the selected developer tools' macOS 26 SDK when
+available, avoiding incomplete preview SDK installations. It prints the SDK
+it uses. Set `SDKROOT` to an SDK name (such as `macosx26.5`) or an absolute SDK
+path to choose explicitly; `DEVELOPER_DIR` selects the developer tools as usual.
+
 ## GitHub release
 
 1. Update `CHANGELOG.md`, then run the complete release checks:
@@ -93,6 +98,7 @@ LEXICON_VERSION=0.3.0 LEXICON_BUILD_NUMBER=3 scripts/make_app.sh
    swift build -Xswiftc -warnings-as-errors
    swift run -Xswiftc -warnings-as-errors MdxKitTester
    swift run -Xswiftc -warnings-as-errors Lexicon --tab-state-test
+   swift run -Xswiftc -warnings-as-errors Lexicon --translation-test
    swift run -Xswiftc -warnings-as-errors Lexicon --tab-webview-test
    swift run MdxKitTester seed /tmp/lexicon-smoke
    LEXICON_ROOT=/tmp/lexicon-smoke swift run -c release Lexicon --smoke-test
@@ -192,8 +198,11 @@ bundled credential or passage leaves the page. Choose a provider in
 **Settings → Translation**:
 
 - **Apple Translation** is the default. It uses the system Translation
-  framework on-device and can ask permission to download the English and
-  Simplified Chinese language models on first use. It needs no API key.
+  framework on-device with installed English and Simplified Chinese language
+  packs. If either is missing, Lexicon explains what to download and opens
+  **System Settings → General → Language & Region → Translation Languages**.
+  Download both languages there, then return to Lexicon and retry. Lexicon
+  does not present Apple's in-app download window. It needs no API key.
 - **Translation APIs** contains Google Cloud Translation and DeepL. These
   dedicated services translate the extracted source passage. Google Cloud is
   predictable for modern examples; DeepL supports Free and Pro keys and
@@ -219,6 +228,7 @@ the user's control even when dictionary-page network access is disabled.
 ```sh
 swift run MdxKitTester
 swift run Lexicon --tab-state-test
+swift run Lexicon --translation-test
 swift run Lexicon --tab-webview-test
 ```
 
@@ -242,6 +252,10 @@ The suite also covers several things worth knowing about:
 - **Rendering compatibility.** Page tests cover per-dictionary origins,
   structural-tag neutralization, URL/CSS normalization, lazy frames, anchors,
   network policy, and native-bridge isolation.
+- **Translation.** Offline request/response tests cover every online provider,
+  source extraction, HTTP failures, incomplete output, and cancellation. Apple
+  tests cover installed/missing/unsupported languages without downloading packs.
+  WebKit checks exercise the dictionary adapters and request cleanup.
 - **Tab isolation.** The app-state test checks the three-view MRU limit,
   eviction and closure, per-tab history, and delayed WebKit scroll messages.
 - **Recovery.** Imports use a staging directory and one index transaction;

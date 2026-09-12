@@ -61,12 +61,6 @@ struct SettingsView: View {
         .onChange(of: libraryModel.translationProvider) { _, _ in
             translationAPIKey = ""
         }
-        .background {
-            // Keeps Test Translation functional even when the Settings window
-            // is the only visible app window.
-            AppleTranslationHost()
-                .environmentObject(libraryModel)
-        }
     }
 
     private var generalPane: some View {
@@ -184,12 +178,15 @@ struct SettingsView: View {
                     Section(libraryModel.translationProvider.title) {
                         if libraryModel.translationProvider == .apple {
                             HStack {
-                                Label("On-device translation", systemImage: "checkmark.shield.fill")
-                                    .foregroundStyle(.green)
+                                Label(appleTranslationStatus, systemImage: "character.bubble")
+                                    .foregroundStyle(.secondary)
                                 Spacer()
                                 Button("Test Translation") { libraryModel.testTranslation() }
                             }
-                            Text("Apple may ask to download the English and Simplified Chinese language models the first time they are needed.")
+                            Button("Manage Translation Languages…") {
+                                libraryModel.showAppleTranslationLanguageGuide()
+                            }
+                            Text(AppleTranslationSetupError.downloadInstructions)
                                 .settingsNote()
                             Text("No API key is required, and dictionary text is processed on this Mac.")
                                 .settingsNote()
@@ -317,6 +314,22 @@ struct SettingsView: View {
                     }
                 }
             }
+        }
+        .task(id: libraryModel.translationProvider) {
+            await libraryModel.checkAppleTranslationLanguages(offerDownload: true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await libraryModel.checkAppleTranslationLanguages() }
+        }
+    }
+
+    private var appleTranslationStatus: String {
+        switch libraryModel.appleTranslationAvailability {
+        case .installed: return "Ready for on-device translation"
+        case .supported: return "Language packs needed"
+        case .unsupported: return "Language pair unavailable on this Mac"
+        case nil: return "Checking language packs…"
+        @unknown default: return "Language pair unavailable on this Mac"
         }
     }
 

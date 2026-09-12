@@ -7,6 +7,7 @@
 #   LEXICON_VERSION           User-facing version (defaults to 0.3.0)
 #   LEXICON_BUILD_NUMBER      Monotonically increasing integer (defaults to 3)
 #   LEXICON_SIGNING_IDENTITY  Developer ID identity; unset uses ad-hoc signing
+#   SDKROOT                  Optional macOS SDK name or path
 #
 # CFBundleIdentifier below is how macOS identifies the app (preferences,
 # permissions). Forks should change it, along with the matching suite name in
@@ -28,7 +29,22 @@ if [[ ! "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
-swift build -c release
+# Prefer the macOS 26 SDK used by this app when the selected developer tools
+# include it. Some Command Line Tools installations make a preview SDK the
+# default before shipping the SwiftUI macro plugins that SDK requires.
+# An explicit SDKROOT always wins; do not retry failed builds with another SDK.
+if [[ -n "${SDKROOT:-}" ]]; then
+    LEXICON_BUILD_SDK="$(xcrun --sdk "$SDKROOT" --show-sdk-path)"
+else
+    LEXICON_BUILD_SDK="$(xcrun --sdk macosx --show-sdk-path)"
+    LEXICON_SDK_DIRECTORY="$(dirname "$LEXICON_BUILD_SDK")"
+    if [[ -f "$LEXICON_SDK_DIRECTORY/MacOSX26.sdk/SDKSettings.plist" ]]; then
+        LEXICON_BUILD_SDK="$LEXICON_SDK_DIRECTORY/MacOSX26.sdk"
+    fi
+fi
+
+echo "Using macOS SDK: $LEXICON_BUILD_SDK"
+xcrun swift build -c release --product Lexicon --sdk "$LEXICON_BUILD_SDK"
 
 BINARY=".build/release/Lexicon"
 APP="build/Lexicon.app"

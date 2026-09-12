@@ -4,7 +4,14 @@ import SwiftUI
 @main
 enum Entry {
     static func main() {
-        if CommandLine.arguments.contains("--tab-state-test") {
+        if CommandLine.arguments.contains("--translation-test") {
+            Task { @MainActor in
+                let servicePassed = await TranslationServiceTests.run()
+                let applePassed = await AppleTranslationTests.run()
+                exit(servicePassed && applePassed ? 0 : 1)
+            }
+            dispatchMain()
+        } else if CommandLine.arguments.contains("--tab-state-test") {
             exit(TabStateTests.run() ? 0 : 1)
         } else if CommandLine.arguments.contains("--tab-webview-test") {
             TabWebViewSmokeTest.run() // never returns
@@ -59,10 +66,6 @@ private struct LexiconWindowRoot: View {
             .environmentObject(appState)
             .focusedSceneValue(\.lexiconAppState, appState)
             .frame(minWidth: 760, minHeight: 480)
-            .background {
-                AppleTranslationHost()
-                    .environmentObject(libraryModel)
-            }
     }
 }
 

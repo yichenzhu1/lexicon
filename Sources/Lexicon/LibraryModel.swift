@@ -4,6 +4,7 @@ import Combine
 import Foundation
 import MdxKit
 import SwiftUI
+import Translation
 
 /// State that belongs to the whole app rather than to one window: the open
 /// dictionary library, the imported dictionary list, and the history and
@@ -14,12 +15,6 @@ import SwiftUI
 /// caches, and two windows writing `history.json` over each other.
 @MainActor
 final class LibraryModel: ObservableObject {
-    private struct PendingAppleTranslation {
-        let id: UUID
-        let sourceText: String
-        let continuation: CheckedContinuation<String, any Error>
-    }
-
     struct Notice: Identifiable, Equatable {
         let id = UUID()
         let title: String
@@ -72,8 +67,10 @@ final class LibraryModel: ObservableObject {
     /// from view bodies for every history row, tab and starred card, so an
     /// uncached lookup ran a SQL query per row on every keystroke.
     private var displayWordCache: [String: String] = [:]
-    private var pendingAppleTranslations: [PendingAppleTranslation] = []
-    private var claimedAppleTranslationID: UUID?
+    private let appleTranslationService: AppleTranslationService
+    private var appleLanguageAlert: NSAlert?
+    private var translationGeneration = UUID()
+    private var translationTestTask: Task<Void, Never>?
 
     nonisolated static var defaultRoot: URL {
         // Override for testing against a disposable library.
@@ -84,7 +81,11 @@ final class LibraryModel: ObservableObject {
             .appendingPathComponent("Lexicon", isDirectory: true)
     }
 
-    init(rootURL: URL = LibraryModel.defaultRoot) {
+    init(
+        rootURL: URL = LibraryModel.defaultRoot,
+        appleTranslationService: AppleTranslationService = .system
+    ) {
+        self.appleTranslationService = appleTranslationService
         do {
             library = try DictionaryLibrary(rootURL: rootURL)
         } catch {
@@ -391,6 +392,9 @@ final class LibraryModel: ObservableObject {
 
     @Published var translationProvider: TranslationProvider = LibraryModel.storedTranslationProvider() {
         didSet {
+            guard translationProvider != oldValue else { return }
+            translationTestTask?.cancel()
+            translationGeneration = UUID()
             Self.settings.set(translationProvider.rawValue, forKey: Self.translationProviderKey)
             rememberTranslationProvider()
             refreshTranslationCredentialState()
@@ -427,7 +431,7 @@ final class LibraryModel: ObservableObject {
     }
     @Published private(set) var hasTranslationAPIKey = false
     @Published private(set) var translationStatus: String?
-    @Published private(set) var appleTranslationRequest: AppleTranslationRequest?
+    @Published private(set) var appleTranslationAvailability: LanguageAvailability.Status?
 
     /// Dictionaries the user collapsed on a results page. Remembered across
     /// lookups so a dictionary you always skip stays folded away.
@@ -860,6 +864,7 @@ final class LibraryModel: ObservableObject {
     }
 
     func translateDictionaryPrompt(_ rawPrompt: String) async throws -> String {
+        try Task.checkCancellation()
         let prompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !prompt.isEmpty else {
             throw TranslationServiceError(message: "The dictionary supplied no text to translate.")
@@ -877,6 +882,8 @@ final class LibraryModel: ObservableObject {
             throw error
         }
 
+        let generation = UUID()
+        translationGeneration = generation
         translationStatus = "Translating with \(provider.title)…"
         do {
             let result: String
@@ -887,7 +894,8 @@ final class LibraryModel: ObservableObject {
                         message: "The dictionary supplied no text to translate."
                     )
                 }
-                result = try await enqueueAppleTranslation(source)
+                result = try await appleTranslationService.translate(source)
+                appleTranslationAvailability = .installed
             } else {
                 guard let apiKey = try? provider.keychain?.read(),
                       !apiKey.isEmpty
@@ -905,11 +913,27 @@ final class LibraryModel: ObservableObject {
                     dashScopeRegion: dashScopeRegion
                 )
             }
-            translationStatus = "Translated with \(provider.title)."
+            try Task.checkCancellation()
+            if translationGeneration == generation {
+                translationStatus = "Translated with \(provider.title)."
+            }
             return result
         } catch {
-            translationStatus = "\(provider.title) translation failed."
-            errorMessage = "Could not translate this passage: \(error.localizedDescription)"
+            if Task.isCancelled || error is CancellationError
+                || (error as? URLError)?.code == .cancelled {
+                if translationGeneration == generation { translationStatus = nil }
+                throw CancellationError()
+            }
+            if translationGeneration == generation {
+                if case AppleTranslationSetupError.languagesNotInstalled = error {
+                    appleTranslationAvailability = .supported
+                    translationStatus = "Download the English and Simplified Chinese language packs in System Settings."
+                    showAppleTranslationLanguageGuide()
+                } else {
+                    translationStatus = "\(provider.title) translation failed: \(error.localizedDescription)"
+                    errorMessage = "Could not translate this passage: \(error.localizedDescription)"
+                }
+            }
             throw error
         }
     }
@@ -948,7 +972,8 @@ final class LibraryModel: ObservableObject {
     }
 
     func testTranslation() {
-        Task { @MainActor [weak self] in
+        translationTestTask?.cancel()
+        translationTestTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 let result = try await translateDictionaryPrompt(
@@ -956,6 +981,7 @@ final class LibraryModel: ObservableObject {
                     + "Translate the English sentence above into Simplified Chinese. "
                     + "Return only the translation."
                 )
+                try Task.checkCancellation()
                 translationStatus = "Test: \(result)"
             } catch {
                 // translateDictionaryPrompt already provides the actionable error.
@@ -978,47 +1004,47 @@ final class LibraryModel: ObservableObject {
         }
     }
 
-    private func enqueueAppleTranslation(_ sourceText: String) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            let request = PendingAppleTranslation(
-                id: UUID(),
-                sourceText: sourceText,
-                continuation: continuation
-            )
-            pendingAppleTranslations.append(request)
-            publishNextAppleTranslationIfNeeded()
+    func checkAppleTranslationLanguages(offerDownload: Bool = false) async {
+        guard translationProvider == .apple else { return }
+        let status = await appleTranslationService.availability()
+        guard !Task.isCancelled, translationProvider == .apple else { return }
+        appleTranslationAvailability = status
+        if offerDownload, status == .supported {
+            showAppleTranslationLanguageGuide()
         }
     }
 
-    func claimAppleTranslationRequest() -> AppleTranslationRequest? {
-        guard let request = appleTranslationRequest,
-              claimedAppleTranslationID == nil
-        else { return nil }
-        claimedAppleTranslationID = request.id
-        return request
+    func showAppleTranslationLanguageGuide() {
+        guard appleLanguageAlert == nil else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.icon = NSImage(systemSymbolName: "character.bubble", accessibilityDescription: nil)
+        alert.messageText = "Set Up Apple Translation"
+        alert.informativeText = "Download English and Simplified Chinese in System Settings, "
+            + "then return here to translate."
+        alert.addButton(withTitle: "Open Settings…")
+        alert.addButton(withTitle: "Not Now")
+        appleLanguageAlert = alert
+
+        let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self else { return }
+            self.appleLanguageAlert = nil
+            if response == .alertFirstButtonReturn { self.openTranslationLanguageSettings() }
+        }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            alert.beginSheetModal(for: window, completionHandler: completion)
+        } else {
+            completion(alert.runModal())
+        }
     }
 
-    func completeAppleTranslation(
-        id: UUID,
-        result: Result<String, any Error>
-    ) {
-        guard let index = pendingAppleTranslations.firstIndex(where: { $0.id == id }) else {
-            return
+    func openTranslationLanguageSettings() {
+        let url = URL(string: "x-apple.systempreferences:com.apple.Localization-Settings.extension?translation")!
+        if !NSWorkspace.shared.open(url) {
+            errorMessage = "Could not open System Settings. "
+                + AppleTranslationSetupError.downloadInstructions
+            translationStatus = errorMessage
         }
-        let pending = pendingAppleTranslations.remove(at: index)
-        if appleTranslationRequest?.id == id {
-            appleTranslationRequest = nil
-            claimedAppleTranslationID = nil
-        }
-        pending.continuation.resume(with: result)
-        publishNextAppleTranslationIfNeeded()
-    }
-
-    private func publishNextAppleTranslationIfNeeded() {
-        guard appleTranslationRequest == nil,
-              let next = pendingAppleTranslations.first
-        else { return }
-        appleTranslationRequest = AppleTranslationRequest(id: next.id, sourceText: next.sourceText)
     }
 
     private func stopSpeech() {

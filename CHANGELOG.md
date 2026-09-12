@@ -4,6 +4,19 @@ All notable changes to Lexicon are documented here.
 
 ## Unreleased
 
+- App packaging now prefers the installed macOS 26 SDK and honors `SDKROOT`,
+  fixing builds when Command Line Tools default to a preview SDK without its
+  required SwiftUI macro plugins.
+- Apple Translation now uses only installed language packs. Missing English
+  and Simplified Chinese packs prompt a guide to System Settings' Translation
+  Languages page instead of opening an in-app download window. Settings shows
+  language availability and refreshes it when returning from System Settings.
+- Removed the hidden SwiftUI translation host and continuation queue, so local
+  translations no longer depend on a window remaining open.
+- Fixed multi-line source extraction, incomplete model responses being accepted
+  as translations, and translation requests continuing after cancellation or
+  page navigation. Added offline provider, Apple service, and WebKit regressions.
+
 ## 0.3.0 — 2026-08-31
 
 - Search now uses an indexed trigram path for substring and typo candidates,

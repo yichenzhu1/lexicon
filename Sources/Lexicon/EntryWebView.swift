@@ -79,6 +79,7 @@ struct EntryWebView: NSViewRepresentable {
     }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        coordinator.cancelTranslations()
         webView.stopLoading()
         webView.navigationDelegate = nil
         webView.configuration.userContentController.removeScriptMessageHandler(
@@ -109,6 +110,8 @@ struct EntryWebView: NSViewRepresentable {
         var diagnosticHandler: ((String, [String: Any], WKFrameInfo) -> Void)?
         private var loadedToken: String?
         private var dictionaryFrames: [String: WKFrameInfo] = [:]
+        private var translationTasks: [String: Task<Void, Never>] = [:]
+        private var pageGeneration = UUID()
 
         init(tabID: UUID, appState: AppState, libraryModel: LibraryModel) {
             self.tabID = tabID
@@ -127,6 +130,7 @@ struct EntryWebView: NSViewRepresentable {
         ) {
             let token = "\(version)|\(word ?? "")|\(anchor ?? "")|\(preferredDictionaryUUID ?? "")"
             guard force || token != loadedToken else { return }
+            cancelTranslations()
             loadedToken = token
             dictionaryFrames.removeAll(keepingCapacity: true)
             let allowHTTPS = (networkPolicyOverride ?? libraryModel.dictionaryNetworkPolicy) == .allowHTTPS
@@ -311,8 +315,7 @@ struct EntryWebView: NSViewRepresentable {
                 libraryModel.speak(text, language: language)
 
             case "translation":
-                guard appState.isActiveTab(tabID),
-                      let requestID = payload["requestID"] as? String,
+                guard let requestID = payload["requestID"] as? String,
                       requestID.range(of: #"^[A-Za-z0-9-]{1,80}$"#, options: .regularExpression) != nil,
                       let prompt = payload["prompt"] as? String,
                       !prompt.isEmpty,
@@ -320,27 +323,39 @@ struct EntryWebView: NSViewRepresentable {
                       let webView = message.webView
                 else { return }
                 let frameInfo = message.frameInfo
-                Task { @MainActor [weak self, weak webView] in
-                    guard let self, let webView else { return }
-                    do {
-                        let text = try await libraryModel.translateDictionaryPrompt(prompt)
-                        deliverTranslationResponse(
-                            requestID: requestID,
-                            text: text,
-                            error: nil,
-                            frameInfo: frameInfo,
-                            webView: webView
-                        )
-                    } catch {
-                        deliverTranslationResponse(
-                            requestID: requestID,
-                            text: nil,
-                            error: error.localizedDescription,
-                            frameInfo: frameInfo,
-                            webView: webView
-                        )
-                    }
+                guard appState.isActiveTab(tabID) else {
+                    deliverTranslationResponse(
+                        requestID: requestID, text: nil,
+                        error: "Return to this tab and click again to translate.",
+                        frameInfo: frameInfo, webView: webView
+                    )
+                    return
                 }
+                let key = "\(host)|\(requestID)"
+                guard translationTasks[key] == nil else { return }
+                let generation = pageGeneration
+                let model = libraryModel
+                translationTasks[key] = Task { @MainActor [weak self, weak webView] in
+                    var translatedText: String?
+                    var failure: String?
+                    do {
+                        try Task.checkCancellation()
+                        translatedText = try await model.translateDictionaryPrompt(prompt)
+                    } catch {
+                        failure = error.localizedDescription
+                    }
+                    guard !Task.isCancelled, let self, let webView,
+                          self.pageGeneration == generation else { return }
+                    self.translationTasks.removeValue(forKey: key)
+                    self.deliverTranslationResponse(
+                        requestID: requestID, text: translatedText, error: failure,
+                        frameInfo: frameInfo, webView: webView
+                    )
+                }
+
+            case "translationCancel":
+                guard let requestID = payload["requestID"] as? String else { return }
+                translationTasks.removeValue(forKey: "\(host)|\(requestID)")?.cancel()
 
             case "link":
                 guard appState.isActiveTab(tabID),
@@ -358,6 +373,13 @@ struct EntryWebView: NSViewRepresentable {
             default:
                 break
             }
+        }
+
+        func cancelTranslations() {
+            pageGeneration = UUID()
+            let tasks = translationTasks.values
+            translationTasks.removeAll()
+            for task in tasks { task.cancel() }
         }
 
         private func synchronizeDictionaryScroll(
@@ -555,13 +577,23 @@ struct EntryWebView: NSViewRepresentable {
           function forwardTranslationRequest(detail) {
             // One paid translation at most per physical click. The page may
             // choose the passage and prompt, but it never sees the API key.
-            if (translationUsedForClick || performance.now() - lastTrustedClick > 2000) return;
             let request;
             try { request = JSON.parse(String(detail || '')); } catch (_) { return; }
             const requestID = String(request.requestID || '');
             const prompt = String(request.prompt || '').trim();
-            if (!/^[A-Za-z0-9-]{1,80}$/.test(requestID) || !prompt
-                || new TextEncoder().encode(prompt).length > 20000) return;
+            if (!/^[A-Za-z0-9-]{1,80}$/.test(requestID)) return;
+            let error;
+            if (!prompt || new TextEncoder().encode(prompt).length > 20000) {
+              error = 'This dictionary passage is empty or too long to translate.';
+            } else if (translationUsedForClick || performance.now() - lastTrustedClick > 2000) {
+              error = 'Click the passage again to translate.';
+            }
+            if (error) {
+              window.dispatchEvent(new CustomEvent('lexicon-translation-response', {
+                detail:JSON.stringify({requestID, error})
+              }));
+              return;
+            }
             translationUsedForClick = true;
             send({kind:'translation', requestID, prompt});
           }
@@ -682,6 +714,11 @@ struct EntryWebView: NSViewRepresentable {
             }
             if (event.source === window && event.data?.kind === 'lexicon-translation-request') {
               forwardTranslationRequest(event.data.detail);
+              return;
+            }
+            if (event.source === window && event.data?.kind === 'lexicon-translation-cancel'
+                && /^[A-Za-z0-9-]{1,80}$/.test(String(event.data.requestID || ''))) {
+              send({kind:'translationCancel', requestID:event.data.requestID});
               return;
             }
             if (event.data?.kind !== 'lexicon-anchor' || typeof event.data.anchor !== 'string') return;
@@ -842,13 +879,14 @@ struct EntryWebView: NSViewRepresentable {
           addEventListener('lexicon-translation-response', event => {
             let payload;
             try { payload = JSON.parse(String(event.detail || '')); } catch (_) { return; }
-            const pending = pendingTranslations.get(String(payload.requestID || ''));
+            if (!payload || typeof payload !== 'object') return;
+            const pending = takeTranslation(String(payload.requestID || ''));
             if (!pending) return;
-            pendingTranslations.delete(payload.requestID);
-            clearTimeout(pending.timer);
             if (payload.error) {
-              if (pending.kind === 'websocket') pending.socket.fail();
-              else pending.resolve(new Response('', {status:502, statusText:'Translation failed'}));
+              if (pending.kind === 'websocket') pending.socket.fail(String(payload.error));
+              else pending.resolve(new Response(JSON.stringify({error:{message:String(payload.error)}}), {
+                status:502, statusText:'Translation failed', headers:{'Content-Type':'application/json'}
+              }));
               return;
             }
             if (pending.kind === 'websocket') {
@@ -876,17 +914,53 @@ struct EntryWebView: NSViewRepresentable {
             }, '*');
           }
 
-          function requestTranslation(prompt) {
+          function takeTranslation(requestID) {
+            const pending = pendingTranslations.get(requestID);
+            if (!pending) return null;
+            pendingTranslations.delete(requestID);
+            clearTimeout(pending.timer);
+            pending.removeAbortListener?.();
+            return pending;
+          }
+
+          function cancelTranslation(requestID) {
+            const pending = takeTranslation(requestID);
+            if (pending) window.postMessage({kind:'lexicon-translation-cancel', requestID}, '*');
+            return pending;
+          }
+
+          function abortReason(signal) {
+            return signal?.reason ?? new DOMException('The translation was cancelled.', 'AbortError');
+          }
+
+          function requestTranslation(prompt, signal) {
+            if (signal?.aborted) return Promise.reject(abortReason(signal));
             const requestID = makeRequestID();
-            return new Promise(resolve => {
+            return new Promise((resolve, reject) => {
               const timer = setTimeout(() => {
-                pendingTranslations.delete(requestID);
-                resolve(new Response('', {status:504, statusText:'Translation timed out'}));
+                if (cancelTranslation(requestID)) {
+                  resolve(new Response('', {status:504, statusText:'Translation timed out'}));
+                }
               }, 60000);
-              pendingTranslations.set(requestID, {kind:'fetch', resolve, timer});
+              const onAbort = () => {
+                if (cancelTranslation(requestID)) reject(abortReason(signal));
+              };
+              pendingTranslations.set(requestID, {
+                kind:'fetch', resolve, reject, timer,
+                removeAbortListener:() => signal?.removeEventListener('abort', onAbort)
+              });
+              signal?.addEventListener('abort', onAbort, {once:true});
               postTranslationRequest(requestID, prompt);
             });
           }
+
+          addEventListener('pagehide', () => {
+            for (const requestID of [...pendingTranslations.keys()]) {
+              const pending = cancelTranslation(requestID);
+              if (pending.kind === 'websocket') pending.socket.close();
+              else pending.reject(abortReason());
+            }
+          });
 
           class TranslationWebSocket extends EventTarget {
             constructor(url) {
@@ -914,6 +988,9 @@ struct EntryWebView: NSViewRepresentable {
               if (this._readyState !== NativeWebSocket.OPEN) {
                 throw new DOMException('WebSocket is not open', 'InvalidStateError');
               }
+              if ([...pendingTranslations.values()].some(pending => pending.socket === this)) {
+                this.fail('A translation is already in progress on this connection.'); return;
+              }
               let request;
               try { request = JSON.parse(String(data)); } catch (_) { this.fail(); return; }
               const messages = request?.payload?.message?.text;
@@ -925,8 +1002,7 @@ struct EntryWebView: NSViewRepresentable {
 
               const requestID = makeRequestID();
               const timer = setTimeout(() => {
-                pendingTranslations.delete(requestID);
-                this.fail();
+                if (cancelTranslation(requestID)) this.fail('Translation timed out');
               }, 60000);
               pendingTranslations.set(requestID, {kind:'websocket', socket:this, timer});
               postTranslationRequest(requestID, prompt);
@@ -935,6 +1011,9 @@ struct EntryWebView: NSViewRepresentable {
             close(code = 1000, reason = '') {
               if (this._readyState === NativeWebSocket.CLOSED) return;
               this._readyState = NativeWebSocket.CLOSED;
+              for (const [requestID, pending] of pendingTranslations) {
+                if (pending.socket === this) cancelTranslation(requestID);
+              }
               this._emit('close', new CloseEvent('close', {code, reason, wasClean:code === 1000}));
             }
 
@@ -950,10 +1029,10 @@ struct EntryWebView: NSViewRepresentable {
               this.close();
             }
 
-            fail() {
+            fail(message = 'Translation failed') {
               if (this._readyState === NativeWebSocket.CLOSED) return;
-              this._emit('error', new Event('error'));
-              this.close(1011, 'Translation failed');
+              this._emit('error', new ErrorEvent('error', {message}));
+              this.close(1011, message);
             }
 
             _emit(type, event) {
@@ -990,7 +1069,7 @@ struct EntryWebView: NSViewRepresentable {
 
           window.fetch = function(input, init) {
             let url;
-            try { url = new URL(typeof input === 'string' ? input : input.url, location.href); }
+            try { url = new URL(input instanceof Request ? input.url : String(input), location.href); }
             catch (_) { return nativeFetch(input, init); }
             const method = String(init?.method || (typeof input !== 'string' && input.method) || 'GET')
               .toUpperCase();
@@ -1013,16 +1092,26 @@ struct EntryWebView: NSViewRepresentable {
               || url.hostname.endsWith('.maas.aliyuncs.com');
             if (url.protocol === 'https:' && dashScopeHost
                 && url.pathname.endsWith('/chat/completions') && method === 'POST') {
-              try {
-                const body = typeof init?.body === 'string' ? JSON.parse(init.body) : null;
+              const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+              if (signal?.aborted) return Promise.reject(abortReason(signal));
+              return (async () => {
+                let body;
+                try {
+                  const raw = init?.body !== undefined
+                    ? await new Response(init.body).text()
+                    : input instanceof Request ? await input.clone().text() : '';
+                  body = JSON.parse(raw);
+                } catch (_) {
+                  return new Response('', {status:400, statusText:'Invalid translation request'});
+                }
                 const messages = Array.isArray(body?.messages) ? body.messages : [];
                 const userMessage = [...messages].reverse().find(item => item?.role === 'user');
                 if (typeof userMessage?.content === 'string' && userMessage.content.trim()) {
                   // Never forward the dictionary bundle's Authorization header.
-                  return requestTranslation(userMessage.content);
+                  return requestTranslation(userMessage.content, signal);
                 }
-              } catch (_) {}
-              return Promise.resolve(new Response('', {status:400, statusText:'Invalid translation request'}));
+                return new Response('', {status:400, statusText:'Invalid translation request'});
+              })();
             }
             return nativeFetch(input, init);
           };

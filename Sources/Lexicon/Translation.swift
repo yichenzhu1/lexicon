@@ -1,6 +1,4 @@
 import Foundation
-import SwiftUI
-import Translation
 
 enum TranslationProviderCategory: String, CaseIterable, Identifiable {
     case apple
@@ -196,6 +194,7 @@ enum DictionaryTranslationService {
             let content: [Content]?
         }
         let output: [Output]
+        let status: String?
 
         var outputText: String {
             output
@@ -226,6 +225,12 @@ enum DictionaryTranslationService {
             let text: String?
         }
         let content: [Content]
+        let stopReason: String?
+
+        enum CodingKeys: String, CodingKey {
+            case content
+            case stopReason = "stop_reason"
+        }
 
         var outputText: String {
             content
@@ -237,8 +242,14 @@ enum DictionaryTranslationService {
 
     private struct ChatResponse: Decodable {
         struct Choice: Decodable {
-            struct Message: Decodable { let content: String }
+            struct Message: Decodable { let content: String? }
             let message: Message
+            let finishReason: String?
+
+            enum CodingKeys: String, CodingKey {
+                case message
+                case finishReason = "finish_reason"
+            }
         }
         let choices: [Choice]
     }
@@ -362,10 +373,9 @@ enum DictionaryTranslationService {
             } else {
                 sourceLines = lines[..<instructionIndex]
             }
-            let source = sourceLines.joined(separator: "\n")
-            if !source.isEmpty { return source }
+            return sourceLines.joined(separator: "\n")
         }
-        return lines[0]
+        return lines.joined(separator: "\n")
     }
 
     static func plainSourcePassage(from prompt: String) -> String {
@@ -387,11 +397,7 @@ enum DictionaryTranslationService {
         guard !source.isEmpty else {
             throw TranslationServiceError(message: "The dictionary supplied no text to translate.")
         }
-        guard let url = URL(
-            string: "https://translation.googleapis.com/language/translate/v2"
-        ) else {
-            throw TranslationServiceError(message: "Could not construct the Google request.")
-        }
+        let url = URL(string: "https://translation.googleapis.com/language/translate/v2")!
 
         let containsMarkup = source.range(
             of: #"<\/?[a-zA-Z][^>]*>"#,
@@ -486,7 +492,11 @@ enum DictionaryTranslationService {
 
         let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data, service: "OpenAI")
-        let text = try JSONDecoder().decode(OpenAIResponse.self, from: data).outputText
+        let result = try JSONDecoder().decode(OpenAIResponse.self, from: data)
+        if let status = result.status, status != "completed" {
+            throw incompleteTranslation(service: "OpenAI")
+        }
+        let text = result.outputText
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             throw TranslationServiceError(message: "OpenAI returned an empty translation.")
@@ -522,13 +532,7 @@ enum DictionaryTranslationService {
 
         let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data, service: service)
-        let text = try JSONDecoder().decode(ChatResponse.self, from: data)
-            .choices.first?.message.content
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !text.isEmpty else {
-            throw TranslationServiceError(message: "\(service) returned an empty translation.")
-        }
-        return text
+        return try chatTranslation(from: data, service: service)
     }
 
     private static func translateWithClaude(
@@ -551,7 +555,12 @@ enum DictionaryTranslationService {
 
         let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data, service: "Claude")
-        let text = try JSONDecoder().decode(ClaudeResponse.self, from: data).outputText
+        let result = try JSONDecoder().decode(ClaudeResponse.self, from: data)
+        if let stopReason = result.stopReason,
+           stopReason != "end_turn", stopReason != "stop_sequence" {
+            throw incompleteTranslation(service: "Claude")
+        }
+        let text = result.outputText
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {
             throw TranslationServiceError(message: "Claude returned an empty translation.")
@@ -566,10 +575,7 @@ enum DictionaryTranslationService {
         region: DashScopeRegion,
         session: URLSession
     ) async throws -> String {
-        let model = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !model.isEmpty else {
-            throw TranslationServiceError(message: "Enter a DashScope model name in Settings.")
-        }
+        let model = try validatedModel(model, service: "DashScope")
         var request = URLRequest(url: region.endpoint)
         request.httpMethod = "POST"
         request.timeoutInterval = 45
@@ -582,13 +588,25 @@ enum DictionaryTranslationService {
 
         let (data, response) = try await session.data(for: request)
         try validate(response: response, data: data, service: "DashScope")
-        guard let text = try JSONDecoder().decode(ChatResponse.self, from: data)
-            .choices.first?.message.content,
-            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
-            throw TranslationServiceError(message: "DashScope returned an empty translation.")
+        return try chatTranslation(from: data, service: "DashScope")
+    }
+
+    private static func chatTranslation(from data: Data, service: String) throws -> String {
+        let choice = try JSONDecoder().decode(ChatResponse.self, from: data).choices.first
+        if let finishReason = choice?.finishReason, finishReason != "stop" {
+            throw incompleteTranslation(service: service)
+        }
+        let text = choice?.message.content?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !text.isEmpty else {
+            throw TranslationServiceError(message: "\(service) returned an empty translation.")
         }
         return text
+    }
+
+    private static func incompleteTranslation(service: String) -> TranslationServiceError {
+        TranslationServiceError(
+            message: "\(service) did not finish the translation. Please try again."
+        )
     }
 
     private static func validate(response: URLResponse, data: Data, service: String) throws {
@@ -597,93 +615,13 @@ enum DictionaryTranslationService {
         }
         guard 200 ..< 300 ~= http.statusCode else {
             let decoder = JSONDecoder()
-            let message = (try? decoder.decode(APIErrorBody.self, from: data))?.error.message
+            let message = ((try? decoder.decode(APIErrorBody.self, from: data))?.error.message
                 ?? (try? decoder.decode(DirectAPIErrorBody.self, from: data))?.message
+            )?.trimmingCharacters(in: .whitespacesAndNewlines)
             throw TranslationServiceError(
-                message: message ?? "\(service) returned HTTP \(http.statusCode)."
+                message: message.flatMap { $0.isEmpty ? nil : $0 }
+                    ?? "\(service) returned HTTP \(http.statusCode)."
             )
         }
-    }
-}
-
-/// A value-only view of the next Apple request. The checked continuation stays
-/// private to LibraryModel so SwiftUI can observe requests without owning them.
-struct AppleTranslationRequest: Identifiable, Equatable, Sendable {
-    let id: UUID
-    let sourceText: String
-}
-
-/// Hosts Apple's TranslationSession in the SwiftUI hierarchy. LibraryModel
-/// arbitrates claims, so multiple app windows can observe the same request but
-/// only one session performs the work.
-struct AppleTranslationHost: View {
-    @EnvironmentObject private var libraryModel: LibraryModel
-    @State private var configuration: TranslationSession.Configuration?
-
-    var body: some View {
-        Color.clear
-            .frame(width: 0, height: 0)
-            .accessibilityHidden(true)
-            .onChange(of: libraryModel.appleTranslationRequest, initial: true) { _, request in
-                guard request != nil else { return }
-                if configuration == nil {
-                    configuration = TranslationSession.Configuration(
-                        source: Locale.Language(languageCode: "en"),
-                        target: Locale.Language(languageCode: "zh", script: "Hans")
-                    )
-                } else {
-                    configuration?.invalidate()
-                }
-            }
-            .translationTask(configuration) { @Sendable session in
-                guard let request = await MainActor.run(body: {
-                    libraryModel.claimAppleTranslationRequest()
-                }) else { return }
-
-                let sourceLanguage = Locale.Language(languageCode: "en")
-                let targetLanguage = Locale.Language(languageCode: "zh", script: "Hans")
-                let availability = LanguageAvailability()
-                let status = await availability.status(
-                    from: sourceLanguage,
-                    to: targetLanguage
-                )
-
-                guard status != .unsupported else {
-                    await MainActor.run {
-                        libraryModel.completeAppleTranslation(
-                            id: request.id,
-                            result: .failure(TranslationServiceError(
-                                message: "Apple Translation does not support English to "
-                                    + "Simplified Chinese with the translation models "
-                                    + "available on this Mac. Choose DeepL, Google Cloud, "
-                                    + "or Alibaba DashScope in Settings > Translation."
-                            ))
-                        )
-                    }
-                    return
-                }
-
-                do {
-                    // This displays Apple's permission/download UI when the
-                    // English → Simplified Chinese language pair is missing.
-                    try await session.prepareTranslation()
-                    let response = try await session.translate(request.sourceText)
-                    let targetText = response.targetText
-                    await MainActor.run {
-                        libraryModel.completeAppleTranslation(
-                            id: request.id,
-                            result: .success(targetText)
-                        )
-                    }
-                } catch {
-                    let message = error.localizedDescription
-                    await MainActor.run {
-                        libraryModel.completeAppleTranslation(
-                            id: request.id,
-                            result: .failure(TranslationServiceError(message: message))
-                        )
-                    }
-                }
-            }
     }
 }

@@ -9,6 +9,7 @@ import WebKit
 @MainActor
 enum RenderSmokeTest {
     private static var webView: WKWebView?
+    private static var window: NSWindow?
     private static var coordinator: EntryWebView.Coordinator?
     private static var attempts = 0
     private static var resizePhase = 0
@@ -168,6 +169,15 @@ enum RenderSmokeTest {
         let view = WKWebView(frame: NSRect(origin: .zero, size: viewSize), configuration: configuration)
         view.navigationDelegate = bridge
         webView = view
+        // Attach WebKit to a real window so rendering and scroll events run
+        // normally. A detached view can defer them beyond the test's sample.
+        let hostWindow = NSWindow(
+            contentRect: NSRect(origin: NSPoint(x: -10_000, y: -10_000), size: viewSize),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        hostWindow.contentView = view
+        hostWindow.orderBack(nil)
+        window = hostWindow
         bridge.load(
             word: DictionaryLibrary.normalizeKey(word), anchor: nil,
             preferredDictionaryUUID: nil, initialScrollOffset: 0,
