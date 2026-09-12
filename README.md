@@ -388,9 +388,12 @@ recordings and synthesized speech.
 ### Search and page lifecycle
 
 Search runs outside `MainActor`, publishes prefix results before the broader
-search, and checks cancellation before updating the UI. New queries clear the
-previous query's selectable results immediately. Changes to the dictionary
-library trigger a fresh search.
+search, and checks cancellation before updating the UI. New queries keep the
+previous results visible until current matches arrive, while immediately
+rejecting clicks, arrow keys, and Return on the outdated snapshot. An empty
+prefix phase keeps that snapshot until substring and fuzzy matching finish;
+only a completed search with no matches clears it. Clearing the query resets
+results immediately. Changes to the dictionary library trigger a fresh search.
 
 Initial search focus uses a SwiftUI lifecycle task after the view is installed;
 tab commands update focus directly. Native controls handle focus transfer,

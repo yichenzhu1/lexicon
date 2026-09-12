@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import MdxKit
 
@@ -84,7 +85,8 @@ enum TabStateTests {
         expect(!model.history.contains("saved"), "saved selection unexpectedly recorded global history")
         expect(!state.canGoForward, "a new destination retained obsolete forward history")
         state.selectSearchResult("Result")
-        expect(model.history.contains("result"), "result selection did not record global history")
+        expect(state.selectedWord == "saved", "a word outside the current results changed the selection")
+        expect(!model.history.contains("result"), "an unavailable result recorded global history")
         state.setTabScrollOffset(.nan, for: destinationTabID)
         expect(state.activeTab?.scrollOffset == 0, "invalid bridge scroll poisoned navigation state")
 
@@ -143,28 +145,129 @@ enum TabStateTests {
 
             state.searchText = "w"
             await finishSearch()
-            expect(state.results.count > 1, "fixture did not produce multiple search results")
-            state.moveSearchSelection(by: 1)
+            expect(state.results.count > 2, "fixture did not produce enough search results")
+            if let first = state.results.first {
+                state.selectSearchResult(first.normalizedKey.uppercased())
+                expect(state.selectedWord == first.normalizedKey, "current result selection was not normalized")
+                expect(model.history.contains(first.normalizedKey), "current result selection did not record history")
+            }
             state.moveSearchSelection(by: 1)
             let keyboardSelection = state.selectedWord
+            expect(keyboardSelection == state.results.dropFirst().first?.normalizedKey, "arrow key did not select the next result")
+            expect(keyboardSelection.map { model.history.contains($0) } == true, "keyboard selection did not record history")
             state.submitSearch()
             expect(state.selectedWord == keyboardSelection, "Return discarded the keyboard-selected result")
 
-            state.searchText = "apple"
-            expect(state.results.isEmpty, "new query left stale results selectable during debounce")
-            expect(state.isSearchPending, "new query was presented as a completed empty result")
+            let retainedResults = state.results
+            let staleWord = retainedResults.first { !model.history.contains($0.normalizedKey) }?.normalizedKey
+            expect(staleWord != nil, "fixture did not provide an unvisited stale result")
+            let historyBeforeTyping = model.history
+            let backCountBeforeTyping = state.activeTab?.backStack.count
+            // Every keystroke must retain the rendered rows while invalidating
+            // their actions synchronously, before the detached task can run.
+            for query in ["a", "ap", "app", "appl", "apple"] {
+                state.searchText = query
+                expect(state.results == retainedResults, "\(query): new query cleared the visible snapshot")
+                expect(state.selectableResults.isEmpty, "\(query): stale results remained selectable")
+                expect(state.isSearchPending, "\(query): new query appeared complete during debounce")
+                state.moveSearchSelection(by: 1)
+                state.moveSearchSelection(by: -1)
+                state.submitSearch()
+                if let staleWord { state.selectSearchResult(staleWord) }
+                expect(state.selectedWord == keyboardSelection, "\(query): stale result action navigated")
+                expect(model.history == historyBeforeTyping, "\(query): stale result action wrote history")
+                expect(state.activeTab?.backStack.count == backCountBeforeTyping, "\(query): stale action changed tab history")
+            }
+
+            // Capture each publication synchronously, including a transient
+            // obsolete prefix that polling only at completion could miss.
+            var cancellationSnapshots: [[SearchResult]] = []
+            var sawSelectablePrefix = false
+            let cancellationObservation = state.objectWillChange.sink {
+                cancellationSnapshots.append(state.selectableResults)
+                if state.isSearchPending && !state.selectableResults.isEmpty {
+                    sawSelectablePrefix = true
+                }
+            }
             state.searchText = "colour"
             await finishSearch()
+            cancellationSnapshots.append(state.selectableResults)
+            cancellationObservation.cancel()
             expect(state.results.first?.normalizedKey == "colour", "cancelled query replaced the newest results")
+            expect(sawSelectablePrefix, "nonempty prefix was not selectable before the broader search completed")
+            expect(
+                cancellationSnapshots.allSatisfy { $0.isEmpty || $0.first?.normalizedKey == "colour" },
+                "cancelled query published an obsolete selectable result"
+            )
+            if let staleWord { state.selectSearchResult(staleWord) }
+            expect(state.selectedWord == keyboardSelection, "a stale click navigated after the new results completed")
+            expect(model.history == historyBeforeTyping, "a stale click wrote history after the new results completed")
+            state.submitSearch()
+            expect(state.selectedWord == "colour", "Return did not select the first current result")
+            expect(model.history.contains("colour"), "Return selection did not record global history")
 
+            func checkNoPrefixSearch(_ query: String, kind: SearchMatchKind) async throws {
+                let prefix = try library.searchPrefix(matching: query)
+                expect(prefix.isEmpty, "\(query): fixture unexpectedly has prefix matches")
+                let previousResults = state.results
+                expect(!previousResults.isEmpty, "\(query): no previous snapshot to retain")
+                var snapshots: [[SearchResult]] = []
+                // objectWillChange fires before each assignment. Reading the
+                // current value here plus the final value observes every
+                // published state even when two phases finish in one run loop.
+                let observation = state.objectWillChange.sink {
+                    snapshots.append(state.results)
+                }
+                state.searchText = query
+                expect(state.results == previousResults, "\(query): debounce cleared the previous snapshot")
+                expect(state.selectableResults.isEmpty, "\(query): debounce left the previous snapshot selectable")
+                await finishSearch()
+                snapshots.append(state.results)
+                observation.cancel()
+                expect(snapshots.allSatisfy { !$0.isEmpty }, "\(query): empty prefix briefly cleared the visible results")
+                expect(
+                    state.results.contains { $0.normalizedKey == "banana" && $0.matchKind == kind },
+                    "\(query): final \(kind) result did not replace the previous snapshot"
+                )
+                expect(state.selectableResults == state.results, "\(query): completed results were not selectable")
+            }
+
+            try await checkNoPrefixSearch("anan", kind: .substring)
+            try await checkNoPrefixSearch("banona", kind: .fuzzy)
+
+            state.searchText = "apple"
             state.searchText = "  \n"
-            expect(state.results.isEmpty && !state.isSearchPending, "clear did not synchronously reset search")
+            expect(
+                state.results.isEmpty && state.selectableResults.isEmpty && !state.isSearchPending,
+                "clear did not synchronously reset search"
+            )
+            // Allow the cancelled query's debounce deadline to pass, so a
+            // delayed publication after clearing cannot escape the assertion.
+            try? await Task.sleep(for: .milliseconds(120))
+            expect(state.results.isEmpty && !state.isSearchPending, "cancelled query repopulated a cleared search")
             state.searchText = "apple"
             await finishSearch()
             expect(state.results.first?.normalizedKey == "apple", "search did not resume after clearing")
+
+            let resultsBeforeBackspace = state.results
+            state.searchText = "app"
+            expect(
+                state.results == resultsBeforeBackspace && state.selectableResults.isEmpty && state.isSearchPending,
+                "backspace did not retain the visible snapshot while invalidating selection"
+            )
+            await finishSearch()
+
+            let resultsBeforeNoMatch = state.results
+            state.searchText = "zzzzzzzzzzzzzz"
+            expect(state.results == resultsBeforeNoMatch && state.isSearchPending, "no-match query cleared results before completion")
+            await finishSearch()
+            expect(state.results.isEmpty && state.selectableResults.isEmpty, "completed no-match query retained stale results")
+
+            state.searchText = "apple"
+            await finishSearch()
             model.setEnabled(false, for: dictionary)
             await finishSearch()
-            expect(state.results.isEmpty, "disabling a dictionary left stale search results")
+            expect(state.results.isEmpty && state.selectableResults.isEmpty, "disabling a dictionary left stale search results")
         } catch {
             failures.append("search fixture failed: \(error)")
         }

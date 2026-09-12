@@ -61,12 +61,22 @@ final class AppState: ObservableObject {
 
     private enum SearchState: Sendable {
         case idle
+        /// Keep the last visible snapshot until this query has results, but
+        /// do not let it participate in selection for the new query.
+        case waiting([SearchResult])
         case searching([SearchResult])
         case complete([SearchResult])
 
         var results: [SearchResult] {
             switch self {
             case .idle: []
+            case .waiting(let results), .searching(let results), .complete(let results): results
+            }
+        }
+
+        var selectableResults: [SearchResult] {
+            switch self {
+            case .idle, .waiting: []
             case .searching(let results), .complete(let results): results
             }
         }
@@ -74,10 +84,14 @@ final class AppState: ObservableObject {
 
     var library: DictionaryLibrary? { libraryModel.library }
     var selectedWord: String? { activeTab?.word }
+    /// Presentation may briefly retain the previous query during debounce.
     var results: [SearchResult] { searchState.results }
+    var selectableResults: [SearchResult] { searchState.selectableResults }
     var isSearchPending: Bool {
-        if case .searching = searchState { return true }
-        return false
+        switch searchState {
+        case .waiting, .searching: true
+        case .idle, .complete: false
+        }
     }
 
     init(libraryModel: LibraryModel) {
@@ -103,15 +117,21 @@ final class AppState: ObservableObject {
             searchState = .idle
             return
         }
-        // Never let a click or Return select results from the previous query.
-        searchState = .searching([])
+        // Clearing here tears down every row for at least the debounce delay.
+        // Retain the display while immediately invalidating its selection.
+        searchState = .waiting(results)
         let cancellation = SearchCancellationToken()
         searchTask = Task.detached(priority: .userInitiated) { [weak self] in
             await withTaskCancellationHandler {
                 do {
                     try await Task.sleep(for: .milliseconds(75))
                     let initial = try library.searchPrefix(matching: query, limit: 80)
-                    await self?.publishSearch(.searching(initial))
+                    // An empty prefix is not a final empty result: substring
+                    // or fuzzy matches may still follow. Avoid a blank frame
+                    // between the old snapshot and those matches as well.
+                    if !initial.isEmpty {
+                        await self?.publishSearch(.searching(initial))
+                    }
                     try Task.checkCancellation()
                     let found = try library.search(
                         matching: query, limit: 80,
@@ -154,7 +174,9 @@ final class AppState: ObservableObject {
     }
 
     func selectSearchResult(_ word: String) {
-        selectWord(word, recordingHistory: true)
+        let normalized = DictionaryLibrary.normalizeKey(word)
+        guard selectableResults.contains(where: { $0.normalizedKey == normalized }) else { return }
+        selectWord(normalized, recordingHistory: true)
     }
 
     func selectSavedWord(_ word: String) {
@@ -171,6 +193,7 @@ final class AppState: ObservableObject {
     }
 
     func moveSearchSelection(by delta: Int) {
+        let results = selectableResults
         guard !results.isEmpty else { return }
         let index = results.firstIndex { $0.normalizedKey == selectedWord }
         let next = index.map { min(max($0 + delta, 0), results.count - 1) } ?? 0
@@ -178,6 +201,7 @@ final class AppState: ObservableObject {
     }
 
     func submitSearch() {
+        let results = selectableResults
         let result = results.first { $0.normalizedKey == selectedWord } ?? results.first
         if let result { selectSearchResult(result.normalizedKey) }
     }
