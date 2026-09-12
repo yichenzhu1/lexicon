@@ -9,6 +9,11 @@ struct EntryLocation: Equatable, Sendable {
     var anchor: String?
     var preferredDictionaryUUID: String?
     var scrollOffset: Double = 0
+
+    func hasSameDestination(as other: EntryLocation) -> Bool {
+        word == other.word && anchor == other.anchor
+            && preferredDictionaryUUID == other.preferredDictionaryUUID
+    }
 }
 
 struct EntryTab: Identifiable, Equatable {
@@ -16,20 +21,17 @@ struct EntryTab: Identifiable, Equatable {
     var location: EntryLocation?
     var backStack: [EntryLocation]
     var forwardStack: [EntryLocation]
-    var scrollOffset: Double
-
     var word: String? { location?.word }
+    var scrollOffset: Double { location?.scrollOffset ?? 0 }
 
     init(
         id: UUID = UUID(), location: EntryLocation? = nil,
-        backStack: [EntryLocation] = [], forwardStack: [EntryLocation] = [],
-        scrollOffset: Double = 0
+        backStack: [EntryLocation] = [], forwardStack: [EntryLocation] = []
     ) {
         self.id = id
         self.location = location
         self.backStack = backStack
         self.forwardStack = forwardStack
-        self.scrollOffset = scrollOffset
     }
 }
 
@@ -39,18 +41,14 @@ struct EntryTab: Identifiable, Equatable {
 final class AppState: ObservableObject {
     static let maximumResidentTabCount = 3
 
-    @Published var searchText = "" { didSet { scheduleSearch() } }
-    @Published private(set) var results: [SearchResult] = []
-    @Published var selectedWord: String? {
+    @Published var searchText = "" {
         didSet {
-            guard let word = selectedWord, word != oldValue, !isSyncingTabSelection else { return }
-            if !suppressHistoryRecording { libraryModel.recordHistory(word) }
-            let location = pendingNavigationLocation
-                ?? EntryLocation(word: word, anchor: nil, preferredDictionaryUUID: nil)
-            pendingNavigationLocation = nil
-            updateActiveTab(to: location)
+            if DictionaryLibrary.normalizeKey(searchText) != DictionaryLibrary.normalizeKey(oldValue) {
+                scheduleSearch()
+            }
         }
     }
+    @Published private var searchState: SearchState = .idle
     @Published private(set) var tabs: [EntryTab]
     @Published private(set) var activeTabID: UUID
     /// Oldest-to-newest list of tabs whose WebKit views should stay mounted.
@@ -59,13 +57,28 @@ final class AppState: ObservableObject {
 
     let libraryModel: LibraryModel
     private var searchTask: Task<Void, Never>?
-    private var searchCancellation: SearchCancellationToken?
-    private var searchGeneration = 0
-    private var isSyncingTabSelection = false
-    private var suppressHistoryRecording = false
-    private var pendingNavigationLocation: EntryLocation?
+    private var libraryChanges: AnyCancellable?
+
+    private enum SearchState: Sendable {
+        case idle
+        case searching([SearchResult])
+        case complete([SearchResult])
+
+        var results: [SearchResult] {
+            switch self {
+            case .idle: []
+            case .searching(let results), .complete(let results): results
+            }
+        }
+    }
 
     var library: DictionaryLibrary? { libraryModel.library }
+    var selectedWord: String? { activeTab?.word }
+    var results: [SearchResult] { searchState.results }
+    var isSearchPending: Bool {
+        if case .searching = searchState { return true }
+        return false
+    }
 
     init(libraryModel: LibraryModel) {
         self.libraryModel = libraryModel
@@ -73,54 +86,56 @@ final class AppState: ObservableObject {
         tabs = [initialTab]
         activeTabID = initialTab.id
         residentTabIDs = [initialTab.id]
+        libraryChanges = libraryModel.$contentVersion.dropFirst().sink { [weak self] _ in
+            self?.scheduleSearch()
+        }
     }
+
+    deinit { searchTask?.cancel() }
 
     // MARK: - Search
 
     private func scheduleSearch() {
         searchTask?.cancel()
-        searchCancellation?.cancel()
+        searchTask = nil
+        let query = DictionaryLibrary.normalizeKey(searchText)
+        guard let library, !query.isEmpty else {
+            searchState = .idle
+            return
+        }
+        // Never let a click or Return select results from the previous query.
+        searchState = .searching([])
         let cancellation = SearchCancellationToken()
-        searchCancellation = cancellation
-        searchGeneration += 1
-        let generation = searchGeneration
-        let query = searchText
-        searchTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(75))
-            guard !Task.isCancelled else { return }
-            await self?.performSearch(query, generation: generation, cancellation: cancellation)
+        searchTask = Task.detached(priority: .userInitiated) { [weak self] in
+            await withTaskCancellationHandler {
+                do {
+                    try await Task.sleep(for: .milliseconds(75))
+                    let initial = try library.searchPrefix(matching: query, limit: 80)
+                    await self?.publishSearch(.searching(initial))
+                    try Task.checkCancellation()
+                    let found = try library.search(
+                        matching: query, limit: 80,
+                        prefixResults: initial, cancellation: cancellation
+                    )
+                    await self?.publishSearch(.complete(found))
+                } catch {
+                    await self?.searchFailed(error)
+                }
+            } onCancel: {
+                cancellation.cancel()
+            }
         }
     }
 
-    private func performSearch(
-        _ query: String, generation: Int, cancellation: SearchCancellationToken
-    ) async {
-        guard let library else { return }
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            if generation == searchGeneration { results = [] }
-            return
-        }
-        do {
-            let initial = try await Task.detached(priority: .userInitiated) {
-                try library.searchPrefix(matching: trimmed, limit: 80)
-            }.value
-            guard generation == searchGeneration, !Task.isCancelled else { return }
-            results = initial
+    private func publishSearch(_ state: SearchState) {
+        guard !Task.isCancelled else { return }
+        searchState = state
+    }
 
-            let found = try await Task.detached(priority: .userInitiated) {
-                try library.search(
-                    matching: trimmed, limit: 80,
-                    prefixResults: initial, cancellation: cancellation
-                )
-            }.value
-            guard generation == searchGeneration, !Task.isCancelled else { return }
-            results = found
-        } catch {
-            guard generation == searchGeneration else { return }
-            libraryModel.errorMessage = error.localizedDescription
-            results = []
-        }
+    private func searchFailed(_ error: Error) {
+        guard !Task.isCancelled, !(error is CancellationError) else { return }
+        searchState = .complete([])
+        libraryModel.errorMessage = error.localizedDescription
     }
 
     func navigate(
@@ -135,19 +150,36 @@ final class AppState: ObservableObject {
             word: normalized, anchor: anchor,
             preferredDictionaryUUID: preferredDictionaryUUID?.lowercased()
         )
-        if selectedWord == normalized {
-            if !suppressHistoryRecording { libraryModel.recordHistory(normalized) }
-            updateActiveTab(to: location)
-        } else {
-            pendingNavigationLocation = location
-            selectedWord = normalized
-        }
+        visit(location, recordingHistory: true)
+    }
+
+    func selectSearchResult(_ word: String) {
+        selectWord(word, recordingHistory: true)
     }
 
     func selectSavedWord(_ word: String) {
-        suppressHistoryRecording = true
-        selectedWord = word
-        suppressHistoryRecording = false
+        selectWord(word, recordingHistory: false)
+    }
+
+    private func selectWord(_ word: String, recordingHistory: Bool) {
+        let normalized = DictionaryLibrary.normalizeKey(word)
+        guard !normalized.isEmpty, normalized != selectedWord else { return }
+        visit(
+            EntryLocation(word: normalized, anchor: nil, preferredDictionaryUUID: nil),
+            recordingHistory: recordingHistory
+        )
+    }
+
+    func moveSearchSelection(by delta: Int) {
+        guard !results.isEmpty else { return }
+        let index = results.firstIndex { $0.normalizedKey == selectedWord }
+        let next = index.map { min(max($0 + delta, 0), results.count - 1) } ?? 0
+        selectSearchResult(results[next].normalizedKey)
+    }
+
+    func submitSearch() {
+        let result = results.first { $0.normalizedKey == selectedWord } ?? results.first
+        if let result { selectSearchResult(result.normalizedKey) }
     }
 
     // MARK: - Browser tabs
@@ -168,7 +200,6 @@ final class AppState: ObservableObject {
             activeTabID = tab.id
             touchResidentTab(tab.id)
         }
-        synchronizeSelection(to: nil)
         searchText = ""
     }
 
@@ -178,7 +209,6 @@ final class AppState: ObservableObject {
             activeTabID = id
             touchResidentTab(id)
         }
-        synchronizeSelection(to: tab.location?.word)
         synchronizeSearchText(to: tab.location?.word)
     }
 
@@ -188,19 +218,8 @@ final class AppState: ObservableObject {
             NSApp.keyWindow?.performClose(nil)
             return
         }
-        let wasActive = id == activeTabID
-        withAnimation(.smooth(duration: 0.2)) {
-            _ = tabs.remove(at: index)
-            residentTabIDs.removeAll { $0 == id }
-        }
-        guard wasActive else { return }
-        let next = min(index, tabs.count - 1)
-        withAnimation(.smooth(duration: 0.18)) {
-            activeTabID = tabs[next].id
-            touchResidentTab(tabs[next].id)
-        }
-        synchronizeSelection(to: tabs[next].location?.word)
-        synchronizeSearchText(to: tabs[next].location?.word)
+        let next = index + 1 < tabs.count ? index + 1 : index - 1
+        closeTabs([id], fallback: tabs[next].id)
     }
 
     func closeActiveTabOrWindow() { closeTab(activeTabID) }
@@ -221,36 +240,27 @@ final class AppState: ObservableObject {
     /// "Close Other Tabs": the kept tab becomes active.
     func closeOtherTabs(of id: UUID) {
         guard tabs.count > 1, tabs.contains(where: { $0.id == id }) else { return }
-        withAnimation(.smooth(duration: 0.2)) {
-            tabs.removeAll { $0.id != id }
-            residentTabIDs.removeAll { $0 != id }
-        }
-        guard activeTabID != id else { return }
-        withAnimation(.smooth(duration: 0.18)) {
-            activeTabID = id
-            touchResidentTab(id)
-        }
-        synchronizeSelection(to: tabs.first?.location?.word)
-        synchronizeSearchText(to: tabs.first?.location?.word)
+        closeTabs(Set(tabs.map(\.id)).subtracting([id]), fallback: id)
     }
 
     func closeTabsToTheRight(of id: UUID) {
         guard let index = tabs.firstIndex(where: { $0.id == id }),
               index < tabs.count - 1
         else { return }
-        let closedActive = tabs[(index + 1)...].contains { $0.id == activeTabID }
+        closeTabs(Set(tabs[(index + 1)...].map(\.id)), fallback: id)
+    }
+
+    private func closeTabs(_ ids: Set<UUID>, fallback: UUID) {
+        let closedActive = ids.contains(activeTabID)
         withAnimation(.smooth(duration: 0.2)) {
-            let removed = tabs[(index + 1)...]
-            tabs.removeSubrange((index + 1)...)
-            residentTabIDs.removeAll { resident in removed.contains { $0.id == resident } }
+            tabs.removeAll { ids.contains($0.id) }
+            residentTabIDs.removeAll { ids.contains($0) }
+            if closedActive {
+                activeTabID = fallback
+                touchResidentTab(fallback)
+            }
         }
-        guard closedActive else { return }
-        withAnimation(.smooth(duration: 0.18)) {
-            activeTabID = id
-            touchResidentTab(id)
-        }
-        synchronizeSelection(to: tabs[index].location?.word)
-        synchronizeSearchText(to: tabs[index].location?.word)
+        if closedActive { synchronizeSearchText(to: selectedWord) }
     }
 
     /// Browser-style ⌘1…⌘8: activates the tab at a position, if it exists.
@@ -270,8 +280,6 @@ final class AppState: ObservableObject {
         else { return }
         if let current = tabs[index].location { tabs[index].forwardStack.append(current) }
         tabs[index].location = destination
-        tabs[index].scrollOffset = destination.scrollOffset
-        synchronizeSelection(to: destination.word)
         synchronizeSearchText(to: destination.word)
     }
 
@@ -281,19 +289,19 @@ final class AppState: ObservableObject {
         else { return }
         if let current = tabs[index].location { tabs[index].backStack.append(current) }
         tabs[index].location = destination
-        tabs[index].scrollOffset = destination.scrollOffset
-        synchronizeSelection(to: destination.word)
         synchronizeSearchText(to: destination.word)
     }
 
     func setTabScrollOffset(_ offset: Double, for tabID: UUID) {
-        guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
-        tabs[index].scrollOffset = max(0, offset)
+        guard offset.isFinite,
+              let index = tabs.firstIndex(where: { $0.id == tabID }),
+              let location = tabs[index].location,
+              location.scrollOffset != max(0, offset)
+        else { return }
         tabs[index].location?.scrollOffset = max(0, offset)
     }
 
     private func touchResidentTab(_ id: UUID) {
-        guard tabs.contains(where: { $0.id == id }) else { return }
         residentTabIDs.removeAll { $0 == id }
         residentTabIDs.append(id)
         if residentTabIDs.count > Self.maximumResidentTabCount {
@@ -301,20 +309,14 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func updateActiveTab(to location: EntryLocation) {
+    private func visit(_ location: EntryLocation, recordingHistory: Bool) {
+        if recordingHistory { libraryModel.recordHistory(location.word) }
         guard let index = tabs.firstIndex(where: { $0.id == activeTabID }),
-              tabs[index].location != location
+              tabs[index].location?.hasSameDestination(as: location) != true
         else { return }
         if let current = tabs[index].location { tabs[index].backStack.append(current) }
         tabs[index].location = location
-        tabs[index].scrollOffset = 0
         tabs[index].forwardStack.removeAll()
-    }
-
-    private func synchronizeSelection(to word: String?) {
-        isSyncingTabSelection = true
-        selectedWord = word
-        isSyncingTabSelection = false
     }
 
     private func synchronizeSearchText(to word: String?) {

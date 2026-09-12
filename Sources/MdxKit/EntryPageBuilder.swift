@@ -4,6 +4,25 @@ import Foundation
 /// every dictionary is rendered in its own `dict://<uuid>` origin so absolute
 /// paths stay dictionary-local and scripts cannot reach sibling entries.
 public enum EntryPageBuilder {
+    // These patterns are code, not dictionary input. Compile them once and
+    // surface a programming error instead of silently skipping normalization.
+    private enum Pattern {
+        static let documentTag = try! NSRegularExpression(pattern: #"(?i)<\s*(/?)\s*(html|head|body)\b"#)
+        static let styleBlock = try! NSRegularExpression(pattern: #"(?is)(<style\b[^>]*>)(.*?)(</style\s*>)"#)
+        static let inlineStyle = try! NSRegularExpression(pattern: #"(?is)(\bstyle\s*=\s*)(["'])(.*?)(\2)"#)
+        static let cssURL = try! NSRegularExpression(pattern: #"(?is)(url\(\s*)(["']?)(.*?)(\2\s*\))"#)
+        static let cssImport = try! NSRegularExpression(pattern: #"(?is)(@import\s+)(["'])(.*?)(\2)"#)
+        static let tag = try! NSRegularExpression(pattern: #"(?is)<\s*([a-z][a-z0-9:-]*)\b(?:[^>"']|"[^"]*"|'[^']*')*>"#)
+        static let cssResources = [
+            try! NSRegularExpression(pattern: #"(?is)url\(\s*["']?([^"')]+)"#),
+            try! NSRegularExpression(pattern: #"(?is)@import\s+["']([^"']+)["']"#),
+        ]
+        static let attributes = try! NSRegularExpression(pattern: #"(?is)(?:^|\s)([a-z_:][a-z0-9_.:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'`=<>]+))"#)
+        static let quotedReference = try! NSRegularExpression(pattern: #"(?is)(\b(?:src|href|data|poster|xlink:href)\s*=\s*)(["'])(.*?)(\2)"#)
+        static let unquotedReference = try! NSRegularExpression(pattern: #"(?i)(\b(?:src|href|data|poster|xlink:href)\s*=\s*)([^\s"'`=<>]+)"#)
+        static let srcset = try! NSRegularExpression(pattern: #"(?is)(\bsrcset\s*=\s*)(["'])(.*?)(\2)"#)
+    }
+
     public static func resultsDocument(
         for normalizedKey: String,
         library: DictionaryLibrary,
@@ -90,8 +109,8 @@ public enum EntryPageBuilder {
           .lexicon-jump button { flex:0 0 auto; font:inherit; font-size:11px; font-weight:600; color:inherit;
             opacity:.65; padding:3px 8px; border:1px solid rgba(128,128,128,.35); border-radius:7px;
             background:transparent; cursor:pointer; }
-          .lexicon-jump button:hover,.lexicon-jump button[data-current="1"] { opacity:1; }
-          .lexicon-jump button[data-current="1"] { background:rgba(128,128,128,.16); }
+          .lexicon-jump button:hover,.lexicon-jump button[data-current] { opacity:1; }
+          .lexicon-jump button[data-current] { background:rgba(128,128,128,.16); }
           .lexicon-jump-spacer { flex:1 0 auto; }
           .lexicon-jump .lexicon-toggle-all { border-style:none; text-decoration:none; }
           .lexicon-jump .lexicon-toggle-all:hover { background:rgba(128,128,128,.16); }
@@ -103,6 +122,7 @@ public enum EntryPageBuilder {
         </style></head><body>\(jumpBar)\(cards)
         <script>
         (() => {
+          const cards = Array.from(document.querySelectorAll('details[data-uuid]'));
           const frames = new Map(Array.from(document.querySelectorAll('iframe[data-uuid]'))
             .map(frame => [frame.dataset.uuid, frame]));
           const slots = new Map(Array.from(document.querySelectorAll('.lexicon-frame-slot[data-uuid]'))
@@ -110,6 +130,7 @@ public enum EntryPageBuilder {
           let scrollSyncPending = false;
           function syncFrameScrollState() {
             scrollSyncPending = false;
+            markCurrent();
             const states = [];
             frames.forEach(frame => {
               const rect = frame.getBoundingClientRect();
@@ -130,6 +151,8 @@ public enum EntryPageBuilder {
           function requestFrameScrollSync() {
             if (scrollSyncPending) return;
             scrollSyncPending = true;
+            // This bridge updates dictionary scroll semantics even in a
+            // background tab, where WebKit may suspend animation frames.
             queueMicrotask(syncFrameScrollState);
           }
           function load(frame) {
@@ -143,7 +166,7 @@ public enum EntryPageBuilder {
             proximity.observe(frame);
             frame.addEventListener('load', requestFrameScrollSync);
           });
-          document.querySelectorAll('details[data-uuid]').forEach(card => {
+          cards.forEach(card => {
             card.addEventListener('toggle', () => { if (card.open) load(card.querySelector('iframe')); });
           });
           requestAnimationFrame(() => frames.forEach(frame => {
@@ -202,33 +225,32 @@ public enum EntryPageBuilder {
           const toggleAll = document.querySelector('.lexicon-toggle-all');
           function refreshToggleAll() {
             if (!toggleAll) return;
-            const anyOpen = Array.from(document.querySelectorAll('details[data-uuid]'))
-              .some(card => card.open);
+            const anyOpen = cards.some(card => card.open);
             const label = anyOpen ? 'Collapse all' : 'Expand all';
             toggleAll.textContent = label;
             toggleAll.setAttribute('aria-label', label + ' dictionaries');
           }
           toggleAll?.addEventListener('click', () => {
-            const cards = Array.from(document.querySelectorAll('details[data-uuid]'));
             const open = !cards.some(card => card.open);
             cards.forEach(card => { card.open = open; });
             refreshToggleAll();
           });
-          document.querySelectorAll('details[data-uuid]').forEach(card =>
-            card.addEventListener('toggle', refreshToggleAll));
+          cards.forEach(card => card.addEventListener('toggle', () => {
+            refreshToggleAll(); requestFrameScrollSync();
+          }));
           refreshToggleAll();
           function markCurrent() {
             const bar = document.querySelector('.lexicon-jump');
             const cutoff = (bar?.getBoundingClientRect().bottom || 0) + 4;
             let current = buttons[0]?.dataset.jump;
-            document.querySelectorAll('details[data-uuid]').forEach(card => {
+            cards.forEach(card => {
               if (card.getBoundingClientRect().top <= cutoff) current = card.dataset.uuid;
             });
             buttons.forEach(button => button.toggleAttribute('data-current', button.dataset.jump === current));
           }
-          addEventListener('scroll', () => { markCurrent(); requestFrameScrollSync(); }, { passive:true });
+          addEventListener('scroll', requestFrameScrollSync, { passive:true });
           addEventListener('resize', requestFrameScrollSync);
-          markCurrent(); requestFrameScrollSync();
+          requestFrameScrollSync();
           if (\(max(0, initialScrollOffset)) > 0) requestAnimationFrame(() => scrollTo(0, \(max(0, initialScrollOffset))));
         })();
         </script></body></html>
@@ -300,26 +322,24 @@ public enum EntryPageBuilder {
     }
 
     public static func normalizeEntryHTML(_ html: String) -> String {
-        var output = html
-        for tag in ["html", "head", "body"] {
-            output = replacing(output, pattern: "(?i)<\\s*" + tag + "\\b", with: "<lexicon-" + tag)
-            output = replacing(output, pattern: "(?i)<\\s*/\\s*" + tag + "\\s*>", with: "</lexicon-" + tag + ">")
+        var output = replacingBlocks(html, regex: Pattern.documentTag) { groups in
+            "<" + groups[1] + "lexicon-" + groups[2].lowercased()
         }
         output = rewriteAttributes(output)
-        output = replacingBlocks(output, pattern: "(?is)(<style\\b[^>]*>)(.*?)(</style\\s*>)") { groups in
+        output = replacingBlocks(output, regex: Pattern.styleBlock) { groups in
             groups[1] + rewriteCSSReferences(groups[2]) + groups[3]
         }
-        output = replacingBlocks(output, pattern: "(?is)(\\bstyle\\s*=\\s*)([\"'])(.*?)(\\2)") { groups in
+        output = replacingBlocks(output, regex: Pattern.inlineStyle) { groups in
             groups[1] + groups[2] + rewriteCSSReferences(groups[3]) + groups[4]
         }
         return output
     }
 
     public static func rewriteCSSReferences(_ css: String) -> String {
-        var output = replacingBlocks(css, pattern: "(?is)(url\\(\\s*)([\"']?)(.*?)(\\2\\s*\\))") { groups in
+        var output = replacingBlocks(css, regex: Pattern.cssURL) { groups in
             groups[1] + groups[2] + canonicalReference(groups[3]) + groups[4]
         }
-        output = replacingBlocks(output, pattern: "(?is)(@import\\s+)([\"'])(.*?)(\\2)") { groups in
+        output = replacingBlocks(output, regex: Pattern.cssImport) { groups in
             groups[1] + groups[2] + canonicalReference(groups[3]) + groups[4]
         }
         return output
@@ -333,54 +353,44 @@ public enum EntryPageBuilder {
     public static func localResourceReferences(in text: String) -> Set<String> {
         var result = Set<String>()
 
-        let tagPattern = #"(?is)<\s*([a-z][a-z0-9:-]*)\b(?:[^>\"']|\"[^\"]*\"|'[^']*')*>"#
-        if let tagRegex = try? NSRegularExpression(pattern: tagPattern) {
-            let ns = text as NSString
-            for match in tagRegex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-                guard match.numberOfRanges > 1 else { continue }
-                let tagName = ns.substring(with: match.range(at: 1)).lowercased()
-                let tag = ns.substring(with: match.range)
-                let attributes = htmlAttributes(in: tag)
+        let ns = text as NSString
+        let range = NSRange(location: 0, length: ns.length)
+        for match in Pattern.tag.matches(in: text, range: range) {
+            let tagName = ns.substring(with: match.range(at: 1)).lowercased()
+            let tag = ns.substring(with: match.range)
+            let attributes = htmlAttributes(in: tag)
 
-                func add(_ name: String) {
-                    for value in attributes[name] ?? [] {
-                        if let path = normalizedLocalReference(value) { result.insert(path) }
-                    }
+            func add(_ name: String) {
+                for value in attributes[name] ?? [] {
+                    if let path = normalizedLocalReference(value) { result.insert(path) }
                 }
+            }
 
-                // `src` is a resource for every standard element that defines
-                // it. Do not scan arbitrary `data` or `href` attributes: many
-                // dictionaries use those for lookup IDs and entry links.
-                if ["audio", "embed", "iframe", "img", "input", "script", "source", "track", "video"]
-                    .contains(tagName) {
-                    add("src")
-                }
-                if tagName == "link" || tagName == "image" || tagName == "use" {
-                    add("href")
-                    add("xlink:href")
-                }
-                if tagName == "object" { add("data") }
-                if tagName == "video" { add("poster") }
+            // Only resource-bearing elements: dictionary links and arbitrary
+            // JavaScript data attributes are not companion files.
+            if ["audio", "embed", "iframe", "img", "input", "script", "source", "track", "video"]
+                .contains(tagName) {
+                add("src")
+            }
+            if tagName == "link" || tagName == "image" || tagName == "use" {
+                add("href")
+                add("xlink:href")
+            }
+            if tagName == "object" { add("data") }
+            if tagName == "video" { add("poster") }
 
-                if tagName == "img" || tagName == "source" {
-                    for srcset in attributes["srcset"] ?? [] {
-                        addSrcsetReferences(srcset, to: &result)
-                    }
+            if tagName == "img" || tagName == "source" {
+                for srcset in attributes["srcset"] ?? [] {
+                    addSrcsetReferences(srcset, to: &result)
                 }
-                for style in attributes["style"] ?? [] {
-                    result.formUnion(localCSSResourceReferences(in: style))
-                }
+            }
+            for style in attributes["style"] ?? [] {
+                result.formUnion(localCSSResourceReferences(in: style))
             }
         }
 
-        if let styleRegex = try? NSRegularExpression(
-            pattern: "(?is)<style\\b[^>]*>(.*?)</style\\s*>"
-        ) {
-            let ns = text as NSString
-            for match in styleRegex.matches(in: text, range: NSRange(location: 0, length: ns.length))
-            where match.numberOfRanges > 1 && match.range(at: 1).location != NSNotFound {
-                result.formUnion(localCSSResourceReferences(in: ns.substring(with: match.range(at: 1))))
-            }
+        for match in Pattern.styleBlock.matches(in: text, range: range) {
+            result.formUnion(localCSSResourceReferences(in: ns.substring(with: match.range(at: 2))))
         }
         return result
     }
@@ -389,16 +399,10 @@ public enum EntryPageBuilder {
     /// separate from HTML scanning so JavaScript calls and prose containing
     /// `url(...)` cannot be mistaken for assets.
     public static func localCSSResourceReferences(in css: String) -> Set<String> {
-        let patterns = [
-            "(?is)url\\(\\s*[\"']?([^\"')]+)",
-            "(?is)@import\\s+[\"']([^\"']+)[\"']",
-        ]
         var result = Set<String>()
         let ns = css as NSString
-        for pattern in patterns {
-            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            for match in regex.matches(in: css, range: NSRange(location: 0, length: ns.length))
-            where match.numberOfRanges > 1 && match.range(at: 1).location != NSNotFound {
+        for regex in Pattern.cssResources {
+            for match in regex.matches(in: css, range: NSRange(location: 0, length: ns.length)) {
                 if let path = normalizedLocalReference(ns.substring(with: match.range(at: 1))) {
                     result.insert(path)
                 }
@@ -408,12 +412,9 @@ public enum EntryPageBuilder {
     }
 
     private static func htmlAttributes(in tag: String) -> [String: [String]] {
-        let pattern = #"(?is)(?:^|\s)([a-z_:][a-z0-9_.:-]*)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'`=<>]+))"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [:] }
         let ns = tag as NSString
         var result: [String: [String]] = [:]
-        for match in regex.matches(in: tag, range: NSRange(location: 0, length: ns.length)) {
-            guard match.numberOfRanges == 5 else { continue }
+        for match in Pattern.attributes.matches(in: tag, range: NSRange(location: 0, length: ns.length)) {
             let name = ns.substring(with: match.range(at: 1)).lowercased()
             for index in 2 ... 4 where match.range(at: index).location != NSNotFound {
                 result[name, default: []].append(ns.substring(with: match.range(at: index)))
@@ -454,13 +455,13 @@ public enum EntryPageBuilder {
     }
 
     private static func rewriteAttributes(_ html: String) -> String {
-        var output = replacingBlocks(
-            html, pattern: "(?is)(\\b(?:src|href|data|poster|xlink:href)\\s*=\\s*)([\"'])(.*?)(\\2)"
-        ) { groups in groups[1] + groups[2] + canonicalReference(groups[3]) + groups[4] }
-        output = replacingBlocks(
-            output, pattern: "(?i)(\\b(?:src|href|data|poster|xlink:href)\\s*=\\s*)([^\\s\"'`=<>]+)"
-        ) { groups in groups[1] + canonicalReference(groups[2]) }
-        output = replacingBlocks(output, pattern: "(?is)(\\bsrcset\\s*=\\s*)([\"'])(.*?)(\\2)") { groups in
+        var output = replacingBlocks(html, regex: Pattern.quotedReference) { groups in
+            groups[1] + groups[2] + canonicalReference(groups[3]) + groups[4]
+        }
+        output = replacingBlocks(output, regex: Pattern.unquotedReference) { groups in
+            groups[1] + canonicalReference(groups[2])
+        }
+        output = replacingBlocks(output, regex: Pattern.srcset) { groups in
             if groups[3].lowercased().contains("data:") {
                 return groups[1] + groups[2] + groups[3] + groups[4]
             }
@@ -510,25 +511,25 @@ public enum EntryPageBuilder {
         """
     }
 
-    private static func replacing(_ value: String, pattern: String, with replacement: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return value }
-        return regex.stringByReplacingMatches(in: value, range: NSRange(value.startIndex..., in: value), withTemplate: replacement)
-    }
-
     private static func replacingBlocks(
-        _ value: String, pattern: String, transform: ([String]) -> String
+        _ value: String, regex: NSRegularExpression, transform: ([String]) -> String
     ) -> String {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return value }
         let ns = value as NSString
-        var output = value
-        for match in regex.matches(in: value, range: NSRange(location: 0, length: ns.length)).reversed() {
+        let matches = regex.matches(in: value, range: NSRange(location: 0, length: ns.length))
+        guard !matches.isEmpty else { return value }
+        var output = ""
+        output.reserveCapacity(value.utf8.count)
+        var cursor = 0
+        for match in matches {
+            output += ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
             let groups = (0 ..< match.numberOfRanges).map { index -> String in
                 let range = match.range(at: index)
                 return range.location == NSNotFound ? "" : ns.substring(with: range)
             }
-            guard let range = Range(match.range, in: output) else { continue }
-            output.replaceSubrange(range, with: transform(groups))
+            output += transform(groups)
+            cursor = NSMaxRange(match.range)
         }
+        output += ns.substring(from: cursor)
         return output
     }
 

@@ -8,11 +8,13 @@ enum Entry {
             Task { @MainActor in
                 let servicePassed = await TranslationServiceTests.run()
                 let applePassed = await AppleTranslationTests.run()
-                exit(servicePassed && applePassed ? 0 : 1)
+                let modelPassed = await TranslationModelTests.run()
+                exit(servicePassed && applePassed && modelPassed ? 0 : 1)
             }
             dispatchMain()
         } else if CommandLine.arguments.contains("--tab-state-test") {
-            exit(TabStateTests.run() ? 0 : 1)
+            Task { @MainActor in exit(await TabStateTests.run() ? 0 : 1) }
+            dispatchMain()
         } else if CommandLine.arguments.contains("--tab-webview-test") {
             TabWebViewSmokeTest.run() // never returns
         } else if CommandLine.arguments.contains("--smoke-test") {

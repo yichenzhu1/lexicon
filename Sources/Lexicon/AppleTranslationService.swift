@@ -36,7 +36,6 @@ struct AppleTranslationService {
             let session = TranslationSession(
                 installedSource: sourceLanguage, target: targetLanguage
             )
-            try Task.checkCancellation()
             return try await session.translate(source).targetText
         }
     )
@@ -46,15 +45,6 @@ struct AppleTranslationService {
 
     func translate(_ source: String) async throws -> String {
         try Task.checkCancellation()
-        let status = await availability()
-        try Task.checkCancellation()
-        switch status {
-        case .installed: break
-        case .supported: throw AppleTranslationSetupError.languagesNotInstalled
-        case .unsupported: throw AppleTranslationSetupError.unsupported
-        @unknown default: throw AppleTranslationSetupError.unsupported
-        }
-
         do {
             let result = try await translateInstalled(source)
             try Task.checkCancellation()
@@ -63,9 +53,14 @@ struct AppleTranslationService {
             }
             return result
         } catch TranslationError.notInstalled {
-            // A language may have been removed after the availability check.
+            // installedSource sessions report missing packs without downloading.
             try Task.checkCancellation()
             throw AppleTranslationSetupError.languagesNotInstalled
+        } catch TranslationError.unsupportedLanguagePairing,
+                TranslationError.unsupportedSourceLanguage,
+                TranslationError.unsupportedTargetLanguage {
+            try Task.checkCancellation()
+            throw AppleTranslationSetupError.unsupported
         } catch TranslationError.alreadyCancelled {
             throw CancellationError()
         }

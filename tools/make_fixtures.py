@@ -75,6 +75,20 @@ def write(name, writer):
     print(f"wrote {name} ({os.path.getsize(path)} bytes)")
 
 
+def write_benchmark_fixture(path):
+    """Generate the large performance input on demand, outside the checkout."""
+    entries = {
+        f"headword-{i:07d}-词典-😀-" + "abcdefghijklmno" * 4:
+            f"<p>Definition number {i}</p>"
+        for i in range(50_000)
+    }
+    with open(path, "wb") as output:
+        MDictWriter(
+            entries, title="Synthetic parser benchmark",
+            description="50,000 long Unicode headwords", block_size=32768,
+        ).write(output)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     entries = word_entries()
@@ -170,6 +184,46 @@ def main():
         title="multipart numbered resources", description="MDD part fixture", is_mdd=True,
     ))
 
+    write("resources.mdx", MDictWriter(
+        {"resources": "Resource lookup fixture"},
+        title="Resource Lookup Dictionary", description="Redirects and literal path prefixes",
+    ))
+    write("resources.mdd", MDictWriter(
+        {
+            "\\image.png": TINY_PNG,
+            "\\alias.png": b" \n@@@LINK=image.png\r\n",
+            "\\unicode-alias.png": "\u2028@@@LINK=image.png".encode("utf-8"),
+            "\\bom-alias.png": "@@@LINK=image.png".encode("utf-8-sig"),
+            "\\utf16-alias.png": "@@@LINK=image.png".encode("utf-16le"),
+            "\\loop-a.png": b"@@@LINK=loop-b.png",
+            "\\loop-b.png": b"@@@LINK=loop-a.png",
+            "\\wild%_[]#audio.mp3": b"literal prefix audio",
+            "\\wildXYZ#other.mp3": b"must not match",
+            "\\large.bin": b"\x89\x50" + b"\xff\xff" * (1024 * 1024),
+        },
+        title="resource lookup assets", description="MDD redirect and binary fixture", is_mdd=True,
+    ))
+
+    # The key index may share records and visit them in a different order.
+    # Keep six physical records; the seventh key aliases the third record.
+    offset_order = MDictWriter(
+        {key: f"record {key.upper()}" for key in "abcdefg"},
+        title="Offset Order Dictionary", description="Shared and unordered record offsets",
+        block_size=32,
+    )
+    offsets = [entry.offset for entry in offset_order._offset_table]
+    offset_order._offset_table[-1].record_null = b""
+    for entry, record_index in zip(offset_order._offset_table, [5, 0, 2, 2, 1, 4, 3]):
+        entry.offset = offsets[record_index]
+    offset_order._build_key_blocks()
+    offset_order._build_keyb_index()
+    offset_order._build_record_blocks()
+    offset_order._build_recordb_index()
+    write("offset-order.mdx", offset_order)
+
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--benchmark":
+        write_benchmark_fixture(sys.argv[2])
+    else:
+        main()

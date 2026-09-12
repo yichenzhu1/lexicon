@@ -504,11 +504,7 @@ struct ContentView: View {
                 // search handle typos rather than changing the user's text.
                 .autocorrectionDisabled()
                 .focused($searchFocused)
-                .onSubmit {
-                    if let first = appState.results.first {
-                        appState.selectedWord = first.normalizedKey
-                    }
-                }
+                .onSubmit { appState.submitSearch() }
                 .onKeyPress(.escape) {
                     if appState.searchText.isEmpty {
                         searchFocused = false
@@ -518,11 +514,11 @@ struct ContentView: View {
                     return .handled
                 }
                 .onKeyPress(.downArrow) {
-                    moveSelection(by: 1)
+                    appState.moveSearchSelection(by: 1)
                     return .handled
                 }
                 .onKeyPress(.upArrow) {
-                    moveSelection(by: -1)
+                    appState.moveSearchSelection(by: -1)
                     return .handled
                 }
         }
@@ -556,19 +552,6 @@ struct ContentView: View {
         Task { @MainActor in
             await Task.yield()
             searchFocused = true
-        }
-    }
-
-    /// Arrow keys in the search field walk through the result list.
-    private func moveSelection(by delta: Int) {
-        let results = appState.results
-        guard !results.isEmpty else { return }
-        if let current = appState.selectedWord,
-           let index = results.firstIndex(where: { $0.normalizedKey == current }) {
-            let next = min(max(index + delta, 0), results.count - 1)
-            appState.selectedWord = results[next].normalizedKey
-        } else {
-            appState.selectedWord = results.first?.normalizedKey
         }
     }
 
@@ -616,7 +599,7 @@ struct ContentView: View {
                                 if !isSearching {
                                     placeholderRow(emptyListMessage)
                                 } else if appState.results.isEmpty {
-                                    placeholderRow("No matches")
+                                    placeholderRow(appState.isSearchPending ? "Searching…" : "No matches")
                                 } else {
                                     if showingSuggestions {
                                         // Nothing matched literally; these are near misses.
@@ -633,8 +616,8 @@ struct ContentView: View {
                             } else if savedWords.isEmpty {
                                 placeholderRow(emptyListMessage)
                             } else {
-                                ForEach(savedWordRows) { item in
-                                    savedWordRow(item)
+                                ForEach(savedWords, id: \.self) { word in
+                                    savedWordRow(word)
                                 }
                             }
                         }
@@ -754,7 +737,7 @@ struct ContentView: View {
 
     private func resultRow(_ result: SearchResult) -> some View {
         Button {
-            appState.selectedWord = result.normalizedKey
+            appState.selectSearchResult(result.normalizedKey)
         } label: {
             HStack {
                 Text(result.displayKey)
@@ -776,17 +759,17 @@ struct ContentView: View {
         .accessibilityValue(appState.selectedWord == result.normalizedKey ? "Selected" : "")
     }
 
-    private func savedWordRow(_ item: SavedSidebarWord) -> some View {
-        let word = item.word
+    private func savedWordRow(_ word: String) -> some View {
+        let isSelected = appState.selectedWord == word
         return Button {
             appState.selectSavedWord(word)
         } label: {
             Text(libraryModel.displayWord(for: word) ?? word)
                 .lineLimit(1)
-                .sidebarRow(selected: item.isSelected)
+                .sidebarRow(selected: isSelected)
         }
         .buttonStyle(.plain)
-        .accessibilityValue(item.isSelected ? "Selected" : "")
+        .accessibilityValue(isSelected ? "Selected" : "")
         .contextMenu {
             Button(libraryModel.isStarred(word) ? "Remove from Starred" : "Add to Starred") {
                 libraryModel.toggleStar(word)
@@ -818,15 +801,6 @@ struct ContentView: View {
         }
     }
 
-    /// Selection participates in row identity so SwiftUI cannot retain the
-    /// previous row's highlighted/accessibility state inside the lazy stack.
-    /// Only the old and new rows are rebuilt, preserving scroll position.
-    private var savedWordRows: [SavedSidebarWord] {
-        savedWords.map { word in
-            SavedSidebarWord(word: word, isSelected: appState.selectedWord == word)
-        }
-    }
-
     /// True when every result is a near miss rather than a literal match.
     private var showingSuggestions: Bool {
         !appState.results.isEmpty && appState.results.allSatisfy { $0.matchKind == .fuzzy }
@@ -839,6 +813,7 @@ struct ContentView: View {
         case .starred:
             return "\(libraryModel.starred.count) starred"
         case .lexicon:
+            if appState.isSearchPending && appState.results.isEmpty { return "Searching…" }
             let label = showingSuggestions ? "suggestions" : "results"
             return "\(appState.results.count) \(label)"
         }
@@ -961,17 +936,6 @@ struct LibraryNoticeView: View {
         )
         .accessibilityElement(children: .contain)
     }
-}
-
-private struct SavedSidebarWord: Identifiable {
-    struct ID: Hashable {
-        let word: String
-        let isSelected: Bool
-    }
-
-    let word: String
-    let isSelected: Bool
-    var id: ID { ID(word: word, isSelected: isSelected) }
 }
 
 /// Shared chrome geometry keeps the toolbar, tab strip, and sidebar edge on

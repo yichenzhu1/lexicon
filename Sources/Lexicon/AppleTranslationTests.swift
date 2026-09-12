@@ -11,13 +11,9 @@ enum AppleTranslationTests {
         let suite = Suite()
 
         await suite.run("installed languages translate the original source") {
-            var availabilityCalls = 0
             var receivedSources: [String] = []
             let service = AppleTranslationService(
-                availability: {
-                    availabilityCalls += 1
-                    return .installed
-                },
+                availability: { .installed },
                 translateInstalled: { text in
                     receivedSources.append(text)
                     return "旧灯塔矗立在悬崖上。"
@@ -25,49 +21,43 @@ enum AppleTranslationTests {
             )
             let result = try await service.translate(source)
             try expect(result == "旧灯塔矗立在悬崖上。", "translated text changed")
-            try expect(availabilityCalls == 1, "availability was not checked exactly once")
             try expect(receivedSources == [source], "source changed or translated more than once")
         }
 
-        await suite.run("missing languages do not create a translation session") {
-            var translationCalls = 0
+        await suite.run("missing installed languages return download guidance") {
             let service = AppleTranslationService(
-                availability: { .supported },
-                translateInstalled: { _ in
-                    translationCalls += 1
-                    return "unexpected"
-                }
+                availability: { .installed },
+                translateInstalled: { _ in throw TranslationError.notInstalled }
             )
             do {
                 _ = try await service.translate(source)
                 throw Failure(message: "missing languages were accepted")
             } catch AppleTranslationSetupError.languagesNotInstalled { }
-            try expect(translationCalls == 0, "missing languages reached the translation operation")
         }
 
-        await suite.run("unsupported languages do not create a translation session") {
-            var translationCalls = 0
-            let service = AppleTranslationService(
-                availability: { .unsupported },
-                translateInstalled: { _ in
-                    translationCalls += 1
-                    return "unexpected"
-                }
-            )
-            do {
-                _ = try await service.translate(source)
-                throw Failure(message: "unsupported languages were accepted")
-            } catch AppleTranslationSetupError.unsupported { }
-            try expect(translationCalls == 0, "unsupported languages reached the translation operation")
+        for (name, error) in [
+            ("pairing", TranslationError.unsupportedLanguagePairing),
+            ("source", TranslationError.unsupportedSourceLanguage),
+            ("target", TranslationError.unsupportedTargetLanguage),
+        ] {
+            await suite.run("unsupported language \(name) returns provider guidance") {
+                let service = AppleTranslationService(
+                    availability: { .installed },
+                    translateInstalled: { _ in throw error }
+                )
+                do {
+                    _ = try await service.translate(source)
+                    throw Failure(message: "unsupported languages were accepted")
+                } catch AppleTranslationSetupError.unsupported { }
+            }
         }
 
-        await suite.run("a later request rechecks downloaded languages") {
-            var status = LanguageAvailability.Status.supported
-            var translationCalls = 0
+        await suite.run("a later request uses newly installed languages") {
+            let installation = InstallationState()
             let service = AppleTranslationService(
-                availability: { status },
+                availability: { .installed },
                 translateInstalled: { _ in
-                    translationCalls += 1
+                    guard installation.isInstalled else { throw TranslationError.notInstalled }
                     return "译文"
                 }
             )
@@ -75,21 +65,9 @@ enum AppleTranslationTests {
                 _ = try await service.translate(source)
                 throw Failure(message: "missing languages were accepted")
             } catch AppleTranslationSetupError.languagesNotInstalled { }
-            status = .installed
+            installation.isInstalled = true
             let result = try await service.translate(source)
             try expect(result == "译文", "newly installed languages were not used")
-            try expect(translationCalls == 1, "translation did not wait for installed languages")
-        }
-
-        await suite.run("languages removed during translation return download guidance") {
-            let service = AppleTranslationService(
-                availability: { .installed },
-                translateInstalled: { _ in throw TranslationError.notInstalled }
-            )
-            do {
-                _ = try await service.translate(source)
-                throw Failure(message: "removed languages were accepted")
-            } catch AppleTranslationSetupError.languagesNotInstalled { }
         }
 
         await suite.run("already-cancelled system sessions preserve cancellation") {
@@ -129,13 +107,9 @@ enum AppleTranslationTests {
         }
 
         await suite.run("cancellation before starting performs no work") {
-            var availabilityCalls = 0
             var translationCalls = 0
             let service = AppleTranslationService(
-                availability: {
-                    availabilityCalls += 1
-                    return .installed
-                },
+                availability: { .installed },
                 translateInstalled: { _ in
                     translationCalls += 1
                     return "unexpected"
@@ -145,24 +119,19 @@ enum AppleTranslationTests {
             let request = Task { try await service.translate(source) }
             request.cancel()
             try await expectCancellation(request)
-            try expect(availabilityCalls == 0, "cancelled request checked languages")
             try expect(translationCalls == 0, "cancelled request translated text")
         }
 
-        await suite.run("cancellation while checking languages prevents translation") {
-            for status in [LanguageAvailability.Status.installed, .supported, .unsupported] {
+        await suite.run("cancellation takes precedence over a late setup error") {
+            for error in [TranslationError.notInstalled, .unsupportedLanguagePairing] {
                 let entered = Signal()
                 let release = Signal()
-                var translationCalls = 0
                 let service = AppleTranslationService(
-                    availability: {
+                    availability: { .installed },
+                    translateInstalled: { _ in
                         entered.open()
                         await release.wait()
-                        return status
-                    },
-                    translateInstalled: { _ in
-                        translationCalls += 1
-                        return "unexpected"
+                        throw error
                     }
                 )
                 let request = Task { try await service.translate(source) }
@@ -170,7 +139,6 @@ enum AppleTranslationTests {
                 request.cancel()
                 release.open()
                 try await expectCancellation(request)
-                try expect(translationCalls == 0, "request translated after cancellation during availability")
             }
         }
 
@@ -245,6 +213,11 @@ enum AppleTranslationTests {
     }
 
     private struct Failure: Error { let message: String }
+
+    @MainActor
+    private final class InstallationState {
+        var isInstalled = false
+    }
 
     @MainActor
     private final class Signal {

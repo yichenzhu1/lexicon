@@ -62,9 +62,9 @@ func runConcurrencyTests(_ t: TestHarness) {
                 try library.importDictionary(
                     from: fixturesURL.appendingPathComponent("utf16.mdx")
                 ) { update in
-                    // This callback runs after entry insertion, while the
-                    // import still owns the writer transaction.
-                    if update.stage == "Indexing resources", update.completed == 0 {
+                    // Pause after indexing, before the staged files become
+                    // usable. No new row may escape the import transaction.
+                    if update.stage == "Copying referenced assets…" {
                         transactionHeld.signal()
                         if resumeImport.wait(timeout: .now() + 10) == .timedOut {
                             importFailure.mutate { $0 = "timed out waiting to resume import" }
@@ -119,7 +119,8 @@ func runConcurrencyTests(_ t: TestHarness) {
     }
 
     t.run("concurrency: opening the same dictionary from many threads is consistent") {
-        let library = library!
+        // Earlier tests already warmed the original instance's handles.
+        let library = try DictionaryLibrary(rootURL: tempRoot)
         let records = try library.dictionaries()
         let failures = Locked(0)
         DispatchQueue.concurrentPerform(iterations: 64) { _ in
@@ -130,6 +131,31 @@ func runConcurrencyTests(_ t: TestHarness) {
             }
         }
         t.expectEqual(failures.value, 0, "concurrent first-open races resolved to one handle")
+    }
+
+    t.run("concurrency: dictionary snapshots stay coherent while labels change") {
+        let library = library!
+        let record = try library.dictionaries().first!
+        let failures = Locked(0)
+        DispatchQueue.concurrentPerform(iterations: 200) { index in
+            do {
+                if index.isMultiple(of: 4) {
+                    try library.setTitle("Label \(index)", for: record)
+                } else {
+                    let snapshot = try library.dictionaries()
+                    guard snapshot.contains(where: { $0.uuid == record.uuid }),
+                          library.isKnownDictionaryUUID(record.uuid) else {
+                        failures.mutate { $0 += 1 }
+                        return
+                    }
+                }
+            } catch {
+                failures.mutate { $0 += 1 }
+            }
+        }
+        try library.setTitle("Final label", for: record)
+        t.expectEqual(failures.value, 0, "no transient missing records during invalidation")
+        t.expectEqual(try library.dictionaries().first?.title, "Final label", "latest label remains cached")
     }
 }
 

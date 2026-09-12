@@ -63,6 +63,22 @@ enum TranslationServiceTests {
             )
         }
 
+        await suite.run("translation input validates once without dropping instructions") {
+            let input = try TranslationInput(" \n" + prompt + "\t ")
+            try expect(input.prompt == prompt, "input lost part of the full prompt")
+            let boundary = try TranslationInput(String(repeating: "a", count: 20_000))
+            try expect(boundary.prompt.utf8.count == 20_000, "valid input size boundary rejected")
+            for provider in TranslationProvider.allCases.filter(\.requiresAPIKey) {
+                try await expectError(provider, prompt: " \n ", fixture: .failure(.cannotConnectToHost),
+                                      contains: "no text", expectedRequestCount: 0)
+                try await expectError(provider, prompt: String(repeating: "译", count: 6_667),
+                                      fixture: .failure(.cannotConnectToHost),
+                                      contains: "too long", expectedRequestCount: 0)
+                try await expectError(provider, apiKey: " \t ", fixture: .failure(.cannotConnectToHost),
+                                      contains: "API key", expectedRequestCount: 0)
+            }
+        }
+
         for markup in [false, true] {
             await suite.run("Google request and response (markup: \(markup))") {
                 let text = markup ? "<m>A <n>note</n></m>" : source
@@ -128,6 +144,8 @@ enum TranslationServiceTests {
                     let body = try jsonBody(request)
                     try expect(body["model"] as? String == "test-model", "chat model was not trimmed")
                     try expect(body["stream"] as? Bool == false, "unexpected chat stream")
+                    try expect(body["enable_thinking"] == nil && body["temperature"] == nil,
+                               "DashScope-specific options leaked into compatible chat")
                     let messages = body["messages"] as? [[String: String]]
                     try expect(messages?.map { $0["role"] ?? "" } == ["system", "user"], "missing chat roles")
                     try expect(messages?.last?["content"] == prompt, "chat prompt changed")
@@ -152,7 +170,7 @@ enum TranslationServiceTests {
 
         for region in DashScopeRegion.allCases {
             await suite.run("DashScope \(region.rawValue) routing and options") {
-                let result = try await call(.dashScope, region: region, fixture: .json(chatJSON)) { request in
+                let result = try await call(.dashScope, model: " dash-model \n", region: region, fixture: .json(chatJSON)) { request in
                     let hosts: [DashScopeRegion: String] = [
                         .china: "dashscope.aliyuncs.com",
                         .international: "dashscope-intl.aliyuncs.com",
@@ -216,6 +234,37 @@ enum TranslationServiceTests {
             }
         }
 
+        await suite.run("cancelled task does not start an HTTP request") {
+            let task = Task {
+                withUnsafeCurrentTask { $0?.cancel() }
+                return try await call(.googleCloud, fixture: .failure(.cannotConnectToHost))
+            }
+            do {
+                _ = try await task.value
+                throw Failure(message: "cancelled task was accepted")
+            } catch is CancellationError {
+                try expect(TranslationMockProtocol.requests.isEmpty, "cancelled task sent an HTTP request")
+            }
+        }
+
+        await suite.run("dedicated translation APIs preserve returned markup whitespace") {
+            let translation = " \n<m>译文</m>\t "
+            for provider in [TranslationProvider.googleCloud, .deepL] {
+                let response: [String: Any] = provider == .googleCloud
+                    ? ["data": ["translations": [["translatedText": translation]]]]
+                    : ["translations": [["text": translation]]]
+                let json = String(decoding: try JSONSerialization.data(withJSONObject: response), as: UTF8.self)
+                let result = try await call(provider, apiKey: " test-key ", fixture: .json(json)) { request in
+                    let key = provider == .googleCloud
+                        ? request.value(forHTTPHeaderField: "x-goog-api-key")
+                        : request.value(forHTTPHeaderField: "Authorization")
+                    try expect(key == (provider == .googleCloud ? "test-key" : "DeepL-Auth-Key test-key"),
+                               "key was not normalized before building headers")
+                }
+                try expect(result == translation, "dedicated API output whitespace changed")
+            }
+        }
+
         await suite.run("incomplete language-model responses are rejected") {
             for status in ["incomplete", "failed", "cancelled", "in_progress", "queued"] {
                 let json = "{\"status\":\"\(status)\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"partial\"}]}]}"
@@ -243,7 +292,7 @@ enum TranslationServiceTests {
                 }
             }
             for provider in TranslationProvider.allCases.filter(\.isGeneralLanguageModel) {
-                try await expectError(provider, model: " \n ", dashModel: "\t", fixture: .failure(.cannotConnectToHost), contains: "model name", expectedRequestCount: 0)
+                try await expectError(provider, model: " \n ", fixture: .failure(.cannotConnectToHost), contains: "model name", expectedRequestCount: 0)
             }
         }
 
@@ -257,7 +306,6 @@ enum TranslationServiceTests {
         prompt input: String = prompt,
         apiKey: String = "test-key",
         model: String = " test-model \n",
-        dashModel: String = " dash-model \n",
         region: DashScopeRegion = .china,
         fixture: TranslationMockProtocol.Fixture,
         inspect: (URLRequest) throws -> Void = { _ in }
@@ -268,16 +316,17 @@ enum TranslationServiceTests {
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
         let result = try await DictionaryTranslationService.translate(
-            prompt: input, provider: provider, apiKey: apiKey,
-            model: model, dashScopeModel: dashModel, dashScopeRegion: region,
-            session: session
+            input: try TranslationInput(input),
+            configuration: TranslationConfiguration(provider: provider, model: model, dashScopeRegion: region),
+            apiKey: apiKey, session: session
         )
         let requests = TranslationMockProtocol.requests
         try expect(requests.count == 1, "expected exactly one request")
         let request = requests[0]
         try expect(request.httpMethod == "POST", "request is not POST")
         try expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json; charset=utf-8", "wrong content type")
-        try expect(request.timeoutInterval > 0 && request.timeoutInterval <= 60, "missing request timeout")
+        let expectedTimeout: TimeInterval = provider.category == .translationAPIs ? 30 : provider == .dashScope ? 45 : 60
+        try expect(request.timeoutInterval == expectedTimeout, "provider timeout changed")
         try inspect(request)
         return result
     }
@@ -285,14 +334,14 @@ enum TranslationServiceTests {
     private static func expectError(
         _ provider: TranslationProvider,
         prompt input: String = prompt,
+        apiKey: String = "test-key",
         model: String = "test-model",
-        dashModel: String = "dash-model",
         fixture: TranslationMockProtocol.Fixture,
         contains fragment: String,
         expectedRequestCount: Int = 1
     ) async throws {
         do {
-            _ = try await call(provider, prompt: input, model: model, dashModel: dashModel, fixture: fixture)
+            _ = try await call(provider, prompt: input, apiKey: apiKey, model: model, fixture: fixture)
             throw Failure(message: "expected error containing \(fragment)")
         } catch let error as TranslationServiceError {
             try expect(error.message.contains(fragment), "wrong error: \(error.message)")

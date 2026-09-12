@@ -7,8 +7,6 @@ import Foundation
 enum BlockCompression {
     /// Ceiling on a single decompressed block, so a corrupt size field cannot
     /// request an unbounded allocation. Real blocks are far below this.
-    // A single corrupt size must not be able to force a desktop app into a
-    // gigabyte allocation. Real MDict blocks are normally far smaller.
     static let maxDecompressedBlockSize = 256 << 20 // 256 MiB
 
     /// Decompresses one framed block.
@@ -28,11 +26,11 @@ enum BlockCompression {
             throw MdxError.corruptData("implausible decompressed block size \(decompressedSize)")
         }
         let base = block.startIndex
-        let compType = block.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) } // stored little-endian on disk
-        let checksumBytes = block.subdata(in: base + 4 ..< base + 8)
+        let compType = block.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).littleEndian }
+        let checksumBytes = block[base + 4 ..< base + 8]
         let checksum = checksumBytes.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).bigEndian }
 
-        var payload = block.subdata(in: base + 8 ..< base + block.count)
+        var payload = block[base + 8 ..< block.endIndex]
         if encryptedIndex {
             payload = FastCrypt.decrypt(payload, key: FastCrypt.indexKey(checksum: checksumBytes))
         }
@@ -62,7 +60,7 @@ enum BlockCompression {
     /// using the Compression framework's raw-deflate decoder.
     private static func inflateZlib(_ data: Data, decompressedSize: Int) throws -> Data {
         guard data.count > 2 else { throw MdxError.truncatedFile("zlib stream") }
-        let deflate = data.subdata(in: data.startIndex + 2 ..< data.startIndex + data.count)
+        let deflate = data.dropFirst(2)
         var output = Data(count: decompressedSize)
         let written = output.withUnsafeMutableBytes { (dst: UnsafeMutableRawBufferPointer) -> Int in
             deflate.withUnsafeBytes { (src: UnsafeRawBufferPointer) -> Int in

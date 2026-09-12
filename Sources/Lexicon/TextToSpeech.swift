@@ -60,11 +60,9 @@ enum GoogleCloudTTS {
     static func synthesize(
         text: String, language: String, voiceName: String, apiKey: String
     ) async throws -> Data {
-        guard let url = URL(
+        let url = URL(
             string: "https://texttospeech.googleapis.com/v1/text:synthesize"
-        ) else {
-            throw ServiceError(message: "Could not construct the Google Cloud request.")
-        }
+        )!
 
         let body = RequestBody(
             input: .init(text: text),

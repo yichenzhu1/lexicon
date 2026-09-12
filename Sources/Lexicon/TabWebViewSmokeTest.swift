@@ -111,10 +111,20 @@ enum TabWebViewSmokeTest {
             ) { result in
                 switch result {
                 case .success(let value):
-                    guard let checks = value as? Int, checks >= 19 else {
+                    guard let checks = value as? Int, checks >= 26 else {
                         finish("translation checks returned \(String(describing: value))", success: false)
                     }
-                    finish("TAB WEBVIEW OK (\(checks) translation bridge checks)", success: true)
+                    Task { @MainActor in
+                        do {
+                            let loadingChecks = try await EntryLoadingTests.run(model: state.libraryModel)
+                            finish(
+                                "TAB WEBVIEW OK (\(checks) translation bridge checks, \(loadingChecks) page lifecycle checks)",
+                                success: true
+                            )
+                        } catch {
+                            finish("page lifecycle: \(error)", success: false)
+                        }
+                    }
                 case .failure(let error):
                     finish("translation bridge: \(error)", success: false)
                 }
@@ -158,7 +168,7 @@ enum TabWebViewSmokeTest {
         cancellations.push(event.data.requestID); return;
       }
       if (event.data?.kind !== 'lexicon-translation-request') return;
-      const request = JSON.parse(event.data.detail);
+      const request = event.data;
       requests.push(request);
       if (mode === 'success') respond(request.requestID, translated);
       else if (mode === 'failure') respond(request.requestID, null, 'Install the English and Chinese language packs.');
@@ -189,8 +199,14 @@ enum TabWebViewSmokeTest {
           {role:'user',content:'Latest'}]})
       }));
       check(requestResponse.ok && requests.at(-1).prompt === 'Latest', 'Request input or latest user message was lost');
-      check(Object.keys(requests.at(-1)).sort().join(',') === 'prompt,requestID', 'dictionary credentials entered the bridge');
+      check(Object.keys(requests.at(-1)).sort().join(',') === 'kind,prompt,requestID', 'dictionary credentials entered the bridge');
       check((await fetch(new URL(endpoint), {method:'POST', body})).ok, 'URL input was not intercepted');
+      const completedController = new AbortController();
+      await fetchTranslation({signal:completedController.signal});
+      const completedID = requests.at(-1).requestID;
+      completedController.abort();
+      await pause();
+      check(!cancellations.includes(completedID), 'a completed fetch retained its abort listener');
 
       mode = 'failure';
       const failure = await fetchTranslation();
@@ -215,6 +231,24 @@ enum TabWebViewSmokeTest {
       await until(() => cancellations.includes(abortedID));
       respond(abortedID, 'This late response must be ignored.');
       check(cancellations.filter(id => id === abortedID).length === 1, 'fetch cancellation was not forwarded once');
+
+      const customController = new AbortController();
+      const customReason = new Error('Caller cancelled this request');
+      const beforeCustom = requests.length;
+      const customAbort = fetchTranslation({signal:customController.signal}).catch(error => error);
+      await until(() => requests.length > beforeCustom);
+      customController.abort(customReason);
+      check(await customAbort === customReason, 'the caller AbortSignal reason was replaced');
+
+      const beforeConcurrent = requests.length;
+      const firstConcurrent = fetchTranslation(), secondConcurrent = fetchTranslation();
+      await until(() => requests.length === beforeConcurrent + 2);
+      respond('unknown-request', 'Ignore this');
+      dispatchEvent(new CustomEvent('lexicon-translation-response', {detail:'invalid json'}));
+      respond(requests[beforeConcurrent + 1].requestID, 'Second result');
+      respond(requests[beforeConcurrent].requestID, 'First result');
+      check((await (await firstConcurrent).text()).includes('First result')
+        && (await (await secondConcurrent).text()).includes('Second result'), 'concurrent responses settled the wrong fetch');
 
       mode = 'success';
       const successSocket = await openSocket();
@@ -245,11 +279,31 @@ enum TabWebViewSmokeTest {
       respond(closedID, 'Late socket result');
       check(lateMessages === 0 && cancelSocket.readyState === WebSocket.CLOSED, 'closed socket accepted a late result');
 
+      const duplicateSocket = await openSocket();
+      const duplicateClosed = new Promise(resolve => duplicateSocket.onclose = resolve);
+      const beforeDuplicate = requests.length;
+      duplicateSocket.send(socketBody);
+      await until(() => requests.length > beforeDuplicate);
+      const duplicateID = requests.at(-1).requestID;
+      duplicateSocket.send(socketBody);
+      const duplicateClose = await duplicateClosed;
+      await until(() => cancellations.includes(duplicateID));
+      check(duplicateClose.code === 1011 && cancellations.filter(id => id === duplicateID).length === 1,
+        'a duplicate socket send did not close and cancel its single request');
+
       window.setTimeout = (callback, delay, ...args) => nativeSetTimeout(callback, delay === 60000 ? 20 : delay, ...args);
       const timedOut = await fetchTranslation();
       const timeoutID = requests.at(-1).requestID;
       await until(() => cancellations.includes(timeoutID));
       check(timedOut.status === 504, 'fetch timeout did not cancel its native request');
+      const timeoutSocket = await openSocket();
+      const timeoutClosed = new Promise(resolve => timeoutSocket.onclose = resolve);
+      timeoutSocket.send(socketBody);
+      const timeoutClose = await timeoutClosed;
+      const socketTimeoutID = requests.at(-1).requestID;
+      await until(() => cancellations.includes(socketTimeoutID));
+      check(timeoutClose.code === 1011 && timeoutClose.reason.includes('timed out'),
+        'socket timeout did not cancel its native request and close with its error');
       window.setTimeout = nativeSetTimeout;
 
       const frame = document.createElement('iframe');
@@ -271,12 +325,24 @@ enum TabWebViewSmokeTest {
       } finally { frame.remove(); }
 
       const beforePageHide = requests.length;
+      const pageSocket = await openSocket();
+      const pageSocketClosed = new Promise(resolve => pageSocket.onclose = resolve);
+      let pageSocketMessages = 0;
+      pageSocket.onmessage = () => pageSocketMessages++;
       const pageRequest = fetchTranslation().catch(error => error.name);
-      await until(() => requests.length > beforePageHide);
-      const pageRequestID = requests.at(-1).requestID;
+      pageSocket.send(socketBody);
+      await until(() => requests.length === beforePageHide + 2);
+      const pageRequests = requests.slice(beforePageHide);
       dispatchEvent(new Event('pagehide'));
       check(await pageRequest === 'AbortError', 'page exit did not cancel its fetch');
-      await until(() => cancellations.includes(pageRequestID));
+      check((await pageSocketClosed).code === 1000, 'page exit did not close its socket cleanly');
+      await until(() => pageRequests.every(request => cancellations.includes(request.requestID)));
+      for (const request of pageRequests) respond(request.requestID, 'Late result after leaving');
+      dispatchEvent(new Event('pagehide'));
+      await pause();
+      check(pageSocketMessages === 0 && pageRequests.every(request =>
+        cancellations.filter(id => id === request.requestID).length === 1) && !cancellations.includes(completedID),
+        'page exit repeated cancellation or accepted a late response');
       return checks;
     } finally {
       window.setTimeout = nativeSetTimeout;

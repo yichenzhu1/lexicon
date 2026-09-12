@@ -105,6 +105,16 @@ func runPageBuilderTests(_ t: TestHarness) {
         )
     }
 
+    t.run("page builder: repeated references preserve Unicode and surrounding text") {
+        let source = "é\u{301}😀中文<img src='//cdn.example/a.png'>尾<style>.x{background:url(file:///b.png)}</style>"
+        let expected = "é\u{301}😀中文<img src='https://cdn.example/a.png'>尾<style>.x{background:url(b.png)}</style>"
+        t.expectEqual(
+            EntryPageBuilder.normalizeEntryHTML(String(repeating: source, count: 500)),
+            String(repeating: expected, count: 500),
+            "UTF-16 match ranges preserve all text while replacements change lengths"
+        )
+    }
+
     t.run("page builder: entry redirect and empty pages") {
         let redirected = EntryPageBuilder.entryDocument(
             for: "colour", dictionaryUUID: basic.uuid, library: library

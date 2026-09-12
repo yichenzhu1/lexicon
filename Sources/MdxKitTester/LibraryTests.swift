@@ -236,6 +236,26 @@ func runLibraryTests(_ t: TestHarness) {
         )
     }
 
+    t.run("library: cancellation during finalization rolls back the import") {
+        let root = tempRoot.appendingPathComponent("cancelled-finalization")
+        let finalizingLibrary = try DictionaryLibrary(rootURL: root)
+        let cancellation = ImportCancellationToken()
+        t.expectThrows("cancelled after indexing, before publication") {
+            try finalizingLibrary.importDictionary(
+                from: fixturesURL.appendingPathComponent("basic.mdx"), cancellation: cancellation
+            ) { update in
+                if update.stage == "Copying referenced assets…" { cancellation.cancel() }
+            }
+        }
+        t.expectEqual(try finalizingLibrary.dictionaries().count, 0, "no committed dictionary")
+        t.expectEqual(try finalizingLibrary.entries(forNormalizedKey: "apple").count, 0,
+                      "no committed headwords")
+        let folders = try FileManager.default.contentsOfDirectory(
+            at: finalizingLibrary.dictionariesURL, includingPropertiesForKeys: nil
+        ).filter { ![".staging", "Recovery"].contains($0.lastPathComponent) }
+        t.expect(folders.isEmpty, "no published folder")
+    }
+
     t.run("library: startup reconciliation preserves orphan folders") {
         let recoveryRoot = tempRoot.appendingPathComponent("recovery")
         var first: DictionaryLibrary? = try DictionaryLibrary(rootURL: recoveryRoot)
@@ -498,6 +518,45 @@ func runLibraryTests(_ t: TestHarness) {
             duplicate.map { String(decoding: $0.data, as: UTF8.self) },
             "base volume wins", "base MDD deterministically precedes numbered duplicates"
         )
+    }
+
+    t.run("library: opening an entry and one resource volume leaves other volumes unopened") {
+        let lazyLibrary = try DictionaryLibrary(rootURL: tempRoot.appendingPathComponent("lazy-volumes"))
+        let record = try lazyLibrary.importDictionary(
+            from: fixturesURL.appendingPathComponent("multipart.mdx")
+        )
+        // An unavailable, unrelated volume must not prevent opening the MDX
+        // or a resource stored in the healthy base volume.
+        try Data("unavailable volume".utf8).write(
+            to: lazyLibrary.folderURL(for: record).appendingPathComponent("multipart.1.mdd")
+        )
+        let hit = try lazyLibrary.entries(forNormalizedKey: "reverse").first!
+        t.expect(try lazyLibrary.entryText(for: hit).contains("reverse"), "MDX opens independently")
+        let css = try lazyLibrary.resource(path: "reverse.css", dictionaryUUID: record.uuid)
+        t.expect(css != nil, "base volume opens independently")
+        t.expectThrows("requesting the damaged volume still reports its error") {
+            _ = try lazyLibrary.resource(path: "part-one.txt", dictionaryUUID: record.uuid)
+        }
+    }
+
+    t.run("library: resource redirects preserve encodings and binary payloads") {
+        let resourceLibrary = try DictionaryLibrary(rootURL: tempRoot.appendingPathComponent("resource-redirects"))
+        let record = try resourceLibrary.importDictionary(
+            from: fixturesURL.appendingPathComponent("resources.mdx")
+        )
+        let image = try resourceLibrary.resource(path: "image.png", dictionaryUUID: record.uuid)
+        for path in ["alias.png", "unicode-alias.png", "bom-alias.png", "utf16-alias.png"] {
+            let alias = try resourceLibrary.resource(path: path, dictionaryUUID: record.uuid)
+            t.expectEqual(alias?.data, image?.data, "\(path) resolves to its binary target")
+            t.expectEqual(alias?.resolvedPath, "image.png", "target path is retained")
+        }
+        t.expect(try resourceLibrary.resource(path: "loop-a.png", dictionaryUUID: record.uuid) == nil,
+                 "cyclic resource redirects stop")
+        let binary = try resourceLibrary.resource(path: "large.bin", dictionaryUUID: record.uuid)
+        t.expectEqual(binary?.data.count, 2 * 1024 * 1024 + 2, "large binary payload stays intact")
+        let audio = try resourceLibrary.resource(path: "wild%_[]", dictionaryUUID: record.uuid)
+        t.expectEqual(audio.map { String(decoding: $0.data, as: UTF8.self) }, "literal prefix audio",
+                      "prefix metacharacters are literal")
     }
 
     t.run("library: resource fallbacks (renamed css/js, extension-less audio)") {

@@ -70,6 +70,13 @@ func runParserTests(_ t: TestHarness) {
                 at: last.recordOffset, length: Int(last.recordLength) + 1_000_000
             )
         }
+        t.expectThrows("reject impossible allocation before reserving memory") {
+            _ = try file.recordData(at: 0, length: Int.max)
+        }
+        t.expectThrows("negative length") {
+            _ = try file.recordData(at: 0, length: -1)
+        }
+        t.expectEqual(try file.recordData(at: 0, length: 0), Data(), "empty bounded read")
     }
 
     t.run("record data reads across compressed block boundaries") {
@@ -82,6 +89,18 @@ func runParserTests(_ t: TestHarness) {
         let text = String(decoding: data, as: UTF8.self)
         t.expect(text.contains("apple"), "starts in the first record block")
         t.expect(text.contains("filler entry"), "continues into later record blocks")
+    }
+
+    t.run("shared record offsets and out-of-order keys preserve entry boundaries") {
+        let dict = try MdictFile(url: fixture("offset-order.mdx"))
+        let entries = try dict.indexedEntries()
+        t.expectEqual(entries.map(\.key), ["a", "b", "c", "d", "e", "f", "g"])
+        let records = try entries.map {
+            try dict.entryText(at: $0.recordOffset, length: Int($0.recordLength))
+        }
+        t.expectEqual(records, ["record F", "record A", "record C", "record C", "record B", "record E", "record D"])
+        t.expectEqual(entries[2].recordOffset, entries[3].recordOffset, "shared record")
+        t.expectEqual(entries[2].recordLength, entries[3].recordLength, "shared boundary")
     }
 
     t.run("encrypted.mdx (Encrypted=2 keyword index)") {

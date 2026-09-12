@@ -133,12 +133,52 @@ public final class DictionaryLibrary: @unchecked Sendable {
 
     private let stateLock = NSLock()
     private var handles: [String: OpenDictionary] = [:]
-    private var cachedRecords: [DictionaryRecord]?
-    private var cachedRecordsByUUID: [String: DictionaryRecord] = [:]
+    private var cachedRecords: RecordSnapshot?
 
-    private struct OpenDictionary {
-        let mdx: MdictFile
-        let mdds: [MdictFile]
+    private struct RecordSnapshot {
+        let ordered: [DictionaryRecord]
+        let byUUID: [String: DictionaryRecord]
+    }
+
+    /// Opening one entry must not parse every resource volume. Each package
+    /// owns a lazy file cache; concurrent first reads share the same handle.
+    private final class OpenDictionary {
+        private let folder: URL
+        private let mdxFileName: String
+        private let lock = NSLock()
+        private var files: [URL: MdictFile] = [:]
+        private var resourceURLs: [URL]?
+
+        init(folder: URL, mdxFileName: String) {
+            self.folder = folder
+            self.mdxFileName = mdxFileName
+        }
+
+        func mdx() throws -> MdictFile {
+            try lock.withLock { try file(at: folder.appendingPathComponent(mdxFileName)) }
+        }
+
+        func mdd(part: Int) throws -> MdictFile? {
+            try lock.withLock {
+                let urls: [URL]
+                if let resourceURLs { urls = resourceURLs }
+                else {
+                    urls = DictionaryLibrary.mddFiles(in: folder)
+                    resourceURLs = urls
+                }
+                guard urls.indices.contains(part) else { return nil }
+                return try file(at: urls[part])
+            }
+        }
+
+        /// Called with the package lock held. File decoding has its own block
+        /// cache lock and runs after this method releases the package lock.
+        private func file(at url: URL) throws -> MdictFile {
+            if let file = files[url] { return file }
+            let file = try MdictFile(url: url)
+            files[url] = file
+            return file
+        }
     }
 
     public var dictionariesURL: URL {
@@ -295,7 +335,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
         for row in rows {
             let folder = dictionariesURL.appendingPathComponent(row.folder, isDirectory: true)
             guard FileManager.default.fileExists(atPath: folder.path) else { continue }
-            let parts = mddFiles(in: folder)
+            let parts = Self.mddFiles(in: folder)
             do {
                 var count = 0
                 try pool.write { db in
@@ -442,12 +482,13 @@ public final class DictionaryLibrary: @unchecked Sendable {
     /// an entry page with a dozen images used to run a dozen full scans.
     /// Invalidated by each mutation below.
     public func dictionaries() throws -> [DictionaryRecord] {
-        stateLock.lock()
-        if let cached = cachedRecords {
-            stateLock.unlock()
-            return cached
-        }
-        stateLock.unlock()
+        try stateLock.withLock { try recordSnapshot().ordered }
+    }
+
+    /// Load and publish as one operation under stateLock. Otherwise a read
+    /// started before a mutation can republish stale rows after invalidation.
+    private func recordSnapshot() throws -> RecordSnapshot {
+        if let cachedRecords { return cachedRecords }
 
         let rows = try pool.read { db in
             try db.query(
@@ -472,29 +513,22 @@ public final class DictionaryLibrary: @unchecked Sendable {
             }
         }
 
-        stateLock.lock()
-        cachedRecords = rows
-        cachedRecordsByUUID = Dictionary(
-            rows.map { ($0.uuid.lowercased(), $0) },
-            uniquingKeysWith: { first, _ in first }
+        let snapshot = RecordSnapshot(
+            ordered: rows,
+            byUUID: Dictionary(rows.map { ($0.uuid.lowercased(), $0) },
+                               uniquingKeysWith: { first, _ in first })
         )
-        stateLock.unlock()
-        return rows
+        cachedRecords = snapshot
+        return snapshot
     }
 
     /// One dictionary by UUID, served from the same cache.
     private func record(uuid: String) throws -> DictionaryRecord? {
-        _ = try dictionaries()
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return cachedRecordsByUUID[uuid.lowercased()]
+        try stateLock.withLock { try recordSnapshot().byUUID[uuid.lowercased()] }
     }
 
     private func invalidateRecordCache() {
-        stateLock.lock()
-        cachedRecords = nil
-        cachedRecordsByUUID = [:]
-        stateLock.unlock()
+        stateLock.withLock { cachedRecords = nil }
     }
 
     public func folderURL(for record: DictionaryRecord) -> URL {
@@ -555,7 +589,6 @@ public final class DictionaryLibrary: @unchecked Sendable {
         let uuid = UUID().uuidString
         let finalFolder = dictionariesURL.appendingPathComponent(uuid, isDirectory: true)
         let folder = dictionariesURL.appendingPathComponent(".staging/\(uuid)", isDirectory: true)
-        var registeredDictionaryID: Int64?
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
 
         do {
@@ -590,10 +623,6 @@ public final class DictionaryLibrary: @unchecked Sendable {
             progress?(ImportProgress(stage: "Reading keywords…"))
 
             var nextOrder = 0
-            let maxOrder = try pool.read { db in
-                try db.query("SELECT MAX(sortOrder) FROM dictionaries", row: { $0.int(0) }).first
-            }
-            if let maxOrder { nextOrder = Int(maxOrder) + 1 }
 
             // Entries stream straight into SQLite; materializing them first
             // would hold every headword of a large dictionary in memory. The
@@ -604,6 +633,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
             progress?(ImportProgress(stage: "Indexing entries", completed: 0, total: expectedEntries))
             var entryCount = 0
             var resourceCount = 0
+            var looseResourceCount = 0
             // Every sibling CSS/JS file belongs to this dictionary package,
             // even when its name differs from the MDX (for example,
             // oald-fork.mdx with oald.css, oaldzh.css and oald.js). Seeding
@@ -618,7 +648,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
                 siblings, baseName: baseName
             )
             var assetOffsets = Set<UInt64>()
-            let mdds = try mddFiles(in: folder).map { try MdictFile(url: $0) }
+            let mdds = try Self.mddFiles(in: folder).map { try MdictFile(url: $0) }
             let expectedResources = mdds.reduce(into: 0) { count, mdd in
                 count += Int(min(mdd.info.entryCount, UInt64(Int.max - count)))
             }
@@ -626,6 +656,9 @@ public final class DictionaryLibrary: @unchecked Sendable {
             let resourceProgressStride = max(2_000, expectedResources / 100)
             let dictID: Int64 = try pool.write { db in
                 try db.transaction {
+                    nextOrder = Int(try db.query(
+                        "SELECT COALESCE(MAX(sortOrder), 0) + 1 FROM dictionaries"
+                    ) { $0.int(0) }.first!)
                     try db.run(
                         "INSERT INTO dictionaries (uuid, title, folder, mdxFile, enabled, sortOrder, entryCount) VALUES (?,?,?,?,1,?,0)",
                         [.text(uuid), .text(mdx.info.title), .text(uuid), .text(mdxFileName),
@@ -700,41 +733,41 @@ public final class DictionaryLibrary: @unchecked Sendable {
                             [.int(Int64(resourceCount)), .int(dictID)]
                         )
                     }
+                    // Keep the index private until every asset and the final
+                    // folder are ready. WAL readers keep seeing the previous
+                    // library throughout; any failure rolls back this one
+                    // transaction instead of compensating committed rows.
+                    try cancellation?.check()
+                    progress?(ImportProgress(stage: "Copying referenced assets…"))
+                    let missingLooseReferences = try copyLooseReferences(
+                        looseReferences, sourceDirectory: sourceDir, destinationDirectory: folder,
+                        dictionaryEncoding: mdx.info.encoding, cancellation: cancellation
+                    )
+                    let resourceExists = try db.prepare(
+                        "SELECT 1 FROM resources WHERE dict = ? AND path = ? LIMIT 1"
+                    )
+                    var unresolved: [String] = []
+                    for path in missingLooseReferences {
+                        try resourceExists.bind([.int(dictID), .text(MdictFile.normalizeResourcePath(path))])
+                        if try !resourceExists.step() { unresolved.append(path) }
+                        resourceExists.reset()
+                    }
+                    if !unresolved.isEmpty {
+                        let preview = unresolved.sorted().prefix(5).joined(separator: ", ")
+                        progress?(ImportProgress(
+                            stage: "Warning: \(unresolved.count) referenced local asset(s) were not found (\(preview))"
+                        ))
+                    }
+                    looseResourceCount = countLooseResources(in: folder, mdxFileName: mdxFileName)
+                    try db.run(
+                        "UPDATE dictionaries SET looseResourceCount = ? WHERE id = ?",
+                        [.int(Int64(looseResourceCount)), .int(dictID)]
+                    )
+                    try cancellation?.check()
+                    try fm.moveItem(at: folder, to: finalFolder)
                     return dictID
                 }
             }
-            registeredDictionaryID = dictID
-
-            try cancellation?.check()
-            progress?(ImportProgress(stage: "Copying referenced assets…"))
-            let missingLooseReferences = try copyLooseReferences(
-                looseReferences, sourceDirectory: sourceDir, destinationDirectory: folder,
-                dictionaryEncoding: mdx.info.encoding, cancellation: cancellation
-            )
-            var unresolved: [String] = []
-            for path in missingLooseReferences {
-                let normalized = MdictFile.normalizeResourcePath(path)
-                let indexed = try resourceLocation(
-                    sql: "SELECT part, offset, length, path FROM resources WHERE dict = ? AND path = ? LIMIT 1",
-                    bindings: [.int(dictID), .text(normalized)]
-                ) != nil
-                if !indexed { unresolved.append(path) }
-            }
-            if !unresolved.isEmpty {
-                let preview = unresolved.sorted().prefix(5).joined(separator: ", ")
-                progress?(ImportProgress(
-                    stage: "Warning: \(unresolved.count) referenced local asset(s) were not found (\(preview))"
-                ))
-            }
-            let looseResourceCount = countLooseResources(in: folder, mdxFileName: mdxFileName)
-            try pool.write { db in
-                try db.run(
-                    "UPDATE dictionaries SET looseResourceCount = ? WHERE id = ?",
-                    [.int(Int64(looseResourceCount)), .int(dictID)]
-                )
-            }
-            try fm.moveItem(at: folder, to: finalFolder)
-            try? pool.write { db in try db.exec("PRAGMA wal_checkpoint(PASSIVE)") }
             invalidateRecordCache()
             return DictionaryRecord(
                 id: dictID, uuid: uuid, title: mdx.info.title, folderName: uuid,
@@ -743,11 +776,6 @@ public final class DictionaryLibrary: @unchecked Sendable {
                 looseResourceCount: looseResourceCount
             )
         } catch {
-            // Indexing commits before loose-asset copying and finalization.
-            // Roll back the committed rows if either of those later steps fails.
-            if let registeredDictionaryID {
-                try? deleteIndexRows(forDictionaryID: registeredDictionaryID)
-            }
             try? fm.removeItem(at: folder)
             try? fm.removeItem(at: finalFolder)
             invalidateRecordCache()
@@ -875,10 +903,10 @@ public final class DictionaryLibrary: @unchecked Sendable {
     /// The app is responsible for moving the folder to the system Trash first.
     public func unregisterDictionary(_ record: DictionaryRecord) throws {
         try deleteIndexRows(forDictionaryID: record.id)
-        stateLock.lock()
-        handles.removeValue(forKey: record.uuid.lowercased())
-        stateLock.unlock()
-        invalidateRecordCache()
+        stateLock.withLock {
+            handles.removeValue(forKey: record.uuid.lowercased())
+            cachedRecords = nil
+        }
     }
 
     private func deleteIndexRows(forDictionaryID id: Int64) throws {
@@ -888,7 +916,6 @@ public final class DictionaryLibrary: @unchecked Sendable {
                 try db.run("DELETE FROM resources WHERE dict = ?", [.int(id)])
                 try db.run("DELETE FROM dictionaries WHERE id = ?", [.int(id)])
             }
-            try db.exec("PRAGMA wal_checkpoint(PASSIVE)")
         }
     }
 
@@ -927,7 +954,6 @@ public final class DictionaryLibrary: @unchecked Sendable {
                     )
                 }
             }
-            try db.exec("PRAGMA wal_checkpoint(PASSIVE)")
         }
         invalidateRecordCache()
     }
@@ -1414,32 +1440,19 @@ public final class DictionaryLibrary: @unchecked Sendable {
     // MARK: - Content access
 
     private func openDictionary(uuid: String) throws -> OpenDictionary {
-        stateLock.lock()
-        let canonicalUUID = uuid.lowercased()
-        if let open = handles[canonicalUUID] {
-            stateLock.unlock()
+        try stateLock.withLock {
+            let canonicalUUID = uuid.lowercased()
+            if let open = handles[canonicalUUID] { return open }
+            guard let record = try recordSnapshot().byUUID[canonicalUUID] else {
+                throw MdxError.corruptData("unknown dictionary \(uuid)")
+            }
+            let open = OpenDictionary(folder: folderURL(for: record), mdxFileName: record.mdxFileName)
+            handles[canonicalUUID] = open
             return open
         }
-        stateLock.unlock()
-
-        guard let record = try record(uuid: uuid) else {
-            throw MdxError.corruptData("unknown dictionary \(uuid)")
-        }
-        let folder = folderURL(for: record)
-        let mdx = try MdictFile(url: folder.appendingPathComponent(record.mdxFileName))
-        let mdds = try mddFiles(in: folder).map { try MdictFile(url: $0) }
-        let open = OpenDictionary(mdx: mdx, mdds: mdds)
-
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        // Another thread may have opened the same dictionary meanwhile. Keep a
-        // single instance so its decompressed-block cache stays shared.
-        if let existing = handles[canonicalUUID] { return existing }
-        handles[canonicalUUID] = open
-        return open
     }
 
-    private func mddFiles(in folder: URL) -> [URL] {
+    private static func mddFiles(in folder: URL) -> [URL] {
         let files = (try? FileManager.default.contentsOfDirectory(
             at: folder, includingPropertiesForKeys: nil
         )) ?? []
@@ -1487,7 +1500,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
         var current = hit
         for _ in 0 ..< 8 {
             let open = try openDictionary(uuid: current.dictionaryUUID)
-            let text = try open.mdx.entryText(
+            let text = try open.mdx().entryText(
                 at: current.recordOffset, length: current.recordLength
             )
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1644,26 +1657,52 @@ public final class DictionaryLibrary: @unchecked Sendable {
     }
 
     private func resourceRedirectTarget(_ data: Data) -> String? {
-        let decoded = String(data: data, encoding: .utf8)
-            ?? String(data: data, encoding: .utf16LittleEndian)
-        guard let decoded else { return nil }
-        let trimmed = decoded.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix("@@@LINK=") else { return nil }
-        return String(trimmed.dropFirst("@@@LINK=".count))
-            .trimmingCharacters(in: CharacterSet(charactersIn: "\0\r\n \t"))
+        // Images, audio and fonts dominate this path. Inspect their leading
+        // scalar before attempting a whole-buffer text decode, especially the
+        // permissive UTF-16 decoder that accepts arbitrary binary resources.
+        func canStartRedirect(_ scalar: Unicode.Scalar?) -> Bool {
+            guard let scalar else { return false }
+            // Foundation's UTF-8 decoder consumes a BOM, while the cheap
+            // scalar probe below preserves it. Let that candidate decode too.
+            return scalar == "@" || scalar == "\u{FEFF}"
+                || CharacterSet.whitespacesAndNewlines.contains(scalar)
+        }
+        func target(encoding: String.Encoding) -> String? {
+            guard let text = String(data: data, encoding: encoding) else { return nil }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("@@@LINK=") else { return nil }
+            return String(trimmed.dropFirst("@@@LINK=".count))
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\0\r\n \t"))
+        }
+        let utf8Start = String(decoding: data.prefix(4), as: UTF8.self).unicodeScalars.first
+        if canStartRedirect(utf8Start), let target = target(encoding: .utf8) { return target }
+        if data.count >= 2 {
+            let first = data.startIndex
+            let codeUnit = UInt16(data[first]) | UInt16(data[first + 1]) << 8
+            if canStartRedirect(Unicode.Scalar(codeUnit)) { return target(encoding: .utf16LittleEndian) }
+        }
+        return nil
     }
 
     /// First resource whose path starts with `prefix` followed by '#' or '.'
     /// (used to complete extension-less sound references).
     private func indexedResource(prefix: String, record: DictionaryRecord) throws -> ResolvedResource? {
-        let escaped = Self.escapedLikePattern(prefix)
         let location = try resourceLocation(
             sql: """
-                SELECT part, offset, length, path FROM resources
-                WHERE dict = ? AND (path LIKE ? ESCAPE '\\' OR path LIKE ? ESCAPE '\\')
+                SELECT part, offset, length, path, rowid FROM resources
+                WHERE dict = ? AND path >= ? AND path < ?
+                UNION ALL
+                SELECT part, offset, length, path, rowid FROM resources
+                WHERE dict = ? AND path >= ? AND path < ?
                 ORDER BY part, path, rowid LIMIT 1
                 """,
-            bindings: [.int(record.id), .text(escaped + "#%"), .text(escaped + ".%")]
+            // '#'..'$' and '.'..'/' are exact prefix ranges. Separate branches
+            // let both probes use idx_resources(dict, path); LIKE's default
+            // case-insensitive collation scanned every resource in a package.
+            bindings: [
+                .int(record.id), .text(prefix + "#"), .text(prefix + "$"),
+                .int(record.id), .text(prefix + "."), .text(prefix + "/"),
+            ]
         )
         guard let location else { return nil }
         guard let data = try readResource(location, uuid: record.uuid) else { return nil }
@@ -1676,7 +1715,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
         let mime = Self.mimeType(forPath: path)
         let ext = (path as NSString).pathExtension.lowercased()
         if ext == "css" || ext == "js" || ext == "html" || ext == "htm" || ext == "json" {
-            let encoding = (try? openDictionary(uuid: record.uuid).mdx.info.encoding) ?? .utf8
+            let encoding = (try? openDictionary(uuid: record.uuid).mdx().info.encoding) ?? .utf8
             var text = Self.decodeTextResource(data, dictionaryEncoding: encoding)
             if ext == "css" {
                 // The bytes are UTF-8 from this point on. Keeping a legacy
@@ -1762,9 +1801,8 @@ public final class DictionaryLibrary: @unchecked Sendable {
 
     private func readResource(_ location: ResourceLocation, uuid: String) throws -> Data? {
         let open = try openDictionary(uuid: uuid)
-        let part = Int(location.part)
-        guard part >= 0, part < open.mdds.count else { return nil }
-        return try open.mdds[part].recordData(
+        guard let file = try open.mdd(part: Int(location.part)) else { return nil }
+        return try file.recordData(
             at: UInt64(bitPattern: location.offset), length: Int(location.length)
         )
     }

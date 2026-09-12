@@ -12,7 +12,8 @@ enum RenderSmokeTest {
     private static var window: NSWindow?
     private static var coordinator: EntryWebView.Coordinator?
     private static var attempts = 0
-    private static var resizePhase = 0
+    private enum ResizePhase { case initial, preparing, resized }
+    private static var resizePhase = ResizePhase.initial
     private static var baselineHeights: [Double] = []
     private static var stabilityCheckStarted = false
     private static var stabilityPassed = false
@@ -40,6 +41,7 @@ enum RenderSmokeTest {
             exit(1)
         }
         let state = AppState(libraryModel: model)
+        state.selectSavedWord(word)
         let bridge = EntryWebView.Coordinator(
             tabID: state.activeTabID, appState: state, libraryModel: model
         )
@@ -191,6 +193,7 @@ enum RenderSmokeTest {
     }
 
     private static func poll() {
+        if resizePhase == .preparing { return }
         attempts += 1
         guard let webView else { return }
         webView.evaluateJavaScript("""
@@ -210,15 +213,14 @@ enum RenderSmokeTest {
                     return
                 }
                 let ready = frames.allSatisfy {
-                    !$0.src.isEmpty && $0.height >= 44 && $0.state.hasPrefix("ok:") && $0.isolated
+                    // Zoom can report a CSS 44px minimum as 43.993px.
+                    !$0.src.isEmpty && $0.height >= 43.5 && $0.state.hasPrefix("ok:") && $0.isolated
                 }
                 let styleReady = frames.allSatisfy { diagnostics[$0.uuid] != nil }
                 let probeReady = !probe || frames.allSatisfy { probeReports[$0.uuid] != nil }
                 if ready && styleReady && probeReady {
-                    if resizeCycle, resizePhase == 1 {
-                        let changed = zip(frames.map(\.height), baselineHeights).contains {
-                            abs($0.0 - $0.1) > 10
-                        }
+                    if resizeCycle, resizePhase == .resized {
+                        let changed = abs(frames[0].height - baselineHeights[0]) > 10
                         if !changed {
                             if attempts > 30 {
                                 print("SMOKE FAIL: resize/zoom did not produce a new stable height")
@@ -281,17 +283,11 @@ enum RenderSmokeTest {
                             exit(1)
                         }
                     }
-                    if resizeCycle, resizePhase == 0 {
-                        baselineHeights = frames.map(\.height)
-                        resizePhase = 1
-                        attempts = 0
-                        stabilityCheckStarted = false
-                        stabilityPassed = false
-                        webView.frame.size.width = 620
-                        webView.pageZoom = 1.35
+                    if resizeCycle, resizePhase == .initial {
+                        startResizeCheck(frames: frames)
                         return
                     }
-                    if resizeCycle, resizePhase == 1 {
+                    if resizeCycle, resizePhase == .resized {
                         print("SMOKE RESIZE: \(baselineHeights) -> \(frames.map(\.height))")
                     }
                     frames.forEach { print("frame \($0.uuid): height=\($0.height) src=\($0.src)") }
@@ -319,6 +315,65 @@ enum RenderSmokeTest {
                     print("SMOKE FAIL: frames did not report stable heights: \(frames)")
                     exit(1)
                 }
+            }
+        }
+    }
+
+    /// A one-line fixture need not reflow when narrowed. Add real wrapping
+    /// content and verify its baseline settles before measuring the resize.
+    private static func startResizeCheck(frames: [Frame]) {
+        guard let webView, let target = frames.first,
+              let frameInfo = coordinator?.dictionaryFrameInfo(for: target.uuid)
+        else {
+            print("SMOKE FAIL: no dictionary frame for resize check")
+            exit(1)
+        }
+        resizePhase = .preparing
+        Task { @MainActor in
+            do {
+                let probeHeight = try await callPageNumber(
+                    in: webView,
+                    """
+                    const probe = document.createElement('div');
+                    probe.id = 'lexicon-resize-probe';
+                    probe.style.cssText = 'all:initial;display:block;box-sizing:border-box;'
+                      + 'width:calc(100vw - 32px);font:16px/24px monospace;white-space:normal;'
+                      + 'overflow-wrap:break-word;margin:0;padding:0;';
+                    probe.textContent = 'Lexicon resize probe wrapping text. '.repeat(100);
+                    document.body.appendChild(probe);
+                    return probe.getBoundingClientRect().height;
+                    """,
+                    frameInfo: frameInfo
+                )
+                guard probeHeight > 100 else { throw SmokeError.invalidResizeGeometry }
+                // Let the mutation and settled geometry paths report the new
+                // content before the existing two-second stability check.
+                try await Task.sleep(for: .milliseconds(750))
+                stabilityCheckStarted = false
+                stabilityPassed = false
+                startStabilityCheck()
+                while !stabilityPassed {
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+                let value = try await webView.evaluateJavaScript(
+                    "JSON.stringify(Array.from(document.querySelectorAll('iframe')).map(f => f.getBoundingClientRect().height))"
+                )
+                guard let json = value as? String,
+                      let data = json.data(using: .utf8),
+                      let heights = try? JSONDecoder().decode([Double].self, from: data),
+                      heights.count == frames.count,
+                      let targetHeight = heights.first, targetHeight >= probeHeight - 0.5
+                else { throw SmokeError.invalidResizeGeometry }
+                baselineHeights = heights
+                attempts = 0
+                stabilityCheckStarted = false
+                stabilityPassed = false
+                resizePhase = .resized
+                webView.frame.size.width = 620
+                webView.pageZoom = 1.35
+            } catch {
+                print("SMOKE FAIL: resize probe errored: \(error.localizedDescription)")
+                exit(1)
             }
         }
     }
@@ -498,7 +553,13 @@ enum RenderSmokeTest {
                     """,
                     frameInfo: frameInfo
                 )
-                try await Task.sleep(for: .milliseconds(750))
+                // Wait for the iframe's measured height to reach the parent.
+                // Otherwise scrollTo can be clamped before the spacer exists
+                // in the outer layout, especially in an offscreen window.
+                guard try await waitForPageCondition(in: webView, """
+                    const frame = document.querySelector('iframe[data-uuid="\(target.uuid)"]');
+                    return frame.parentElement.getBoundingClientRect().height >= innerHeight + 300 ? 1 : 0;
+                    """) else { throw SmokeError.invalidScrollGeometry }
                 _ = try await callPageNumber(
                     in: webView,
                     """
@@ -521,8 +582,7 @@ enum RenderSmokeTest {
                 guard let outerStart = (outerValue as? NSNumber)?.doubleValue, outerStart >= 0 else {
                     throw SmokeError.invalidScrollGeometry
                 }
-                try await Task.sleep(for: .milliseconds(250))
-                let received = try await callPageNumber(
+                let received = try await waitForPageCondition(
                     in: webView,
                     """
                     return window.__lexiconSmokeScrollEvents > 0
@@ -530,8 +590,16 @@ enum RenderSmokeTest {
                     """,
                     frameInfo: frameInfo
                 )
-                guard received == 1 else {
-                    print("SMOKE FAIL: outer scrolling did not deliver a dictionary scroll event and offset")
+                guard received else {
+                    let events = try await callPageNumber(
+                        in: webView, "return window.__lexiconSmokeScrollEvents;", frameInfo: frameInfo
+                    )
+                    let virtualOffset = try await callPageNumber(
+                        in: webView, "return window.__lexiconVirtualScrollY;", frameInfo: frameInfo
+                    )
+                    let outer = try await webView.evaluateJavaScript("scrollY")
+                    print("SMOKE FAIL: outer scrolling did not deliver a dictionary scroll event and offset "
+                        + "(events=\(events), virtual=\(virtualOffset), outerStart=\(outerStart), outerNow=\(String(describing: outer)))")
                     exit(1)
                 }
                 _ = try await callPageNumber(
@@ -546,7 +614,9 @@ enum RenderSmokeTest {
                     """,
                     frameInfo: frameInfo
                 )
-                try await Task.sleep(for: .milliseconds(250))
+                guard try await waitForPageCondition(in: webView, """
+                    return Math.abs(scrollY - \(outerStart) - 120) < 4 ? 1 : 0;
+                    """) else { throw SmokeError.invalidScrollGeometry }
                 let finalValue = try await webView.evaluateJavaScript("scrollY")
                 guard let outerEnd = (finalValue as? NSNumber)?.doubleValue,
                       abs(outerEnd - outerStart - 120) < 4
@@ -655,7 +725,7 @@ enum RenderSmokeTest {
     }
 
     private static func callPageNumber(
-        in webView: WKWebView, _ source: String, frameInfo: WKFrameInfo
+        in webView: WKWebView, _ source: String, frameInfo: WKFrameInfo? = nil
     ) async throws -> Double {
         try await withCheckedThrowingContinuation {
             (continuation: CheckedContinuation<Double, Error>) in
@@ -676,9 +746,21 @@ enum RenderSmokeTest {
         }
     }
 
+    private static func waitForPageCondition(
+        in webView: WKWebView, _ source: String, frameInfo: WKFrameInfo? = nil
+    ) async throws -> Bool {
+        let deadline = ContinuousClock.now + .seconds(5)
+        repeat {
+            if try await callPageNumber(in: webView, source, frameInfo: frameInfo) == 1 { return true }
+            try await Task.sleep(for: .milliseconds(20))
+        } while ContinuousClock.now < deadline
+        return false
+    }
+
     private enum SmokeError: Error {
         case invalidFloatingOverlayGeometry
         case invalidScrollGeometry
+        case invalidResizeGeometry
         case nonNumericJavaScriptResult
     }
 

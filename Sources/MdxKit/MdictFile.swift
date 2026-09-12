@@ -36,7 +36,6 @@ public final class MdictFile {
 
     // Keyword section geometry.
     private struct KeyBlockInfo {
-        let entryCount: UInt64
         let compressedSize: UInt64
         let decompressedSize: UInt64
         let fileOffset: UInt64 // absolute offset of the block in the file
@@ -45,15 +44,14 @@ public final class MdictFile {
     private var keyBlockInfos: [KeyBlockInfo] = []
 
     // Record section geometry.
-    private struct RecordBlockTable {
-        var compressedSizes: [UInt64] = []
-        var decompressedSizes: [UInt64] = []
-        var fileOffsets: [UInt64] = []      // absolute file offset of each block
-        var decompressedStarts: [UInt64] = [] // running offset in the plain record stream
-        var totalDecompressedSize: UInt64 = 0
+    private struct RecordBlock {
+        let fileRange: Range<Int>
+        let decompressedSize: Int
+        let streamOffset: UInt64
     }
 
-    private var recordTable = RecordBlockTable()
+    private var recordBlocks: [RecordBlock] = []
+    private var recordStreamSize: UInt64 = 0
 
     // Small LRU cache of decompressed record blocks. `blockCacheOrder` runs
     // least- to most-recently used.
@@ -122,7 +120,7 @@ public final class MdictFile {
             keyIndexDecompressedLength = try reader.readUInt64BE()
             keyIndexCompressedLength = try reader.readUInt64BE()
             keyBlocksLength = try reader.readUInt64BE()
-            let headerData = data.subdata(in: data.startIndex + headerStart ..< data.startIndex + reader.offset)
+            let headerData = data[data.startIndex + headerStart ..< data.startIndex + reader.offset]
             let checksum = try reader.readUInt32BE()
             guard Adler32.checksum(headerData) == checksum else {
                 throw MdxError.badChecksum("keyword section header")
@@ -168,17 +166,20 @@ public final class MdictFile {
         var infos: [KeyBlockInfo] = []
         infos.reserveCapacity(keyBlockCount)
         var runningOffset = keyBlocksStart
+        var indexedKeyCount: UInt64 = 0
         for _ in 0 ..< keyBlockCount {
             let blockEntryCount = try indexReader.readNumber(width: numberWidth)
-            _ = try Self.readIndexText(&indexReader, width: numberWidth, encoding: encoding)
-            _ = try Self.readIndexText(&indexReader, width: numberWidth, encoding: encoding)
+            indexedKeyCount = try Self.checkedSum(
+                indexedKeyCount, blockEntryCount, max: entryCount, "keyword entry count"
+            )
+            try Self.skipIndexText(&indexReader, width: numberWidth, encoding: encoding)
+            try Self.skipIndexText(&indexReader, width: numberWidth, encoding: encoding)
             let compSize = try indexReader.readNumber(width: numberWidth)
             let decompSize = try indexReader.readNumber(width: numberWidth)
             guard decompSize <= UInt64(Self.maxBlockSize) else {
                 throw MdxError.corruptData("key block decompressed size out of range (\(decompSize))")
             }
             infos.append(KeyBlockInfo(
-                entryCount: blockEntryCount,
                 compressedSize: compSize,
                 decompressedSize: decompSize,
                 fileOffset: runningOffset
@@ -194,9 +195,6 @@ public final class MdictFile {
         )
         guard runningOffset == declaredKeyBlocksEnd else {
             throw MdxError.corruptData("key block sizes do not match declared total")
-        }
-        let indexedKeyCount = infos.reduce(UInt64(0)) { partial, info in
-            partial.addingReportingOverflow(info.entryCount).overflow ? UInt64.max : partial + info.entryCount
         }
         guard indexedKeyCount == entryCount else {
             throw MdxError.corruptData("keyword entry count mismatch")
@@ -227,43 +225,38 @@ public final class MdictFile {
             "record block count"
         )
 
-        var table = RecordBlockTable()
-        table.compressedSizes.reserveCapacity(recordBlockCount)
-        table.decompressedSizes.reserveCapacity(recordBlockCount)
-        for _ in 0 ..< recordBlockCount {
-            table.compressedSizes.append(try reader.readNumber(width: numberWidth))
-            let decompressedSize = try reader.readNumber(width: numberWidth)
-            guard decompressedSize <= UInt64(Self.maxBlockSize) else {
-                throw MdxError.corruptData(
-                    "record block decompressed size out of range (\(decompressedSize))"
-                )
-            }
-            table.decompressedSizes.append(decompressedSize)
-        }
-        var fileOffset = UInt64(reader.offset)
+        let recordBlocksStart = try Self.checkedSum(
+            UInt64(reader.offset), recordIndexLength, max: UInt64(data.count), "record index extent"
+        )
+        var fileOffset = recordBlocksStart
         var plainOffset: UInt64 = 0
-        for i in 0 ..< recordBlockCount {
-            table.fileOffsets.append(fileOffset)
-            table.decompressedStarts.append(plainOffset)
-            // Bounding the running file offset by the file size also bounds
-            // every individual compressed size, which `decompressedRecordBlock`
-            // relies on when it slices the mapped data.
-            fileOffset = try Self.checkedSum(
-                fileOffset, table.compressedSizes[i], max: UInt64(data.count), "record block extent"
+        var blocks: [RecordBlock] = []
+        blocks.reserveCapacity(recordBlockCount)
+        for _ in 0 ..< recordBlockCount {
+            let compressedSize = try reader.readNumber(width: numberWidth)
+            let decompressedSize = try Self.checked(
+                reader.readNumber(width: numberWidth),
+                max: Self.maxBlockSize, "record block decompressed size"
             )
+            let end = try Self.checkedSum(
+                fileOffset, compressedSize, max: UInt64(data.count), "record block extent"
+            )
+            blocks.append(RecordBlock(
+                fileRange: Int(fileOffset) ..< Int(end),
+                decompressedSize: decompressedSize,
+                streamOffset: plainOffset
+            ))
+            fileOffset = end
             plainOffset = try Self.checkedSum(
-                plainOffset, table.decompressedSizes[i],
+                plainOffset, UInt64(decompressedSize),
                 max: UInt64(Int.max), "record stream size"
             )
         }
-        let actualRecordBytes = table.compressedSizes.reduce(UInt64(0)) { partial, size in
-            partial.addingReportingOverflow(size).overflow ? UInt64.max : partial + size
-        }
-        guard actualRecordBytes == declaredRecordBytes else {
+        guard fileOffset - recordBlocksStart == declaredRecordBytes else {
             throw MdxError.corruptData("record block sizes do not match declared total")
         }
-        table.totalDecompressedSize = plainOffset
-        recordTable = table
+        recordBlocks = blocks
+        recordStreamSize = plainOffset
 
         info = Info(
             title: Self.unescapeXML(attributes["Title"] ?? url.deletingPathExtension().lastPathComponent),
@@ -283,17 +276,17 @@ public final class MdictFile {
     /// file size caps how many can exist.
     private var plausibleEntryCount: Int {
         let ceiling = data.count / (numberWidth + info.encoding.unitWidth)
-        return Int(min(info.entryCount, UInt64(max(ceiling, 0))))
+        return Int(min(info.entryCount, UInt64(ceiling)))
     }
 
     /// Streams every (key, record offset) pair in file order, holding only one
     /// decompressed key block at a time.
-    private func forEachKey(_ body: (String, UInt64) throws -> Void) throws {
+    private func forEachKey(_ body: (Data, UInt64) throws -> Void) throws {
         let encoding = info.encoding
         for block in keyBlockInfos {
             // init bounded every block's extent by the file size.
             let start = data.startIndex + Int(block.fileOffset)
-            let compressed = data.subdata(in: start ..< start + Int(block.compressedSize))
+            let compressed = data[start ..< start + Int(block.compressedSize)]
             let plain = try BlockCompression.decompress(
                 block: compressed,
                 decompressedSize: Int(block.decompressedSize)
@@ -301,8 +294,8 @@ public final class MdictFile {
             var r = DataReader(plain)
             while r.remaining > numberWidth {
                 let offset = try r.readNumber(width: numberWidth)
-                let keyData = try Self.readNullTerminated(&r, unitWidth: encoding.unitWidth)
-                try body(try encoding.decode(keyData), offset)
+                let keyData = try r.readNullTerminated(unitWidth: encoding.unitWidth)
+                try body(keyData, offset)
             }
         }
     }
@@ -313,7 +306,7 @@ public final class MdictFile {
         var result: [KeyEntry] = []
         result.reserveCapacity(plausibleEntryCount)
         try forEachKey { key, offset in
-            result.append(KeyEntry(key: key, recordOffset: offset))
+            result.append(KeyEntry(key: try info.encoding.decode(key), recordOffset: offset))
         }
         return result
     }
@@ -327,41 +320,47 @@ public final class MdictFile {
     /// memory at once, which dominates the cost of importing a large
     /// dictionary.
     public func forEachIndexedEntry(_ body: (IndexedEntry) throws -> Void) throws {
-        var offsets: [UInt64] = []
-        offsets.reserveCapacity(plausibleEntryCount)
-        try forEachKey { _, offset in offsets.append(offset) }
-
-        // Each entry ends where the next distinct record offset begins.
-        offsets.sort()
         var boundaries: [UInt64] = []
-        boundaries.reserveCapacity(offsets.count)
-        for offset in offsets where boundaries.last != offset {
+        boundaries.reserveCapacity(plausibleEntryCount)
+        var ordered = true
+        try forEachKey { _, offset in
+            if let previous = boundaries.last, offset < previous { ordered = false }
             boundaries.append(offset)
         }
-        offsets = []
 
-        let streamEnd = recordTable.totalDecompressedSize
+        // Normal dictionaries already have ordered offsets. Sort only when
+        // necessary, then compact duplicate boundaries in the same buffer.
+        if !ordered { boundaries.sort() }
+        var count = 0
+        for index in boundaries.indices {
+            let offset = boundaries[index]
+            if count == 0 || boundaries[count - 1] != offset {
+                boundaries[count] = offset
+                count += 1
+            }
+        }
+        boundaries.removeLast(boundaries.count - count)
+
+        let streamEnd = recordStreamSize
         var boundaryCursor = 0
-        var previousOffset: UInt64?
         try forEachKey { key, offset in
             // MDX keyword records normally appear in record-stream order. Walk
             // the boundary table linearly in that common case instead of doing
             // a binary search for every one of hundreds of thousands of keys.
             // A malformed or unusual out-of-order offset falls back safely.
-            if let previousOffset, offset < previousOffset {
-                boundaryCursor = Self.firstBoundaryIndex(after: offset, in: boundaries)
-            } else {
+            if ordered {
                 while boundaryCursor < boundaries.count, boundaries[boundaryCursor] <= offset {
                     boundaryCursor += 1
                 }
+            } else {
+                boundaryCursor = Self.firstBoundaryIndex(after: offset, in: boundaries)
             }
-            previousOffset = offset
             let end = boundaryCursor < boundaries.count ? boundaries[boundaryCursor] : streamEnd
             // A corrupt offset past the end of the stream yields an empty
             // record rather than underflowing.
             let length = end > offset ? end - offset : 0
             try body(IndexedEntry(
-                key: key,
+                key: try info.encoding.decode(key),
                 recordOffset: offset,
                 recordLength: UInt32(min(length, UInt64(UInt32.max)))
             ))
@@ -395,18 +394,22 @@ public final class MdictFile {
         guard let blockIndex = recordBlockIndex(containing: offset) else {
             throw MdxError.corruptData("record offset \(offset) out of range")
         }
-        let firstBlock = try decompressedRecordBlock(blockIndex)
-        let blockStart = recordTable.decompressedStarts[blockIndex]
-        let local = Int(offset - blockStart)
-        guard local <= firstBlock.count else {
-            throw MdxError.corruptData("record offset beyond block")
+        if let length {
+            guard length >= 0 else { throw MdxError.corruptData("negative record length") }
+            guard UInt64(length) <= recordStreamSize - offset else {
+                throw MdxError.truncatedFile("record data at \(offset), length \(length) exceeds stream")
+            }
         }
+        let firstBlock = try decompressedRecordBlock(blockIndex)
+        let blockStart = recordBlocks[blockIndex].streamOffset
+        let local = Int(offset - blockStart)
 
         guard let length else {
             return firstBlock.subdata(in: firstBlock.startIndex + local ..< firstBlock.endIndex)
         }
-        guard length >= 0 else {
-            throw MdxError.corruptData("negative record length")
+        if length <= firstBlock.count - local {
+            let start = firstBlock.startIndex + local
+            return firstBlock.subdata(in: start ..< start + length)
         }
 
         var result = Data()
@@ -415,7 +418,7 @@ public final class MdictFile {
         var currentBlockIndex = blockIndex
         var currentLocalOffset = local
 
-        while remaining > 0, currentBlockIndex < recordTable.decompressedStarts.count {
+        while remaining > 0 {
             let plain = currentBlockIndex == blockIndex
                 ? firstBlock
                 : try decompressedRecordBlock(currentBlockIndex)
@@ -428,9 +431,6 @@ public final class MdictFile {
             }
             currentBlockIndex += 1
             currentLocalOffset = 0
-        }
-        guard remaining == 0 else {
-            throw MdxError.truncatedFile("record data at \(offset), missing \(remaining) bytes")
         }
         return result
     }
@@ -483,12 +483,11 @@ public final class MdictFile {
     // MARK: - Record block helpers
 
     private func recordBlockIndex(containing offset: UInt64) -> Int? {
-        let starts = recordTable.decompressedStarts
-        guard !starts.isEmpty, offset < recordTable.totalDecompressedSize else { return nil }
-        var lo = 0, hi = starts.count - 1
+        guard !recordBlocks.isEmpty, offset < recordStreamSize else { return nil }
+        var lo = 0, hi = recordBlocks.count - 1
         while lo < hi {
             let mid = (lo + hi + 1) / 2
-            if starts[mid] <= offset { lo = mid } else { hi = mid - 1 }
+            if recordBlocks[mid].streamOffset <= offset { lo = mid } else { hi = mid - 1 }
         }
         return lo
     }
@@ -502,14 +501,11 @@ public final class MdictFile {
         }
         cacheLock.unlock()
 
-        // init bounded each block's extent by the file size, so these
-        // conversions cannot trap; the guard covers a truncated file.
-        let start = data.startIndex + Int(recordTable.fileOffsets[index])
-        let end = start + Int(recordTable.compressedSizes[index])
-        guard end <= data.endIndex else { throw MdxError.truncatedFile("record block \(index)") }
+        // The immutable table was validated once when the file was opened.
+        let block = recordBlocks[index]
         let plain = try BlockCompression.decompress(
-            block: data.subdata(in: start ..< end),
-            decompressedSize: Int(recordTable.decompressedSizes[index])
+            block: data[block.fileRange],
+            decompressedSize: block.decompressedSize
         )
 
         cacheLock.lock()
@@ -634,10 +630,11 @@ public final class MdictFile {
         return result
     }
 
-    /// Reads a length-prefixed key string from the keyword index.
-    private static func readIndexText(
+    /// The index's first/last keys are unused; consume their framing without
+    /// allocating and decoding strings just to discard them.
+    private static func skipIndexText(
         _ reader: inout DataReader, width: Int, encoding: MdictTextEncoding
-    ) throws -> String {
+    ) throws {
         let sizeUnits: Int
         if width == 8 {
             sizeUnits = Int(try reader.readUInt16BE())
@@ -645,20 +642,7 @@ public final class MdictFile {
             sizeUnits = Int(try reader.readUInt8())
         }
         let terminatorUnits = width == 8 ? 1 : 0
-        let bytes = try reader.read(sizeUnits * encoding.unitWidth)
-        try reader.skip(terminatorUnits * encoding.unitWidth)
-        return try encoding.decode(bytes)
-    }
-
-    /// Reads bytes up to (and consuming) a null terminator of the given width.
-    private static func readNullTerminated(_ reader: inout DataReader, unitWidth: Int) throws -> Data {
-        var bytes = Data()
-        while reader.remaining >= unitWidth {
-            let unit = try reader.read(unitWidth)
-            if unit.allSatisfy({ $0 == 0 }) { return bytes }
-            bytes.append(unit)
-        }
-        throw MdxError.corruptData("unterminated key string")
+        try reader.skip((sizeUnits + terminatorUnits) * encoding.unitWidth)
     }
 
     /// Cuts the data at the first null terminator (aligned for UTF-16).

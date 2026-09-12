@@ -26,7 +26,7 @@ enum TranslationProviderCategory: String, CaseIterable, Identifiable {
     }
 }
 
-enum TranslationProvider: String, CaseIterable, Identifiable {
+enum TranslationProvider: String, CaseIterable, Identifiable, Sendable {
     case apple
     case googleCloud
     case deepL
@@ -76,10 +76,7 @@ enum TranslationProvider: String, CaseIterable, Identifiable {
     }
 
     var isGeneralLanguageModel: Bool {
-        switch self {
-        case .openAI, .deepSeek, .gemini, .claude, .dashScope: return true
-        case .apple, .googleCloud, .deepL, .disabled: return false
-        }
+        category == .languageModels
     }
 
     var recommendedModel: String? {
@@ -97,7 +94,7 @@ enum TranslationProvider: String, CaseIterable, Identifiable {
     }
 }
 
-enum DashScopeRegion: String, CaseIterable, Identifiable {
+enum DashScopeRegion: String, CaseIterable, Identifiable, Sendable {
     case china
     case international
     case unitedStates
@@ -136,6 +133,37 @@ struct TranslationServiceError: LocalizedError, Sendable {
     var errorDescription: String? { message }
 }
 
+/// Validate the dictionary's input once, before selecting the local or cloud
+/// execution path. LLMs receive this complete prompt, including instructions.
+struct TranslationInput: Sendable {
+    let prompt: String
+
+    init(_ rawPrompt: String) throws {
+        let prompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else {
+            throw TranslationServiceError(message: "The dictionary supplied no text to translate.")
+        }
+        guard prompt.utf8.count <= 20_000 else {
+            throw TranslationServiceError(message: "This dictionary passage is too long to translate.")
+        }
+        self.prompt = prompt
+    }
+}
+
+/// One immutable settings snapshot per request. Every model provider,
+/// including DashScope, uses the same model field.
+struct TranslationConfiguration: Equatable, Sendable {
+    let provider: TranslationProvider
+    let model: String
+    let dashScopeRegion: DashScopeRegion
+
+    init(provider: TranslationProvider, model: String = "", dashScopeRegion: DashScopeRegion = .china) {
+        self.provider = provider
+        self.model = model
+        self.dashScopeRegion = dashScopeRegion
+    }
+}
+
 enum DictionaryTranslationService {
     private struct GoogleRequest: Encodable {
         let q: [String]
@@ -157,18 +185,12 @@ enum DictionaryTranslationService {
         let content: String
     }
 
-    private struct CompatibleChatRequest: Encodable {
+    private struct ChatRequest: Encodable {
         let model: String
         let messages: [ChatMessage]
         let stream = false
-    }
-
-    private struct DashScopeRequest: Encodable {
-        let model: String
-        let messages: [ChatMessage]
-        let stream = false
-        let temperature = 0.1
-        let enableThinking = false
+        let temperature: Double?
+        let enableThinking: Bool?
 
         enum CodingKeys: String, CodingKey {
             case model, messages, stream, temperature
@@ -288,66 +310,33 @@ enum DictionaryTranslationService {
     }
 
     static func translate(
-        prompt: String,
-        provider: TranslationProvider,
+        input: TranslationInput,
+        configuration: TranslationConfiguration,
         apiKey: String,
-        model: String,
-        dashScopeModel: String,
-        dashScopeRegion: DashScopeRegion,
         session: URLSession = .shared
     ) async throws -> String {
-        switch provider {
-        case .apple:
-            throw TranslationServiceError(
-                message: "Apple Translation must be performed by the system translation session."
-            )
-        case .disabled:
-            throw TranslationServiceError(
-                message: "Choose a live translation provider in Settings > Translation."
-            )
-        case .googleCloud:
-            return try await translateWithGoogle(prompt: prompt, apiKey: apiKey, session: session)
-        case .deepL:
-            return try await translateWithDeepL(prompt: prompt, apiKey: apiKey, session: session)
-        case .openAI:
-            return try await translateWithOpenAI(
-                prompt: prompt, apiKey: apiKey, model: model, session: session
-            )
-        case .deepSeek:
-            return try await translateWithCompatibleChat(
-                prompt: prompt,
-                apiKey: apiKey,
-                model: model,
-                endpoint: URL(string: "https://api.deepseek.com/chat/completions")!,
-                service: "DeepSeek",
-                session: session
-            )
-        case .gemini:
-            return try await translateWithCompatibleChat(
-                prompt: prompt,
-                apiKey: apiKey,
-                model: model,
-                endpoint: URL(string: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")!,
-                service: "Gemini",
-                session: session
-            )
-        case .claude:
-            return try await translateWithClaude(
-                prompt: prompt, apiKey: apiKey, model: model, session: session
-            )
-        case .dashScope:
-            return try await translateWithDashScope(
-                prompt: prompt,
-                apiKey: apiKey,
-                model: dashScopeModel,
-                region: dashScopeRegion,
-                session: session
-            )
+        try Task.checkCancellation()
+        let provider = configuration.provider
+        let service = serviceName(for: provider)
+        let request = try makeRequest(
+            input: input, configuration: configuration, apiKey: apiKey, service: service
+        )
+        let (data, response) = try await session.data(for: request)
+        try Task.checkCancellation()
+        try validate(response: response, data: data, service: service)
+        let text = try translationText(from: data, provider: provider, service: service)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            let name = provider == .googleCloud ? "Google Cloud" : service
+            throw TranslationServiceError(message: "\(name) returned an empty translation.")
         }
+        // Dedicated APIs may intentionally preserve surrounding whitespace in
+        // translated HTML; LLM completions retain the existing trimming policy.
+        return provider.isGeneralLanguageModel ? trimmed : text
     }
 
-    /// Dedicated translation APIs should receive only the source passage;
-    /// contextual LLM providers receive the complete dictionary prompt.
+    /// Extract the text translated by Apple and dedicated APIs. DeepL also
+    /// receives the full prompt as context; LLMs receive the complete prompt.
     /// OED/ODE place the source first, while Longman 6 places a Chinese
     /// instruction first and the source on the following lines.
     static func sourcePassage(from prompt: String) -> String {
@@ -388,79 +377,138 @@ enum DictionaryTranslationService {
             .replacingOccurrences(of: "⋖", with: "<")
     }
 
-    private static func translateWithGoogle(
-        prompt: String,
-        apiKey: String,
-        session: URLSession
-    ) async throws -> String {
-        let source = sourcePassage(from: prompt)
+    private static func makeRequest(
+        input: TranslationInput, configuration: TranslationConfiguration,
+        apiKey rawAPIKey: String, service: String
+    ) throws -> URLRequest {
+        let provider = configuration.provider
+        let apiKey = rawAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !provider.requiresAPIKey || !apiKey.isEmpty else {
+            throw TranslationServiceError(
+                message: "Add a \(provider.title) API key in Settings > Translation."
+            )
+        }
+        let model = configuration.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !provider.isGeneralLanguageModel || !model.isEmpty else {
+            throw TranslationServiceError(message: "Enter a \(service) model name in Settings.")
+        }
+        let prompt = input.prompt
+        let source = provider.category == .translationAPIs ? sourcePassage(from: prompt) : prompt
         guard !source.isEmpty else {
             throw TranslationServiceError(message: "The dictionary supplied no text to translate.")
         }
-        let url = URL(string: "https://translation.googleapis.com/language/translate/v2")!
 
-        let containsMarkup = source.range(
-            of: #"<\/?[a-zA-Z][^>]*>"#,
-            options: .regularExpression
-        ) != nil
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        // Keep credentials out of the URL, where proxies and diagnostic logs
-        // commonly record them. Google recommends this header for REST API
-        // keys and Cloud Translation v2 accepts it.
-        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
-        request.httpBody = try JSONEncoder().encode(
-            GoogleRequest(q: [source], format: containsMarkup ? "html" : "text")
-        )
-
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data, service: "Google Cloud Translation")
-        guard let text = try JSONDecoder().decode(GoogleResponse.self, from: data)
-            .data.translations.first?.translatedText,
-            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
-            throw TranslationServiceError(message: "Google Cloud returned an empty translation.")
+        let endpoint: URL
+        let authorization: (field: String, value: String)
+        let body: Data
+        let encoder = JSONEncoder()
+        switch provider {
+        case .apple:
+            throw TranslationServiceError(
+                message: "Apple Translation must be performed by the system translation session."
+            )
+        case .disabled:
+            throw TranslationServiceError(
+                message: "Choose a live translation provider in Settings > Translation."
+            )
+        case .googleCloud:
+            endpoint = URL(string: "https://translation.googleapis.com/language/translate/v2")!
+            // Credentials belong in headers, never in URLs or query logs.
+            authorization = ("x-goog-api-key", apiKey)
+            let markup = source.range(of: #"<\/?[a-zA-Z][^>]*>"#, options: .regularExpression) != nil
+            body = try encoder.encode(GoogleRequest(q: [source], format: markup ? "html" : "text"))
+        case .deepL:
+            endpoint = deepLEndpoint(forAPIKey: apiKey)
+            authorization = ("Authorization", "DeepL-Auth-Key \(apiKey)")
+            let markup = source.range(
+                of: #"<\/?(?:m|n|o)>"#, options: [.regularExpression, .caseInsensitive]
+            ) != nil
+            body = try encoder.encode(DeepLRequest(
+                text: [source], context: prompt == source ? nil : prompt,
+                tagHandling: markup ? "html" : nil,
+                tagHandlingVersion: markup ? "v2" : nil,
+                ignoreTags: markup ? ["n", "o"] : nil
+            ))
+        case .openAI:
+            endpoint = URL(string: "https://api.openai.com/v1/responses")!
+            authorization = ("Authorization", "Bearer \(apiKey)")
+            body = try encoder.encode(OpenAIRequest(model: model, input: prompt))
+        case .claude:
+            endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
+            authorization = ("x-api-key", apiKey)
+            body = try encoder.encode(ClaudeRequest(
+                model: model, messages: [.init(role: "user", content: prompt)]
+            ))
+        case .deepSeek, .gemini, .dashScope:
+            switch provider {
+            case .deepSeek:
+                endpoint = URL(string: "https://api.deepseek.com/chat/completions")!
+            case .gemini:
+                endpoint = URL(string: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")!
+            default:
+                endpoint = configuration.dashScopeRegion.endpoint
+            }
+            authorization = ("Authorization", "Bearer \(apiKey)")
+            var messages: [ChatMessage] = []
+            if provider != .dashScope {
+                messages.append(.init(
+                    role: "system",
+                    content: "Follow the dictionary translation request exactly. "
+                        + "Return only the requested translation and preserve requested markup."
+                ))
+            }
+            messages.append(.init(role: "user", content: prompt))
+            body = try encoder.encode(ChatRequest(
+                model: model, messages: messages,
+                temperature: provider == .dashScope ? 0.1 : nil,
+                enableThinking: provider == .dashScope ? false : nil
+            ))
         }
-        return text
+
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = provider.category == .translationAPIs ? 30 : provider == .dashScope ? 45 : 60
+        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
+        request.setValue(authorization.value, forHTTPHeaderField: authorization.field)
+        if provider == .claude {
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        }
+        request.httpBody = body
+        return request
     }
 
-    private static func translateWithDeepL(
-        prompt: String,
-        apiKey: String,
-        session: URLSession
-    ) async throws -> String {
-        let source = sourcePassage(from: prompt)
-        guard !source.isEmpty else {
-            throw TranslationServiceError(message: "The dictionary supplied no text to translate.")
+    private static func translationText(
+        from data: Data, provider: TranslationProvider, service: String
+    ) throws -> String {
+        let decoder = JSONDecoder()
+        switch provider {
+        case .googleCloud:
+            return try decoder.decode(GoogleResponse.self, from: data)
+                .data.translations.first?.translatedText ?? ""
+        case .deepL:
+            return try decoder.decode(DeepLResponse.self, from: data).translations.first?.text ?? ""
+        case .openAI:
+            let result = try decoder.decode(OpenAIResponse.self, from: data)
+            if let status = result.status, status != "completed" {
+                throw incompleteTranslation(service: service)
+            }
+            return result.outputText
+        case .claude:
+            let result = try decoder.decode(ClaudeResponse.self, from: data)
+            if let reason = result.stopReason, reason != "end_turn", reason != "stop_sequence" {
+                throw incompleteTranslation(service: service)
+            }
+            return result.outputText
+        case .deepSeek, .gemini, .dashScope:
+            let choice = try decoder.decode(ChatResponse.self, from: data).choices.first
+            if let reason = choice?.finishReason, reason != "stop" {
+                throw incompleteTranslation(service: service)
+            }
+            return choice?.message.content ?? ""
+        case .apple, .disabled:
+            // These providers are rejected before a cloud request is created.
+            throw TranslationServiceError(message: "\(service) returned an invalid response.")
         }
-        let containsMarkup = source.range(
-            of: #"<\/?(?:m|n|o)>"#,
-            options: [.regularExpression, .caseInsensitive]
-        ) != nil
-        var request = URLRequest(url: deepLEndpoint(forAPIKey: apiKey))
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        request.setValue("DeepL-Auth-Key \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONEncoder().encode(DeepLRequest(
-            text: [source],
-            context: prompt == source ? nil : prompt,
-            tagHandling: containsMarkup ? "html" : nil,
-            tagHandlingVersion: containsMarkup ? "v2" : nil,
-            ignoreTags: containsMarkup ? ["n", "o"] : nil
-        ))
-
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data, service: "DeepL")
-        guard let text = try JSONDecoder().decode(DeepLResponse.self, from: data)
-            .translations.first?.text,
-            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else {
-            throw TranslationServiceError(message: "DeepL returned an empty translation.")
-        }
-        return text
     }
 
     static func deepLEndpoint(forAPIKey apiKey: String) -> URL {
@@ -468,139 +516,14 @@ enum DictionaryTranslationService {
         return URL(string: "https://\(host)/v2/translate")!
     }
 
-    private static func validatedModel(_ rawModel: String, service: String) throws -> String {
-        let model = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !model.isEmpty else {
-            throw TranslationServiceError(message: "Enter a \(service) model name in Settings.")
+    private static func serviceName(for provider: TranslationProvider) -> String {
+        switch provider {
+        case .openAI: return "OpenAI"
+        case .gemini: return "Gemini"
+        case .claude: return "Claude"
+        case .dashScope: return "DashScope"
+        default: return provider.title
         }
-        return model
-    }
-
-    private static func translateWithOpenAI(
-        prompt: String,
-        apiKey: String,
-        model rawModel: String,
-        session: URLSession
-    ) async throws -> String {
-        let model = try validatedModel(rawModel, service: "OpenAI")
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/responses")!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 60
-        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONEncoder().encode(OpenAIRequest(model: model, input: prompt))
-
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data, service: "OpenAI")
-        let result = try JSONDecoder().decode(OpenAIResponse.self, from: data)
-        if let status = result.status, status != "completed" {
-            throw incompleteTranslation(service: "OpenAI")
-        }
-        let text = result.outputText
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else {
-            throw TranslationServiceError(message: "OpenAI returned an empty translation.")
-        }
-        return text
-    }
-
-    private static func translateWithCompatibleChat(
-        prompt: String,
-        apiKey: String,
-        model rawModel: String,
-        endpoint: URL,
-        service: String,
-        session: URLSession
-    ) async throws -> String {
-        let model = try validatedModel(rawModel, service: service)
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 60
-        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONEncoder().encode(CompatibleChatRequest(
-            model: model,
-            messages: [
-                .init(
-                    role: "system",
-                    content: "Follow the dictionary translation request exactly. "
-                        + "Return only the requested translation and preserve requested markup."
-                ),
-                .init(role: "user", content: prompt),
-            ]
-        ))
-
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data, service: service)
-        return try chatTranslation(from: data, service: service)
-    }
-
-    private static func translateWithClaude(
-        prompt: String,
-        apiKey: String,
-        model rawModel: String,
-        session: URLSession
-    ) async throws -> String {
-        let model = try validatedModel(rawModel, service: "Claude")
-        var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 60
-        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.httpBody = try JSONEncoder().encode(ClaudeRequest(
-            model: model,
-            messages: [.init(role: "user", content: prompt)]
-        ))
-
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data, service: "Claude")
-        let result = try JSONDecoder().decode(ClaudeResponse.self, from: data)
-        if let stopReason = result.stopReason,
-           stopReason != "end_turn", stopReason != "stop_sequence" {
-            throw incompleteTranslation(service: "Claude")
-        }
-        let text = result.outputText
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else {
-            throw TranslationServiceError(message: "Claude returned an empty translation.")
-        }
-        return text
-    }
-
-    private static func translateWithDashScope(
-        prompt: String,
-        apiKey: String,
-        model: String,
-        region: DashScopeRegion,
-        session: URLSession
-    ) async throws -> String {
-        let model = try validatedModel(model, service: "DashScope")
-        var request = URLRequest(url: region.endpoint)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 45
-        request.setValue("application/json; charset=utf-8", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONEncoder().encode(DashScopeRequest(
-            model: model,
-            messages: [.init(role: "user", content: prompt)]
-        ))
-
-        let (data, response) = try await session.data(for: request)
-        try validate(response: response, data: data, service: "DashScope")
-        return try chatTranslation(from: data, service: "DashScope")
-    }
-
-    private static func chatTranslation(from data: Data, service: String) throws -> String {
-        let choice = try JSONDecoder().decode(ChatResponse.self, from: data).choices.first
-        if let finishReason = choice?.finishReason, finishReason != "stop" {
-            throw incompleteTranslation(service: service)
-        }
-        let text = choice?.message.content?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !text.isEmpty else {
-            throw TranslationServiceError(message: "\(service) returned an empty translation.")
-        }
-        return text
     }
 
     private static func incompleteTranslation(service: String) -> TranslationServiceError {

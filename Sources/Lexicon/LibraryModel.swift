@@ -3,8 +3,6 @@ import AppKit
 import Combine
 import Foundation
 import MdxKit
-import SwiftUI
-import Translation
 
 /// State that belongs to the whole app rather than to one window: the open
 /// dictionary library, the imported dictionary list, and the history and
@@ -57,8 +55,9 @@ final class LibraryModel: ObservableObject {
 
     private var audioPlayer: AVAudioPlayer?
     private let speechSynthesizer = AVSpeechSynthesizer()
-    private var cloudSpeechTask: Task<Void, Never>?
-    private var speechGeneration = UUID()
+    /// Dictionary audio and synthesized speech share one cancellable playback
+    /// request; selecting another sound always supersedes the previous one.
+    private var audioTask: Task<Void, Never>?
     private let importQueue = DispatchQueue(label: "lexicon.import", qos: .userInitiated)
     private var importCancellation: ImportCancellationToken?
     private var dictionaryIconCache: [String: NSImage] = [:]
@@ -67,10 +66,7 @@ final class LibraryModel: ObservableObject {
     /// from view bodies for every history row, tab and starred card, so an
     /// uncached lookup ran a SQL query per row on every keystroke.
     private var displayWordCache: [String: String] = [:]
-    private let appleTranslationService: AppleTranslationService
-    private var appleLanguageAlert: NSAlert?
-    private var translationGeneration = UUID()
-    private var translationTestTask: Task<Void, Never>?
+    let translation: TranslationModel
 
     nonisolated static var defaultRoot: URL {
         // Override for testing against a disposable library.
@@ -81,11 +77,8 @@ final class LibraryModel: ObservableObject {
             .appendingPathComponent("Lexicon", isDirectory: true)
     }
 
-    init(
-        rootURL: URL = LibraryModel.defaultRoot,
-        appleTranslationService: AppleTranslationService = .system
-    ) {
-        self.appleTranslationService = appleTranslationService
+    init(rootURL: URL = LibraryModel.defaultRoot) {
+        translation = TranslationModel(settings: Self.settings)
         do {
             library = try DictionaryLibrary(rootURL: rootURL)
         } catch {
@@ -97,8 +90,6 @@ final class LibraryModel: ObservableObject {
         if let warnings = library?.startupWarnings, !warnings.isEmpty {
             notice = Notice(title: "Library notice", message: warnings.joined(separator: "\n"))
         }
-        rememberTranslationProvider()
-        refreshTranslationCredentialState()
     }
 
     // MARK: - Dictionaries
@@ -334,7 +325,7 @@ final class LibraryModel: ObservableObject {
                 zoomKey, lookUpKey, collapsedKey, historyLimitKey, networkPolicyKey,
                 ttsProviderKey, systemBritishVoiceKey, systemAmericanVoiceKey,
                 googleBritishVoiceKey, googleAmericanVoiceKey,
-                translationProviderKey, dashScopeRegionKey, dashScopeModelKey,
+                "translationProvider", "dashScopeRegion", "dashScopeModel",
             ]
             where current.object(forKey: key) == nil {
                 if let value = legacy.object(forKey: key) {
@@ -390,49 +381,6 @@ final class LibraryModel: ObservableObject {
     @Published private(set) var hasGoogleAPIKey = (try? APIKeychain.googleCloudTTS.read()) != nil
     @Published private(set) var ttsStatus: String?
 
-    @Published var translationProvider: TranslationProvider = LibraryModel.storedTranslationProvider() {
-        didSet {
-            guard translationProvider != oldValue else { return }
-            translationTestTask?.cancel()
-            translationGeneration = UUID()
-            Self.settings.set(translationProvider.rawValue, forKey: Self.translationProviderKey)
-            rememberTranslationProvider()
-            refreshTranslationCredentialState()
-            translationStatus = nil
-        }
-    }
-    @Published var dashScopeRegion: DashScopeRegion = LibraryModel.storedDashScopeRegion() {
-        didSet {
-            Self.settings.set(dashScopeRegion.rawValue, forKey: Self.dashScopeRegionKey)
-            let standardModels = Set(
-                DashScopeRegion.allCases.map(\.recommendedModel) + ["qwen-plus"]
-            )
-            if standardModels.contains(dashScopeModel) {
-                dashScopeModel = dashScopeRegion.recommendedModel
-            }
-        }
-    }
-    @Published var dashScopeModel: String = LibraryModel.settings.string(
-        forKey: LibraryModel.dashScopeModelKey
-    ) ?? LibraryModel.storedDashScopeRegion().recommendedModel {
-        didSet { Self.settings.set(dashScopeModel, forKey: Self.dashScopeModelKey) }
-    }
-    @Published var openAIModel: String = LibraryModel.storedTranslationModel(for: .openAI) {
-        didSet { Self.storeTranslationModel(openAIModel, for: .openAI) }
-    }
-    @Published var deepSeekModel: String = LibraryModel.storedTranslationModel(for: .deepSeek) {
-        didSet { Self.storeTranslationModel(deepSeekModel, for: .deepSeek) }
-    }
-    @Published var geminiModel: String = LibraryModel.storedTranslationModel(for: .gemini) {
-        didSet { Self.storeTranslationModel(geminiModel, for: .gemini) }
-    }
-    @Published var claudeModel: String = LibraryModel.storedTranslationModel(for: .claude) {
-        didSet { Self.storeTranslationModel(claudeModel, for: .claude) }
-    }
-    @Published private(set) var hasTranslationAPIKey = false
-    @Published private(set) var translationStatus: String?
-    @Published private(set) var appleTranslationAvailability: LanguageAvailability.Status?
-
     /// Dictionaries the user collapsed on a results page. Remembered across
     /// lookups so a dictionary you always skip stays folded away.
     ///
@@ -462,12 +410,6 @@ final class LibraryModel: ObservableObject {
     private static let systemAmericanVoiceKey = "systemAmericanVoice"
     private static let googleBritishVoiceKey = "googleBritishVoice"
     private static let googleAmericanVoiceKey = "googleAmericanVoice"
-    private static let translationProviderKey = "translationProvider"
-    private static let lastTranslationAPIProviderKey = "lastTranslationAPIProvider"
-    private static let lastLanguageModelProviderKey = "lastLanguageModelProvider"
-    private static let dashScopeRegionKey = "dashScopeRegion"
-    private static let dashScopeModelKey = "dashScopeModel"
-    private static let translationModelKeyPrefix = "translationModel."
     private static let settingsMigrationKey = "migratedFromOrgLexiconSettings"
     private static let sidebarWidthKey = "sidebarWidth"
     private static let sidebarVisibleKey = "sidebarVisible"
@@ -533,41 +475,6 @@ final class LibraryModel: ObservableObject {
         return GoogleCloudTTS.voiceNames.contains(stored) ? stored : "Algieba"
     }
 
-    private static func storedTranslationProvider() -> TranslationProvider {
-        guard let raw = settings.string(forKey: translationProviderKey) else { return .apple }
-        return TranslationProvider(rawValue: raw) ?? .apple
-    }
-
-    private static func storedProvider(
-        key: String,
-        category: TranslationProviderCategory,
-        fallback: TranslationProvider
-    ) -> TranslationProvider {
-        guard let raw = settings.string(forKey: key),
-              let provider = TranslationProvider(rawValue: raw),
-              provider.category == category
-        else { return fallback }
-        return provider
-    }
-
-    private static func storedDashScopeRegion() -> DashScopeRegion {
-        guard let raw = settings.string(forKey: dashScopeRegionKey) else { return .china }
-        return DashScopeRegion(rawValue: raw) ?? .china
-    }
-
-    private static func storedTranslationModel(for provider: TranslationProvider) -> String {
-        precondition(provider.isGeneralLanguageModel && provider != .dashScope)
-        return settings.string(forKey: translationModelKeyPrefix + provider.rawValue)
-            ?? provider.recommendedModel!
-    }
-
-    private static func storeTranslationModel(
-        _ model: String,
-        for provider: TranslationProvider
-    ) {
-        settings.set(model, forKey: translationModelKeyPrefix + provider.rawValue)
-    }
-
     static func systemVoices(language: String) -> [SystemSpeechVoice] {
         AVSpeechSynthesisVoice.speechVoices()
             .filter { $0.language.caseInsensitiveCompare(language) == .orderedSame }
@@ -616,56 +523,10 @@ final class LibraryModel: ObservableObject {
         systemAmericanVoiceIdentifier = ""
         googleBritishVoice = "Algieba"
         googleAmericanVoice = "Algieba"
-        translationProvider = .apple
-        Self.settings.removeObject(forKey: Self.lastTranslationAPIProviderKey)
-        Self.settings.removeObject(forKey: Self.lastLanguageModelProviderKey)
-        openAIModel = TranslationProvider.openAI.recommendedModel!
-        deepSeekModel = TranslationProvider.deepSeek.recommendedModel!
-        geminiModel = TranslationProvider.gemini.recommendedModel!
-        claudeModel = TranslationProvider.claude.recommendedModel!
-        dashScopeRegion = .china
-        dashScopeModel = DashScopeRegion.china.recommendedModel
+        translation.restoreDefaults()
         if !collapsedDictionaries.isEmpty {
             collapsedDictionaries.removeAll()
             Self.settings.removeObject(forKey: Self.collapsedKey)
-        }
-    }
-
-    func selectTranslationCategory(_ category: TranslationProviderCategory) {
-        switch category {
-        case .apple:
-            translationProvider = .apple
-        case .translationAPIs:
-            translationProvider = Self.storedProvider(
-                key: Self.lastTranslationAPIProviderKey,
-                category: .translationAPIs,
-                fallback: .googleCloud
-            )
-        case .languageModels:
-            translationProvider = Self.storedProvider(
-                key: Self.lastLanguageModelProviderKey,
-                category: .languageModels,
-                fallback: .openAI
-            )
-        case .disabled:
-            translationProvider = .disabled
-        }
-    }
-
-    private func rememberTranslationProvider() {
-        switch translationProvider.category {
-        case .translationAPIs:
-            Self.settings.set(
-                translationProvider.rawValue,
-                forKey: Self.lastTranslationAPIProviderKey
-            )
-        case .languageModels:
-            Self.settings.set(
-                translationProvider.rawValue,
-                forKey: Self.lastLanguageModelProviderKey
-            )
-        case .apple, .disabled:
-            break
         }
     }
 
@@ -764,15 +625,29 @@ final class LibraryModel: ObservableObject {
     func playAudio(path: String, dictionaryUUID: String) {
         stopSpeech()
         guard let library else { return }
-        do {
-            guard let resource = try library.resource(path: path, dictionaryUUID: dictionaryUUID) else {
-                errorMessage = "Audio resource not found: \(path)"
-                return
+        let reading = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            return try library.resource(path: path, dictionaryUUID: dictionaryUUID)
+        }
+        audioTask = Task { [weak self] in
+            do {
+                let resource = try await withTaskCancellationHandler {
+                    try await reading.value
+                } onCancel: {
+                    reading.cancel()
+                }
+                try Task.checkCancellation()
+                guard let self else { return }
+                guard let resource else {
+                    self.errorMessage = "Audio resource not found: \(path)"
+                    return
+                }
+                self.audioPlayer = try AVAudioPlayer(data: resource.data)
+                self.audioPlayer?.play()
+            } catch {
+                guard !Task.isCancelled, let self else { return }
+                self.errorMessage = "Could not play this dictionary audio: \(error.localizedDescription)"
             }
-            audioPlayer = try AVAudioPlayer(data: resource.data)
-            audioPlayer?.play()
-        } catch {
-            errorMessage = "Could not play this dictionary audio: \(error.localizedDescription)"
         }
     }
 
@@ -786,7 +661,6 @@ final class LibraryModel: ObservableObject {
         let language = rawLanguage.caseInsensitiveCompare("en-GB") == .orderedSame
             ? "en-GB" : "en-US"
         stopSpeech()
-        speechGeneration = UUID()
 
         switch ttsProvider {
         case .system:
@@ -801,28 +675,33 @@ final class LibraryModel: ObservableObject {
             ttsStatus = "Speaking with System Voice."
 
         case .googleCloud:
-            guard let apiKey = try? APIKeychain.googleCloudTTS.read(), !apiKey.isEmpty else {
-                ttsStatus = "Google Cloud needs an API key."
-                errorMessage = "Add a Google Cloud Text-to-Speech API key in Settings."
+            let apiKey: String
+            do {
+                guard let savedKey = try APIKeychain.googleCloudTTS.read(), !savedKey.isEmpty else {
+                    ttsStatus = "Google Cloud needs an API key."
+                    errorMessage = "Add a Google Cloud Text-to-Speech API key in Settings."
+                    return
+                }
+                apiKey = savedKey
+            } catch {
+                ttsStatus = "Could not read the Google Cloud API key."
+                errorMessage = "Could not read the Google Cloud API key: \(error.localizedDescription)"
                 return
             }
             let voice = language == "en-GB" ? googleBritishVoice : googleAmericanVoice
-            let generation = speechGeneration
             ttsStatus = "Generating speech with Google Cloud…"
-            cloudSpeechTask = Task { @MainActor [weak self] in
+            audioTask = Task { [weak self] in
                 do {
                     let data = try await GoogleCloudTTS.synthesize(
                         text: text, language: language, voiceName: voice, apiKey: apiKey
                     )
                     try Task.checkCancellation()
-                    guard let self, self.speechGeneration == generation else { return }
+                    guard let self else { return }
                     self.audioPlayer = try AVAudioPlayer(data: data)
                     self.audioPlayer?.play()
                     self.ttsStatus = "Playing Google Cloud voice \(voice)."
-                } catch is CancellationError {
-                    return
                 } catch {
-                    guard let self, self.speechGeneration == generation else { return }
+                    guard !Task.isCancelled, let self else { return }
                     self.ttsStatus = "Google Cloud speech failed."
                     self.errorMessage = "Could not generate speech: \(error.localizedDescription)"
                 }
@@ -863,194 +742,9 @@ final class LibraryModel: ObservableObject {
         speak("Lexicon text-to-speech is ready.", language: "en-US")
     }
 
-    func translateDictionaryPrompt(_ rawPrompt: String) async throws -> String {
-        try Task.checkCancellation()
-        let prompt = rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty else {
-            throw TranslationServiceError(message: "The dictionary supplied no text to translate.")
-        }
-        guard prompt.utf8.count <= 20_000 else {
-            throw TranslationServiceError(message: "This dictionary passage is too long to translate.")
-        }
-        let provider = translationProvider
-        guard provider != .disabled else {
-            let error = TranslationServiceError(
-                message: "Choose a live translation provider in Settings > Translation."
-            )
-            translationStatus = "Live translation is off."
-            errorMessage = error.message
-            throw error
-        }
-
-        let generation = UUID()
-        translationGeneration = generation
-        translationStatus = "Translating with \(provider.title)…"
-        do {
-            let result: String
-            if provider == .apple {
-                let source = DictionaryTranslationService.plainSourcePassage(from: prompt)
-                guard !source.isEmpty else {
-                    throw TranslationServiceError(
-                        message: "The dictionary supplied no text to translate."
-                    )
-                }
-                result = try await appleTranslationService.translate(source)
-                appleTranslationAvailability = .installed
-            } else {
-                guard let apiKey = try? provider.keychain?.read(),
-                      !apiKey.isEmpty
-                else {
-                    throw TranslationServiceError(
-                        message: "Add a \(provider.title) API key in Settings > Translation."
-                    )
-                }
-                result = try await DictionaryTranslationService.translate(
-                    prompt: prompt,
-                    provider: provider,
-                    apiKey: apiKey,
-                    model: translationModel(for: provider),
-                    dashScopeModel: dashScopeModel,
-                    dashScopeRegion: dashScopeRegion
-                )
-            }
-            try Task.checkCancellation()
-            if translationGeneration == generation {
-                translationStatus = "Translated with \(provider.title)."
-            }
-            return result
-        } catch {
-            if Task.isCancelled || error is CancellationError
-                || (error as? URLError)?.code == .cancelled {
-                if translationGeneration == generation { translationStatus = nil }
-                throw CancellationError()
-            }
-            if translationGeneration == generation {
-                if case AppleTranslationSetupError.languagesNotInstalled = error {
-                    appleTranslationAvailability = .supported
-                    translationStatus = "Download the English and Simplified Chinese language packs in System Settings."
-                    showAppleTranslationLanguageGuide()
-                } else {
-                    translationStatus = "\(provider.title) translation failed: \(error.localizedDescription)"
-                    errorMessage = "Could not translate this passage: \(error.localizedDescription)"
-                }
-            }
-            throw error
-        }
-    }
-
-    @discardableResult
-    func saveTranslationAPIKey(_ rawValue: String) -> Bool {
-        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let keychain = translationProvider.keychain else {
-            errorMessage = "The selected translation provider does not use an API key."
-            return false
-        }
-        guard !value.isEmpty else {
-            errorMessage = "Enter a translation API key first."
-            return false
-        }
-        do {
-            try keychain.save(value)
-            hasTranslationAPIKey = true
-            translationStatus = "\(translationProvider.title) API key saved in Keychain."
-            return true
-        } catch {
-            errorMessage = "Could not save the translation API key: \(error.localizedDescription)"
-            return false
-        }
-    }
-
-    func removeTranslationAPIKey() {
-        guard let keychain = translationProvider.keychain else { return }
-        do {
-            try keychain.remove()
-            hasTranslationAPIKey = false
-            translationStatus = "\(translationProvider.title) API key removed."
-        } catch {
-            errorMessage = "Could not remove the translation API key: \(error.localizedDescription)"
-        }
-    }
-
-    func testTranslation() {
-        translationTestTask?.cancel()
-        translationTestTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                let result = try await translateDictionaryPrompt(
-                    "The old lighthouse stood on the edge of the cliff.\n"
-                    + "Translate the English sentence above into Simplified Chinese. "
-                    + "Return only the translation."
-                )
-                try Task.checkCancellation()
-                translationStatus = "Test: \(result)"
-            } catch {
-                // translateDictionaryPrompt already provides the actionable error.
-            }
-        }
-    }
-
-    private func refreshTranslationCredentialState() {
-        hasTranslationAPIKey = (try? translationProvider.keychain?.read()) != nil
-    }
-
-    private func translationModel(for provider: TranslationProvider) -> String {
-        switch provider {
-        case .openAI: return openAIModel
-        case .deepSeek: return deepSeekModel
-        case .gemini: return geminiModel
-        case .claude: return claudeModel
-        case .dashScope: return dashScopeModel
-        case .apple, .googleCloud, .deepL, .disabled: return ""
-        }
-    }
-
-    func checkAppleTranslationLanguages(offerDownload: Bool = false) async {
-        guard translationProvider == .apple else { return }
-        let status = await appleTranslationService.availability()
-        guard !Task.isCancelled, translationProvider == .apple else { return }
-        appleTranslationAvailability = status
-        if offerDownload, status == .supported {
-            showAppleTranslationLanguageGuide()
-        }
-    }
-
-    func showAppleTranslationLanguageGuide() {
-        guard appleLanguageAlert == nil else { return }
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.icon = NSImage(systemSymbolName: "character.bubble", accessibilityDescription: nil)
-        alert.messageText = "Set Up Apple Translation"
-        alert.informativeText = "Download English and Simplified Chinese in System Settings, "
-            + "then return here to translate."
-        alert.addButton(withTitle: "Open Settings…")
-        alert.addButton(withTitle: "Not Now")
-        appleLanguageAlert = alert
-
-        let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
-            guard let self else { return }
-            self.appleLanguageAlert = nil
-            if response == .alertFirstButtonReturn { self.openTranslationLanguageSettings() }
-        }
-        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
-            alert.beginSheetModal(for: window, completionHandler: completion)
-        } else {
-            completion(alert.runModal())
-        }
-    }
-
-    func openTranslationLanguageSettings() {
-        let url = URL(string: "x-apple.systempreferences:com.apple.Localization-Settings.extension?translation")!
-        if !NSWorkspace.shared.open(url) {
-            errorMessage = "Could not open System Settings. "
-                + AppleTranslationSetupError.downloadInstructions
-            translationStatus = errorMessage
-        }
-    }
-
     private func stopSpeech() {
-        cloudSpeechTask?.cancel()
-        cloudSpeechTask = nil
-        speechGeneration = UUID()
+        audioTask?.cancel()
+        audioTask = nil
         speechSynthesizer.stopSpeaking(at: .immediate)
         audioPlayer?.stop()
     }

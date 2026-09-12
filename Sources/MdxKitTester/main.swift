@@ -108,6 +108,17 @@ if CommandLine.arguments.count >= 3, CommandLine.arguments[1] == "diag" {
     exit(0)
 }
 
+// Benchmark mode: `swift run -c release MdxKitTester benchmark`.
+if CommandLine.arguments.dropFirst().first == "benchmark" {
+    do {
+        try runBenchmarks()
+        exit(0)
+    } catch {
+        print("benchmark failed: \(error)")
+        exit(1)
+    }
+}
+
 let t = TestHarness()
 
 print("MdxKit tests")

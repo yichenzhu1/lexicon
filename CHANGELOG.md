@@ -4,13 +4,32 @@ All notable changes to Lexicon are documented here.
 
 ## Unreleased
 
+- Simplified tab and search state around one location per tab. New queries
+  immediately clear stale results, Return keeps the keyboard-selected result,
+  and dictionary changes refresh searches. Repeated navigation preserves scroll.
+- Page construction and dictionary audio loading now run off the main actor.
+  Superseded pages and old-document bridge messages cannot update a new location.
+- Dictionary files open on demand, resource prefix lookups use index ranges,
+  and binary resources avoid unnecessary full-text decoding. Imports publish
+  the final folder and index in one transaction, with atomic record-cache updates.
+- Reduced parser allocations and repeated HTML processing; added repeatable
+  performance benchmarks and regressions for cancellation, Unicode, resource
+  volumes, import visibility, and page lifecycle.
+- Fixed late translation tests overwriting newer status, preserved Keychain
+  access errors, and clarified history trimming when restoring default settings.
+- Translation settings now own their preferences and cancellable test state;
+  dictionary translations run independently and report errors in their passage.
+  Cloud providers share one request pipeline, and fetch/WebSocket adapters share
+  one cleanup path for completion, cancellation, timeout, and page navigation.
 - App packaging now prefers the installed macOS 26 SDK and honors `SDKROOT`,
   fixing builds when Command Line Tools default to a preview SDK without its
   required SwiftUI macro plugins.
-- Apple Translation now uses only installed language packs. Missing English
-  and Simplified Chinese packs prompt a guide to System Settings' Translation
-  Languages page instead of opening an in-app download window. Settings shows
-  language availability and refreshes it when returning from System Settings.
+- Apple Translation uses a separate installed-language session per request,
+  with missing or unsupported languages reported by the translation operation.
+  Settings shows availability and download instructions inline, refreshes when
+  returning from System Settings, and opens Translation Languages directly
+  from its manage button. Removed automatic setup alerts and the availability
+  check before each translation; no in-app download session is created.
 - Removed the hidden SwiftUI translation host and continuation queue, so local
   translations no longer depend on a window remaining open.
 - Fixed multi-line source extraction, incomplete model responses being accepted
