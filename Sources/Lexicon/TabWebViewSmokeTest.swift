@@ -117,12 +117,13 @@ enum TabWebViewSmokeTest {
                     Task { @MainActor in
                         do {
                             let loadingChecks = try await EntryLoadingTests.run(model: state.libraryModel)
+                            let securityChecks = try await DictionarySecurityTests.run()
                             finish(
-                                "TAB WEBVIEW OK (\(checks) translation bridge checks, \(loadingChecks) page lifecycle checks)",
+                                "TAB WEBVIEW OK (\(checks) translation bridge checks, \(loadingChecks) page lifecycle checks, \(securityChecks) offline security checks)",
                                 success: true
                             )
                         } catch {
-                            finish("page lifecycle: \(error)", success: false)
+                            finish("page lifecycle/security: \(error)", success: false)
                         }
                     }
                 case .failure(let error):

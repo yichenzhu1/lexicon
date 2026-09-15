@@ -12,12 +12,14 @@ public final class SQLiteDB {
     public enum SQLiteError: LocalizedError {
         case open(String)
         case prepare(String, String)
+        case bind(String)
         case step(String)
 
         public var errorDescription: String? {
             switch self {
             case .open(let m): return "SQLite open failed: \(m)"
             case .prepare(let sql, let m): return "SQLite prepare failed (\(m)): \(sql)"
+            case .bind(let m): return "SQLite binding failed: \(m)"
             case .step(let m): return "SQLite step failed: \(m)"
             }
         }
@@ -127,7 +129,9 @@ public final class SQLiteDB {
 
     public final class Statement {
         private let stmt: OpaquePointer
-        private unowned let db: SQLiteDB
+        // A public prepared statement may outlive the caller's connection
+        // variable. Keep the database alive through finalization and errors.
+        private let db: SQLiteDB
 
         init(stmt: OpaquePointer, db: SQLiteDB) {
             self.stmt = stmt
@@ -140,15 +144,28 @@ public final class SQLiteDB {
 
         public func bind(_ bindings: [Binding]) throws {
             for (i, binding) in bindings.enumerated() {
-                let index = Int32(i + 1)
+                guard let index = Int32(exactly: i + 1) else {
+                    throw SQLiteError.bind("too many parameters")
+                }
+                let status: Int32
                 switch binding {
-                case .int(let v): sqlite3_bind_int64(stmt, index, v)
-                case .text(let v): sqlite3_bind_text(stmt, index, v, -1, sqliteTransient)
-                case .blob(let v):
-                    _ = v.withUnsafeBytes {
-                        sqlite3_bind_blob(stmt, index, $0.baseAddress, Int32(v.count), sqliteTransient)
+                case .int(let v): status = sqlite3_bind_int64(stmt, index, v)
+                case .text(let v):
+                    status = v.withCString {
+                        sqlite3_bind_text64(stmt, index, $0, UInt64(v.utf8.count), sqliteTransient, UInt8(SQLITE_UTF8))
                     }
-                case .null: sqlite3_bind_null(stmt, index)
+                case .blob(let v):
+                    if v.isEmpty {
+                        status = sqlite3_bind_zeroblob(stmt, index, 0)
+                    } else {
+                        status = v.withUnsafeBytes {
+                            sqlite3_bind_blob64(stmt, index, $0.baseAddress, UInt64(v.count), sqliteTransient)
+                        }
+                    }
+                case .null: status = sqlite3_bind_null(stmt, index)
+                }
+                guard status == SQLITE_OK else {
+                    throw SQLiteError.bind(db.lastError)
                 }
             }
         }
@@ -172,7 +189,8 @@ public final class SQLiteDB {
 
         public func text(_ column: Int) -> String {
             guard let cString = sqlite3_column_text(stmt, Int32(column)) else { return "" }
-            return String(cString: cString)
+            let bytes = UnsafeBufferPointer(start: cString, count: Int(sqlite3_column_bytes(stmt, Int32(column))))
+            return String(decoding: bytes, as: UTF8.self)
         }
 
         public func optionalText(_ column: Int) -> String? {

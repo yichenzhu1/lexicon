@@ -162,6 +162,28 @@ t.run("lzo truncated stream throws") {
     }
 }
 
+t.run("lzo truncated extended lengths stay inside the input buffer") {
+    // Literal, M3, and M4 instructions all share the zero-extension decoder.
+    // Cover runs of zero bytes and an instruction ending exactly at EOF.
+    for bytes: [UInt8] in [
+        [0x00, 0x00, 0x00],
+        [0x20, 0x00, 0x00],
+        [0x10, 0x00, 0x00],
+        [0x12, 0x41, 0x20],
+        [0x12, 0x41, 0x10],
+    ] {
+        do {
+            _ = try LZO1X.decompress(Data(bytes), expectedSize: 1024)
+            t.expect(false, "truncated extended length must be rejected")
+        } catch MdxError.corruptData(let reason) {
+            t.expectEqual(reason, "LZO input underrun", "truncation is detected before reading a length byte")
+        }
+    }
+    let literal = Data(repeating: 0x61, count: 274)
+    let stream = Data([0x00, 0x00, 0x01]) + literal + Data([0x11, 0x00, 0x00])
+    t.expectEqual(try LZO1X.decompress(stream, expectedSize: literal.count), literal)
+}
+
 // MARK: - MDX/MDD parser (fixture-based)
 
 runParserTests(t)

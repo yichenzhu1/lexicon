@@ -6,6 +6,15 @@ import MdxKit
 /// MdxKitTester. Run with `swift run Lexicon --tab-state-test`.
 @MainActor
 enum TabStateTests {
+    /// Combine delivers these AppState publications synchronously on the
+    /// main actor. Keep captured mutable state actor-isolated across awaits,
+    /// instead of sharing a local array with an escaping sink closure.
+    @MainActor
+    private final class SearchSnapshots {
+        var results: [[SearchResult]] = []
+        var sawSelectablePrefix = false
+    }
+
     static func run() async -> Bool {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("LexiconTabStateTests-\(UUID().uuidString)", isDirectory: true)
@@ -89,6 +98,20 @@ enum TabStateTests {
         expect(!model.history.contains("result"), "an unavailable result recorded global history")
         state.setTabScrollOffset(.nan, for: destinationTabID)
         expect(state.activeTab?.scrollOffset == 0, "invalid bridge scroll poisoned navigation state")
+
+        let activeBridge = EntryWebView.Coordinator(
+            tabID: destinationTabID, appState: state, libraryModel: model
+        )
+        activeBridge.routeDictionaryLink("entry://C%23#meaning%23one", dictionaryUUID: "ABC")
+        expect(state.selectedWord == "c#", "an encoded # in an entry headword became a fragment")
+        expect(state.activeTab?.location?.anchor == "meaning#one", "the entry fragment was not decoded separately")
+        expect(state.activeTab?.location?.preferredDictionaryUUID == "abc", "entry link lost its dictionary")
+        activeBridge.routeDictionaryLink("bword://what%3F#usage", dictionaryUUID: "ABC")
+        expect(state.selectedWord == "what?", "an encoded ? in a headword became a query")
+        expect(state.activeTab?.location?.anchor == "usage", "bword link lost its fragment")
+        activeBridge.routeDictionaryLink("entry://word?source=test#part?one", dictionaryUUID: "ABC")
+        expect(state.selectedWord == "word", "entry URL query became part of the headword")
+        expect(state.activeTab?.location?.anchor == "part?one", "query stripping removed part of the fragment")
 
         state.closeTab(evictedTabID)
         expect(!state.tabs.contains(where: { $0.id == evictedTabID }), "closed tab remained in state")
@@ -181,22 +204,21 @@ enum TabStateTests {
 
             // Capture each publication synchronously, including a transient
             // obsolete prefix that polling only at completion could miss.
-            var cancellationSnapshots: [[SearchResult]] = []
-            var sawSelectablePrefix = false
+            let cancellationSnapshots = SearchSnapshots()
             let cancellationObservation = state.objectWillChange.sink {
-                cancellationSnapshots.append(state.selectableResults)
+                cancellationSnapshots.results.append(state.selectableResults)
                 if state.isSearchPending && !state.selectableResults.isEmpty {
-                    sawSelectablePrefix = true
+                    cancellationSnapshots.sawSelectablePrefix = true
                 }
             }
             state.searchText = "colour"
             await finishSearch()
-            cancellationSnapshots.append(state.selectableResults)
+            cancellationSnapshots.results.append(state.selectableResults)
             cancellationObservation.cancel()
             expect(state.results.first?.normalizedKey == "colour", "cancelled query replaced the newest results")
-            expect(sawSelectablePrefix, "nonempty prefix was not selectable before the broader search completed")
+            expect(cancellationSnapshots.sawSelectablePrefix, "nonempty prefix was not selectable before the broader search completed")
             expect(
-                cancellationSnapshots.allSatisfy { $0.isEmpty || $0.first?.normalizedKey == "colour" },
+                cancellationSnapshots.results.allSatisfy { $0.isEmpty || $0.first?.normalizedKey == "colour" },
                 "cancelled query published an obsolete selectable result"
             )
             if let staleWord { state.selectSearchResult(staleWord) }
@@ -211,20 +233,20 @@ enum TabStateTests {
                 expect(prefix.isEmpty, "\(query): fixture unexpectedly has prefix matches")
                 let previousResults = state.results
                 expect(!previousResults.isEmpty, "\(query): no previous snapshot to retain")
-                var snapshots: [[SearchResult]] = []
+                let snapshots = SearchSnapshots()
                 // objectWillChange fires before each assignment. Reading the
                 // current value here plus the final value observes every
                 // published state even when two phases finish in one run loop.
                 let observation = state.objectWillChange.sink {
-                    snapshots.append(state.results)
+                    snapshots.results.append(state.results)
                 }
                 state.searchText = query
                 expect(state.results == previousResults, "\(query): debounce cleared the previous snapshot")
                 expect(state.selectableResults.isEmpty, "\(query): debounce left the previous snapshot selectable")
                 await finishSearch()
-                snapshots.append(state.results)
+                snapshots.results.append(state.results)
                 observation.cancel()
-                expect(snapshots.allSatisfy { !$0.isEmpty }, "\(query): empty prefix briefly cleared the visible results")
+                expect(snapshots.results.allSatisfy { !$0.isEmpty }, "\(query): empty prefix briefly cleared the visible results")
                 expect(
                     state.results.contains { $0.normalizedKey == "banana" && $0.matchKind == kind },
                     "\(query): final \(kind) result did not replace the previous snapshot"

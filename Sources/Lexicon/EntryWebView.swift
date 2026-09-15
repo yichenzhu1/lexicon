@@ -194,6 +194,19 @@ struct EntryWebView: NSViewRepresentable {
             navigationState = .ready
         }
 
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            guard let tab = appState.tabs.first(where: { $0.id == tabID }) else { return }
+            // A terminated content process loses the document even though
+            // SwiftUI still has the same page identity. Rebuild explicitly,
+            // using current tab state if navigation was already in progress.
+            load(
+                word: tab.word, anchor: tab.location?.anchor,
+                preferredDictionaryUUID: tab.location?.preferredDictionaryUUID,
+                initialScrollOffset: tab.scrollOffset,
+                version: libraryModel.contentVersion, into: webView, force: true
+            )
+        }
+
         func userContentController(
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
@@ -417,17 +430,20 @@ struct EntryWebView: NSViewRepresentable {
             }
         }
 
-        private func routeDictionaryLink(
+        func routeDictionaryLink(
             _ rawLink: String, dictionaryUUID: String?, webView: WKWebView? = nil
         ) {
             let trimmed = rawLink.trimmingCharacters(in: .whitespacesAndNewlines)
             let scheme = trimmed.split(separator: ":", maxSplits: 1).first?.lowercased() ?? ""
             switch scheme {
             case "entry", "bword":
-                let target = referencedName(in: trimmed)
+                // Split the encoded URL first: an escaped # belongs to the
+                // headword (for example C%23), not to its fragment.
+                let target = rawReference(in: trimmed)
                 let pieces = target.split(separator: "#", maxSplits: 1, omittingEmptySubsequences: false)
-                let word = pieces.first.map(String.init) ?? ""
-                let anchor = pieces.count > 1 ? String(pieces[1]) : nil
+                let word = decodedReference(pieces.first.map(String.init) ?? "")
+                let anchor = pieces.count > 1
+                    ? String(pieces[1]).removingPercentEncoding ?? String(pieces[1]) : nil
                 if word.isEmpty, let anchor, let dictionaryUUID {
                     scrollToAnchor(anchor, dictionaryUUID: dictionaryUUID, webView: webView)
                 } else if !word.isEmpty {
@@ -435,7 +451,7 @@ struct EntryWebView: NSViewRepresentable {
                 }
             case "sound":
                 guard let dictionaryUUID else { return }
-                let path = referencedName(in: trimmed)
+                let path = decodedReference(rawReference(in: trimmed))
                 if !path.isEmpty { libraryModel.playAudio(path: path, dictionaryUUID: dictionaryUUID) }
             case "http", "https", "mailto":
                 if let url = URL(string: trimmed) { NSWorkspace.shared.open(url) }
@@ -472,12 +488,19 @@ struct EntryWebView: NSViewRepresentable {
             ) { _ in }
         }
 
-        private func referencedName(in rawLink: String) -> String {
+        private func rawReference(in rawLink: String) -> String {
             var name = rawLink
             if let colon = name.firstIndex(of: ":") { name = String(name[name.index(after: colon)...]) }
             while name.hasPrefix("/") { name.removeFirst() }
-            if let query = name.firstIndex(of: "?") { name = String(name[..<query]) }
-            return (name.removingPercentEncoding ?? name)
+            let fragment = name.firstIndex(of: "#") ?? name.endIndex
+            if let query = name[..<fragment].firstIndex(of: "?") {
+                name.removeSubrange(query..<fragment)
+            }
+            return name
+        }
+
+        private func decodedReference(_ reference: String) -> String {
+            (reference.removingPercentEncoding ?? reference)
                 .trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
         }
 

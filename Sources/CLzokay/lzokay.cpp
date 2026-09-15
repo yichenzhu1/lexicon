@@ -38,13 +38,13 @@ static uint16_t get_le16(const uint8_t* p) {
 constexpr std::size_t Max255Count = std::size_t(~0) / 255 - 2;
 
 #define NEEDS_IN(count) \
-  if (inp + (count) > inp_end) { \
+  if (std::size_t(count) > std::size_t(inp_end - inp)) { \
     dst_size = outp - dst; \
     return EResult::InputOverrun; \
   }
 
 #define NEEDS_OUT(count) \
-  if (outp + (count) > outp_end) { \
+  if (std::size_t(count) > std::size_t(outp_end - outp)) { \
     dst_size = outp - dst; \
     return EResult::OutputOverrun; \
   }
@@ -53,7 +53,8 @@ constexpr std::size_t Max255Count = std::size_t(~0) / 255 - 2;
   std::size_t offset; \
   { \
     const uint8_t *old_inp = inp; \
-    while (*inp == 0) ++inp; \
+    while (inp < inp_end && *inp == 0) ++inp; \
+    NEEDS_IN(1) \
     offset = inp - old_inp; \
     if (offset > Max255Count) { \
       dst_size = outp - dst; \

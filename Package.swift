@@ -1,11 +1,11 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.4
 import PackageDescription
 
 let package = Package(
     name: "Lexicon",
     // Lexicon intentionally follows the current macOS SDK instead of carrying
     // compatibility code for older releases.
-    platforms: [.macOS("26.0")],
+    platforms: [.macOS("27.0")],
     products: [
         .library(name: "MdxKit", targets: ["MdxKit"]),
         .executable(name: "Lexicon", targets: ["Lexicon"]),

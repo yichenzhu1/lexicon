@@ -4,7 +4,8 @@
 
 Lexicon uses the [lzokay](https://github.com/AxioDL/lzokay) LZO
 compression/decompression implementation at commit
-`db2df1fcbebc2ed06c10f727f72567d40f06a2be`.
+`db2df1fcbebc2ed06c10f727f72567d40f06a2be`, with local bounds-checking fixes
+for truncated extended-length sequences in the decompressor.
 
 ### MIT License
 

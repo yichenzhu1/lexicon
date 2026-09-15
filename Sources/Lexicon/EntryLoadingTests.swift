@@ -61,7 +61,19 @@ enum EntryLoadingTests {
         load("omega")
         try await awaitDocument(count: 2)
         try expect(view.documents[1].contains(">omega<"), "navigation after cancellation failed")
+
+        state.navigate(to: "omega")
+        coordinator.webViewWebContentProcessDidTerminate(view)
+        try await awaitDocument(count: 3)
+        try expect(view.documents[2].contains(">omega<"), "terminated WebKit process did not rebuild its document")
+
+        // Recovery must follow the tab's latest destination, including when
+        // SwiftUI has not delivered that navigation to the view yet.
+        state.navigate(to: "latest")
+        coordinator.webViewWebContentProcessDidTerminate(view)
+        try await awaitDocument(count: 4)
+        try expect(view.documents[3].contains(">latest<"), "process recovery restored an obsolete destination")
         coordinator.cancelLoading()
-        return 4
+        return 6
     }
 }

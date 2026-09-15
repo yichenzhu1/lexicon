@@ -45,6 +45,9 @@ enum TranslationServiceTests {
                 (prompt, source),
                 ("First.\nSecond.\n将上面的英文翻译为简体中文。\n请保留标记。", "First.\nSecond."),
                 ("请将以下英文翻译成中文。\r\nFirst.\r\nSecond.", "First.\nSecond."),
+                ("Translate the letter into French.\n将上面的英文翻译为简体中文。", "Translate the letter into French."),
+                ("First sentence.\nTranslate the letter into French.\n翻译成中文。",
+                 "First sentence.\nTranslate the letter into French."),
                 ("Translate the following into Chinese.\nFirst.\nSecond.", "First.\nSecond."),
                 ("Translate the following into Chinese.", ""),
                 ("请将以下英文翻译成中文。", ""),
@@ -110,16 +113,34 @@ enum TranslationServiceTests {
                     try expect(request.url?.host == "api-free.deepl.com", "wrong DeepL host")
                     try expect(request.value(forHTTPHeaderField: "Authorization") == "DeepL-Auth-Key test-key:fx", "wrong DeepL authorization")
                     let body = try jsonBody(request)
-                    try expect(body["text"] as? [String] == [text], "DeepL source changed")
+                    let protectedText = markup ? #"<m>A <n translate="no">note</n></m>"# : text
+                    try expect(body["text"] as? [String] == [protectedText], "DeepL source annotations were not protected")
                     try expect(body["source_lang"] as? String == "EN", "wrong DeepL source")
                     try expect(body["target_lang"] as? String == "ZH-HANS", "wrong DeepL target")
                     try expect(body["context"] as? String == (markup ? input : nil), "wrong DeepL context")
                     try expect(body["tag_handling"] as? String == (markup ? "html" : nil), "wrong tag handling")
                     try expect(body["tag_handling_version"] as? String == (markup ? "v2" : nil), "wrong tag version")
-                    try expect(body["ignore_tags"] as? [String] == (markup ? ["n", "o"] : nil), "wrong ignored tags")
+                    try expect(body["ignore_tags"] == nil, "XML-only ignore_tags was sent with HTML handling")
                 }
                 try expect(result == "<m>译文</m>", "DeepL lost translated markup")
             }
+        }
+
+        await suite.run("DeepL protects annotation text and restores dictionary markers") {
+            let input = "<m>A & B <N>keep this</N> <o>and this</o></m>"
+            let output = #" <m>甲乙 <N translate="no">keep this</N> <o translate='no'>and this</o></m> "#
+            let fixture = String(decoding: try JSONSerialization.data(withJSONObject: [
+                "translations": [["text": output]],
+            ]), as: UTF8.self)
+            let result = try await call(.deepL, prompt: input, fixture: .json(fixture)) { request in
+                let body = try jsonBody(request)
+                try expect(body["text"] as? [String] == [
+                    #"<m>A & B <N translate="no">keep this</N> <o translate="no">and this</o></m>"#,
+                ], "annotation protection changed source text or missed a marker")
+                try expect(body["tag_handling"] as? String == "html", "HTML fragments lost HTML handling")
+            }
+            try expect(result == " <m>甲乙 <N>keep this</N> <o>and this</o></m> ",
+                       "DeepL attributes escaped into dictionary markers or surrounding whitespace changed")
         }
 
         await suite.run("OpenAI Responses request and content selection") {

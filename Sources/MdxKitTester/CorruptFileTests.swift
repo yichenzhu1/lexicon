@@ -39,6 +39,57 @@ func runCorruptFileTests(_ t: TestHarness) {
         [UInt8](try Data(contentsOf: fixturesURL.appendingPathComponent(name)))
     }
 
+    // Build a checksummed, uncompressed v2 dictionary so malformed key data
+    // reaches the key decoder instead of failing an unrelated checksum first.
+    func dictionaryWithKeyBlock(_ keys: Data, declaredCount: UInt64) -> Data {
+        func be<T: FixedWidthInteger>(_ value: T) -> Data {
+            withUnsafeBytes(of: value.bigEndian) { Data($0) }
+        }
+        func framed(_ plain: Data) -> Data {
+            Data(repeating: 0, count: 4) + be(Adler32.checksum(plain)) + plain
+        }
+        let header = #"<Dictionary GeneratedByEngineVersion="2.0" Encoding="UTF-8"/>"#
+            .data(using: .utf16LittleEndian)!
+        let headerChecksum = withUnsafeBytes(of: Adler32.checksum(header).littleEndian) { Data($0) }
+        let keyBlock = framed(keys)
+        // Empty first/last boundary strings are valid: length + NUL.
+        let index = be(declaredCount) + Data(repeating: 0, count: 6)
+            + be(UInt64(keyBlock.count)) + be(UInt64(keys.count))
+        let keyIndex = framed(index)
+        let keyHeader = be(UInt64(1)) + be(declaredCount) + be(UInt64(index.count))
+            + be(UInt64(keyIndex.count)) + be(UInt64(keyBlock.count))
+        let records = framed(Data("entry\0".utf8))
+        let recordHeader = be(UInt64(1)) + be(declaredCount) + be(UInt64(16))
+            + be(UInt64(records.count))
+        let recordIndex = be(UInt64(records.count)) + be(UInt64(6))
+        return be(UInt32(header.count)) + header + headerChecksum
+            + keyHeader + be(Adler32.checksum(keyHeader)) + keyIndex + keyBlock
+            + recordHeader + recordIndex + records
+    }
+
+    t.run("corrupt: key blocks reject missing entries and trailing partial keys") {
+        let oneKey = Data(repeating: 0, count: 8) + Data("key\0".utf8)
+        for (keys, declared) in [
+            (oneKey, UInt64(2)),
+            (oneKey + Data(repeating: 0, count: 8), UInt64(2)),
+            (oneKey + Data([0]), UInt64(2)),
+            (oneKey + oneKey, UInt64(1)),
+        ] {
+            let url = scratch.appendingPathComponent("key-count.mdx")
+            try dictionaryWithKeyBlock(keys, declaredCount: declared).write(to: url)
+            let file = try MdictFile(url: url)
+            t.expectThrows("allKeys rejects incomplete or miscounted key data") {
+                _ = try file.allKeys()
+            }
+            t.expectThrows("import indexing rejects incomplete or miscounted key data") {
+                _ = try file.indexedEntries()
+            }
+        }
+        let validURL = scratch.appendingPathComponent("valid-key.mdx")
+        try dictionaryWithKeyBlock(oneKey, declaredCount: 1).write(to: validURL)
+        t.expectEqual(try MdictFile(url: validURL).lookup("key"), "entry")
+    }
+
     t.run("corrupt: oversized header fields do not trap") {
         // Setting an 8-byte window to 0xFF makes whatever UInt64 field lives
         // there equal UInt64.max. Before hardening this trapped with

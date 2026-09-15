@@ -4,6 +4,27 @@ All notable changes to Lexicon are documented here.
 
 ## Unreleased
 
+- Raised the deployment target and app bundle minimum to macOS 27, with
+  Swift 6.4 and the macOS 27 SDK. Packaging uses the selected SDK, rejects
+  older SDKs, and resolves SwiftPM's binary output directory dynamically.
+- Fixed the release-only Swift concurrency error in the search regression
+  recorder that failed GitHub CI. CI now uses the macOS 27 / Xcode 27 runner,
+  checks debug and release builds explicitly, and runs translation regressions.
+- Fixed an out-of-bounds read in LZO decompression on truncated extended
+  lengths. Malformed MDX key blocks now reject partial keys and entry-count
+  mismatches, and large numeric MDD filenames no longer overflow during sorting.
+- Nested dictionary CSS now imports parent-relative fonts and images while
+  keeping resource paths inside the dictionary package.
+- SQLite bindings preserve embedded NUL characters and empty blobs, report
+  binding failures, and keep connections alive for prepared statements.
+- Entry links now distinguish encoded `#` and `?` characters in headwords from
+  URL fragments and queries. Tabs rebuild their current page if WebKit's
+  content process terminates.
+- Dictionary resource responses enforce the content network policy, closing
+  an offline-mode bypass through imported HTML child documents.
+- Translation source extraction preserves sentences beginning with
+  “Translate…” before Chinese instructions. DeepL uses HTML annotation
+  protection for the dictionary's `n` and `o` markers.
 - Fixed delayed tab-focus requests overriding outside clicks. Initial search
   focus now uses a SwiftUI lifecycle task, and native clicks handle focus
   transfer without a window-wide mouse monitor. Added real-scene regressions
@@ -25,9 +46,6 @@ All notable changes to Lexicon are documented here.
   dictionary translations run independently and report errors in their passage.
   Cloud providers share one request pipeline, and fetch/WebSocket adapters share
   one cleanup path for completion, cancellation, timeout, and page navigation.
-- App packaging now prefers the installed macOS 26 SDK and honors `SDKROOT`,
-  fixing builds when Command Line Tools default to a preview SDK without its
-  required SwiftUI macro plugins.
 - Apple Translation uses a separate installed-language session per request,
   with missing or unsupported languages reported by the translation operation.
   Settings shows availability and download instructions inline, refreshes when

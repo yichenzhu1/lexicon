@@ -29,24 +29,20 @@ if [[ ! "$BUILD_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
-# Prefer the macOS 26 SDK used by this app when the selected developer tools
-# include it. Some Command Line Tools installations make a preview SDK the
-# default before shipping the SwiftUI macro plugins that SDK requires.
-# An explicit SDKROOT always wins; do not retry failed builds with another SDK.
-if [[ -n "${SDKROOT:-}" ]]; then
-    LEXICON_BUILD_SDK="$(xcrun --sdk "$SDKROOT" --show-sdk-path)"
-else
-    LEXICON_BUILD_SDK="$(xcrun --sdk macosx --show-sdk-path)"
-    LEXICON_SDK_DIRECTORY="$(dirname "$LEXICON_BUILD_SDK")"
-    if [[ -f "$LEXICON_SDK_DIRECTORY/MacOSX26.sdk/SDKSettings.plist" ]]; then
-        LEXICON_BUILD_SDK="$LEXICON_SDK_DIRECTORY/MacOSX26.sdk"
-    fi
+# Use the selected developer tools' SDK, honoring an explicit SDKROOT.
+# Never silently fall back to an older SDK when a toolchain is incomplete.
+LEXICON_BUILD_SDK="$(xcrun --sdk "${SDKROOT:-macosx}" --show-sdk-path)"
+LEXICON_SDK_VERSION="$(xcrun --sdk "$LEXICON_BUILD_SDK" --show-sdk-version)"
+if [[ ! "$LEXICON_SDK_VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]] \
+    || (( ${LEXICON_SDK_VERSION%%.*} < 27 )); then
+    echo "error: Lexicon requires the macOS 27 SDK or later (selected: $LEXICON_SDK_VERSION)" >&2
+    exit 2
 fi
 
 echo "Using macOS SDK: $LEXICON_BUILD_SDK"
 xcrun swift build -c release --product Lexicon --sdk "$LEXICON_BUILD_SDK"
 
-BINARY=".build/release/Lexicon"
+BINARY="$(xcrun swift build -c release --product Lexicon --sdk "$LEXICON_BUILD_SDK" --show-bin-path)/Lexicon"
 APP="build/Lexicon.app"
 ICON="Assets/Lexicon.icns"
 
@@ -77,7 +73,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key>           <string>$BUILD_NUMBER</string>
     <key>LSApplicationCategoryType</key> <string>public.app-category.reference</string>
-    <key>LSMinimumSystemVersion</key>    <string>26.0</string>
+    <key>LSMinimumSystemVersion</key>    <string>27.0</string>
     <key>NSHighResolutionCapable</key>   <true/>
     <key>NSHumanReadableCopyright</key>  <string>Copyright © 2026 Yichen Zhu</string>
     <key>NSPrincipalClass</key>          <string>NSApplication</string>

@@ -398,12 +398,16 @@ public enum EntryPageBuilder {
     /// Resource references in a CSS file or inline declaration. This is kept
     /// separate from HTML scanning so JavaScript calls and prose containing
     /// `url(...)` cannot be mistaken for assets.
-    public static func localCSSResourceReferences(in css: String) -> Set<String> {
+    public static func localCSSResourceReferences(
+        in css: String, relativeTo directory: String = ""
+    ) -> Set<String> {
         var result = Set<String>()
         let ns = css as NSString
         for regex in Pattern.cssResources {
             for match in regex.matches(in: css, range: NSRange(location: 0, length: ns.length)) {
-                if let path = normalizedLocalReference(ns.substring(with: match.range(at: 1))) {
+                if let path = normalizedLocalReference(
+                    ns.substring(with: match.range(at: 1)), relativeTo: directory
+                ) {
                     result.insert(path)
                 }
             }
@@ -434,7 +438,9 @@ public enum EntryPageBuilder {
         }
     }
 
-    private static func normalizedLocalReference(_ raw: String) -> String? {
+    private static func normalizedLocalReference(
+        _ raw: String, relativeTo directory: String = ""
+    ) -> String? {
         var value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = value.lowercased()
         if value.hasPrefix("#") || value.hasPrefix("//") || value.hasPrefix("&")
@@ -446,12 +452,24 @@ public enum EntryPageBuilder {
         }
         value = (value.removingPercentEncoding ?? value)
             .replacingOccurrences(of: "\\", with: "/")
-        while value.hasPrefix("/") { value.removeFirst() }
         let components = value.split(separator: "/")
-        guard !value.isEmpty, !components.contains(".."),
+        guard !value.isEmpty,
               !(components.first?.contains(":") ?? false)
         else { return nil }
-        return value
+        // Resolve parent segments against the stylesheet's directory before
+        // enforcing the package boundary. css/theme.css can legitimately use
+        // ../fonts/body.woff2, while ../../outside still escapes the package.
+        var resolved = value.hasPrefix("/") ? [] : directory.split(separator: "/").map(String.init)
+        for component in components {
+            if component == "." { continue }
+            if component == ".." {
+                guard !resolved.isEmpty else { return nil }
+                resolved.removeLast()
+            } else {
+                resolved.append(String(component))
+            }
+        }
+        return resolved.isEmpty ? nil : resolved.joined(separator: "/")
     }
 
     private static func rewriteAttributes(_ html: String) -> String {
@@ -488,7 +506,9 @@ public enum EntryPageBuilder {
         return value
     }
 
-    private static func contentSecurityPolicy(allowHTTPS: Bool, outerPage: Bool) -> String {
+    /// Shared by generated page metadata and resource response headers, so
+    /// imported HTML and SVG documents receive the same network restrictions.
+    public static func contentSecurityPolicy(allowHTTPS: Bool, outerPage: Bool) -> String {
         let network = allowHTTPS ? " https:" : ""
         let connections = allowHTTPS ? " https: wss:" : ""
         let frame = outerPage ? "frame-src dict:\(network); " : "frame-src 'self'\(network); "

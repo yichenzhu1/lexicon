@@ -283,7 +283,6 @@ enum DictionaryTranslationService {
         let context: String?
         let tagHandling: String?
         let tagHandlingVersion: String?
-        let ignoreTags: [String]?
 
         enum CodingKeys: String, CodingKey {
             case text, context
@@ -291,7 +290,6 @@ enum DictionaryTranslationService {
             case targetLang = "target_lang"
             case tagHandling = "tag_handling"
             case tagHandlingVersion = "tag_handling_version"
-            case ignoreTags = "ignore_tags"
         }
     }
 
@@ -346,15 +344,15 @@ enum DictionaryTranslationService {
         guard !lines.isEmpty else { return "" }
 
         // Find the dictionary's instruction boundary instead of assuming the
-        // source itself has no line breaks. Chinese repacks consistently use
-        // “翻译”; the English-prefix check covers Lexicon's own test prompt.
+        // source itself has no line breaks. Prefer the Chinese instruction
+        // used by dictionary repacks: an English source sentence can itself
+        // start with “Translate”. The English fallback covers our test prompt.
         let instructionIndex = lines.firstIndex { line in
             let hasCJK = line.unicodeScalars.contains {
                 (0x3400 ... 0x9FFF).contains($0.value)
             }
-            return (hasCJK && line.contains("翻译"))
-                || line.lowercased().hasPrefix("translate ")
-        }
+            return hasCJK && line.contains("翻译")
+        } ?? lines.firstIndex { $0.lowercased().hasPrefix("translate ") }
         if let instructionIndex {
             let sourceLines: ArraySlice<String>
             if instructionIndex == lines.startIndex {
@@ -423,11 +421,17 @@ enum DictionaryTranslationService {
             let markup = source.range(
                 of: #"<\/?(?:m|n|o)>"#, options: [.regularExpression, .caseInsensitive]
             ) != nil
+            // DeepL's ignore_tags option applies only to XML. Dictionary
+            // passages are HTML fragments, so protect annotations using its
+            // supported HTML attribute and restore the bare markers on return.
+            let protectedSource = source.replacingOccurrences(
+                of: #"<([no])>"#, with: #"<$1 translate="no">"#,
+                options: [.regularExpression, .caseInsensitive]
+            )
             body = try encoder.encode(DeepLRequest(
-                text: [source], context: prompt == source ? nil : prompt,
+                text: [protectedSource], context: prompt == source ? nil : prompt,
                 tagHandling: markup ? "html" : nil,
-                tagHandlingVersion: markup ? "v2" : nil,
-                ignoreTags: markup ? ["n", "o"] : nil
+                tagHandlingVersion: markup ? "v2" : nil
             ))
         case .openAI:
             endpoint = URL(string: "https://api.openai.com/v1/responses")!
@@ -486,7 +490,11 @@ enum DictionaryTranslationService {
             return try decoder.decode(GoogleResponse.self, from: data)
                 .data.translations.first?.translatedText ?? ""
         case .deepL:
-            return try decoder.decode(DeepLResponse.self, from: data).translations.first?.text ?? ""
+            let text = try decoder.decode(DeepLResponse.self, from: data).translations.first?.text ?? ""
+            return text.replacingOccurrences(
+                of: #"<([no])\s+translate\s*=\s*(?:"no"|'no'|no)\s*>"#, with: "<$1>",
+                options: [.regularExpression, .caseInsensitive]
+            )
         case .openAI:
             let result = try decoder.decode(OpenAIResponse.self, from: data)
             if let status = result.status, status != "completed" {

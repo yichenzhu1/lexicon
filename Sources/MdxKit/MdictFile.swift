@@ -36,6 +36,7 @@ public final class MdictFile {
 
     // Keyword section geometry.
     private struct KeyBlockInfo {
+        let entryCount: UInt64
         let compressedSize: UInt64
         let decompressedSize: UInt64
         let fileOffset: UInt64 // absolute offset of the block in the file
@@ -180,6 +181,7 @@ public final class MdictFile {
                 throw MdxError.corruptData("key block decompressed size out of range (\(decompSize))")
             }
             infos.append(KeyBlockInfo(
+                entryCount: blockEntryCount,
                 compressedSize: compSize,
                 decompressedSize: decompSize,
                 fileOffset: runningOffset
@@ -292,10 +294,18 @@ public final class MdictFile {
                 decompressedSize: Int(block.decompressedSize)
             )
             var r = DataReader(plain)
-            while r.remaining > numberWidth {
+            var entryCount: UInt64 = 0
+            while r.remaining > 0 {
+                guard entryCount < block.entryCount else {
+                    throw MdxError.corruptData("key block contains more entries than declared")
+                }
                 let offset = try r.readNumber(width: numberWidth)
                 let keyData = try r.readNullTerminated(unitWidth: encoding.unitWidth)
                 try body(keyData, offset)
+                entryCount += 1
+            }
+            guard entryCount == block.entryCount else {
+                throw MdxError.corruptData("key block entry count mismatch")
             }
         }
     }

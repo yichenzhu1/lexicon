@@ -824,9 +824,7 @@ public final class DictionaryLibrary: @unchecked Sendable {
             else { continue }
             let css = Self.decodeTextResource(data, dictionaryEncoding: dictionaryEncoding)
             let base = (relative as NSString).deletingLastPathComponent
-            for nested in EntryPageBuilder.localCSSResourceReferences(in: css) {
-                let combined = (base as NSString).appendingPathComponent(nested)
-                let path = (combined as NSString).standardizingPath
+            for path in EntryPageBuilder.localCSSResourceReferences(in: css, relativeTo: base) {
                 queue.append((
                     path: path,
                     reportMissing: (path as NSString).pathExtension.lowercased() == "css"
@@ -1459,20 +1457,20 @@ public final class DictionaryLibrary: @unchecked Sendable {
         return files
             .filter { $0.pathExtension.lowercased() == "mdd" }
             .sorted {
-                let lhs = Self.mddPartNumber($0.lastPathComponent)
-                let rhs = Self.mddPartNumber($1.lastPathComponent)
-                return lhs.0 == rhs.0 ? lhs.1 < rhs.1 : lhs.0 < rhs.0
+                Self.mddPartNumber($0.lastPathComponent) < Self.mddPartNumber($1.lastPathComponent)
             }
     }
 
     /// MDict volumes are base.mdd, base.1.mdd, base.2.mdd, ... . A lexical
     /// sort puts base.10 before base.2 and can also put numbered parts before
     /// the base volume.
-    private static func mddPartNumber(_ name: String) -> (Int, String) {
+    private static func mddPartNumber(_ name: String) -> (Int, UInt64, String) {
         let stem = (name as NSString).deletingPathExtension
         let suffix = (stem as NSString).pathExtension
-        if let number = Int(suffix) { return (number + 1, name.lowercased()) }
-        return (0, name.lowercased())
+        // Keep the base-volume rank separate instead of adding one to an
+        // untrusted numeric filename, which can overflow for Int.max.
+        if let number = UInt64(suffix) { return (1, number, name.lowercased()) }
+        return (0, 0, name.lowercased())
     }
 
     private func countLooseResources(in folder: URL, mdxFileName: String) -> Int {

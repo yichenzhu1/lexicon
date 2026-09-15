@@ -10,37 +10,48 @@ permissions:
 
 jobs:
   test:
-    # Lexicon targets macOS 26 and uses its SDK (Liquid Glass), so CI needs a
-    # macOS 26 runner with an Xcode 26 toolchain.
-    runs-on: macos-26
+    # GitHub's macOS 27 / Xcode 27 arm64 image currently uses this label.
+    # https://github.blog/changelog/2026-09-10-xcode-27-runner-image-now-runs-on-macos-27/
+    runs-on: xcode-27
     timeout-minutes: 20
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      - name: Select the supported Xcode toolchain
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: "26"
+      - name: Verify the runner toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+          test "$(sw_vers -productVersion | cut -d. -f1)" -ge 27
+          test "$(xcrun --sdk macosx --show-sdk-version | cut -d. -f1)" -ge 27
 
       - name: Build with warnings as errors
-        run: swift build -Xswiftc -warnings-as-errors
+        run: |
+          swift build -Xswiftc -warnings-as-errors
+          swift build -c release -Xswiftc -warnings-as-errors
 
       - name: Run regression suite
-        run: swift run -Xswiftc -warnings-as-errors MdxKitTester
+        run: |
+          swift run --skip-build MdxKitTester
+          swift run -c release --skip-build MdxKitTester
+
+      - name: Run translation regression suite
+        run: swift run --skip-build Lexicon --translation-test
 
       - name: Run tab residency regression suite
         run: |
-          swift run -Xswiftc -warnings-as-errors Lexicon --tab-state-test
-          swift run -Xswiftc -warnings-as-errors Lexicon --tab-webview-test
+          swift run --skip-build Lexicon --tab-state-test
+          swift run -c release --skip-build Lexicon --tab-state-test
+          swift run --skip-build Lexicon --tab-webview-test
 
       - name: Run WebView rendering regression suite
         run: |
           smoke_root="$(mktemp -d)"
           trap 'rm -rf "$smoke_root"' EXIT
-          swift run MdxKitTester seed "$smoke_root"
-          LEXICON_ROOT="$smoke_root" swift run -c release Lexicon --smoke-test
+          swift run --skip-build MdxKitTester seed "$smoke_root"
+          LEXICON_ROOT="$smoke_root" swift run -c release --skip-build Lexicon --smoke-test
 
       - name: Build and validate app bundle
         run: |
@@ -50,3 +61,4 @@ jobs:
           test -s build/Lexicon.app/Contents/Resources/THIRD_PARTY_NOTICES.md
           test "$(plutil -extract CFBundleShortVersionString raw build/Lexicon.app/Contents/Info.plist)" = "0.3.0"
           test "$(plutil -extract CFBundleVersion raw build/Lexicon.app/Contents/Info.plist)" = "3"
+          test "$(plutil -extract LSMinimumSystemVersion raw build/Lexicon.app/Contents/Info.plist)" = "27.0"

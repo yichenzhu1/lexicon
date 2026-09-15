@@ -50,7 +50,7 @@ final class DictSchemeHandler: NSObject, WKURLSchemeHandler {
         liveTasks[token] = urlSchemeTask
 
         guard let url = urlSchemeTask.request.url else {
-            deliver(token: token, url: nil, result: nil)
+            deliver(token: token, url: nil, result: nil, allowHTTPS: allowHTTPS)
             return
         }
 
@@ -61,7 +61,7 @@ final class DictSchemeHandler: NSObject, WKURLSchemeHandler {
                 Self.respond(to: url, library: $0, allowHTTPS: allowHTTPS)
             }
             Task { @MainActor in
-                self?.deliver(token: token, url: url, result: result)
+                self?.deliver(token: token, url: url, result: result, allowHTTPS: allowHTTPS)
             }
         }
     }
@@ -75,7 +75,8 @@ final class DictSchemeHandler: NSObject, WKURLSchemeHandler {
     private func deliver(
         token: ObjectIdentifier,
         url: URL?,
-        result: DictionaryResource?
+        result: DictionaryResource?,
+        allowHTTPS: Bool
     ) {
         // Absent means WebKit stopped the task — the frame navigated away
         // while we were reading — so completing it now would raise.
@@ -85,10 +86,23 @@ final class DictSchemeHandler: NSObject, WKURLSchemeHandler {
             task.didFailWithError(URLError(.fileDoesNotExist))
             return
         }
-        let response = URLResponse(
-            url: url, mimeType: result.mimeType, expectedContentLength: result.data.count,
-            textEncodingName: result.textEncodingName
-        )
+        let charset = result.textEncodingName.map { "; charset=\($0)" } ?? ""
+        // Local HTML/SVG resources can be documents in their own right. They
+        // do not inherit the generated entry's meta CSP, so enforce the same
+        // network boundary on every custom-scheme response as well.
+        guard let response = HTTPURLResponse(
+            url: url, statusCode: 200, httpVersion: nil,
+            headerFields: [
+                "Content-Type": result.mimeType + charset,
+                "Content-Length": String(result.data.count),
+                "Content-Security-Policy": EntryPageBuilder.contentSecurityPolicy(
+                    allowHTTPS: allowHTTPS, outerPage: false
+                ),
+            ]
+        ) else {
+            task.didFailWithError(URLError(.cannotParseResponse))
+            return
+        }
         task.didReceive(response)
         task.didReceive(result.data)
         task.didFinish()

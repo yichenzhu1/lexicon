@@ -116,6 +116,46 @@ func runLibraryTests(_ t: TestHarness) {
         )
     }
 
+    t.run("library: nested CSS resolves parent and package-root assets safely") {
+        let source = tempRoot.appendingPathComponent("nested-css-source")
+        for path in ["css", "fonts", "images"] {
+            try FileManager.default.createDirectory(
+                at: source.appendingPathComponent(path), withIntermediateDirectories: true
+            )
+        }
+        try FileManager.default.copyItem(
+            at: fixturesURL.appendingPathComponent("astral.mdx"),
+            to: source.appendingPathComponent("astral.mdx")
+        )
+        try Data("@import 'css/theme.css';".utf8)
+            .write(to: source.appendingPathComponent("astral.css"))
+        try Data("""
+            @font-face { src: url('../fonts/body.woff2'); }
+            .icon { background: url('/images/icon.svg'); }
+            @import '../../outside.css';
+            """.utf8).write(to: source.appendingPathComponent("css/theme.css"))
+        let font = Data("font fixture".utf8)
+        let icon = Data("<svg/>".utf8)
+        try font.write(to: source.appendingPathComponent("fonts/body.woff2"))
+        try icon.write(to: source.appendingPathComponent("images/icon.svg"))
+        try Data("outside package".utf8).write(to: tempRoot.appendingPathComponent("outside.css"))
+
+        let cssLibrary = try DictionaryLibrary(rootURL: tempRoot.appendingPathComponent("nested-css"))
+        let record = try cssLibrary.importDictionary(from: source.appendingPathComponent("astral.mdx"))
+        t.expectEqual(
+            try cssLibrary.resource(path: "fonts/body.woff2", dictionaryUUID: record.uuid)?.data,
+            font, "parent-relative font imported from nested CSS"
+        )
+        t.expectEqual(
+            try cssLibrary.resource(path: "images/icon.svg", dictionaryUUID: record.uuid)?.data,
+            icon, "root-relative image imported from nested CSS"
+        )
+        t.expectEqual(record.looseResourceCount, 4, "only the package's two CSS files and assets copied")
+        t.expect(!FileManager.default.fileExists(
+            atPath: cssLibrary.folderURL(for: record).appendingPathComponent("outside.css").path
+        ), "parent traversal outside the source package remains rejected")
+    }
+
     t.run("library: entry-only references import nested loose assets") {
         let source = tempRoot.appendingPathComponent("nested-source")
         try FileManager.default.createDirectory(
@@ -325,6 +365,39 @@ func runLibraryTests(_ t: TestHarness) {
         }
     }
 
+    t.run("SQLite: bindings preserve NUL text and distinguish empty blobs from NULL") {
+        let db = try SQLiteDB(path: tempRoot.appendingPathComponent("bindings.sqlite").path)
+        let text = "before\0after 漢字"
+        let actual = try db.query("SELECT ?", [.text(text)]) { $0.text(0) }.first
+        t.expectEqual(actual, text, "text byte length is preserved across binding and reading")
+        let types = try db.query(
+            "SELECT typeof(?), typeof(?)", [.blob(Data()), .null]
+        ) { ($0.text(0), $0.text(1)) }.first!
+        t.expectEqual(types.0, "blob", "empty blob retains its SQLite type")
+        t.expectEqual(types.1, "null", "explicit NULL retains its SQLite type")
+        let statement = try db.prepare("SELECT ?")
+        t.expectThrows("extra parameters must report SQLITE_RANGE") {
+            try statement.bind([.int(1), .int(2)])
+        }
+    }
+
+    t.run("SQLite: a prepared statement retains its database through errors") {
+        weak var connection: SQLiteDB?
+        let statement: SQLiteDB.Statement
+        do {
+            let db = try SQLiteDB(path: tempRoot.appendingPathComponent("statement-lifetime.sqlite").path)
+            connection = db
+            statement = try db.prepare("SELECT abs(-9223372036854775808)")
+        }
+        guard connection != nil else {
+            t.expect(false, "prepared statement must retain the connection for error reporting")
+            return
+        }
+        t.expectThrows("an integer overflow is reported after the connection variable leaves scope") {
+            try statement.step()
+        }
+    }
+
     t.run("SQLite: cancellation interrupts an active scan and removes its handler") {
         let db = try SQLiteDB(path: tempRoot.appendingPathComponent("scan.sqlite").path)
         let cancellation = SearchCancellationToken()
@@ -518,6 +591,27 @@ func runLibraryTests(_ t: TestHarness) {
             duplicate.map { String(decoding: $0.data, as: UTF8.self) },
             "base volume wins", "base MDD deterministically precedes numbered duplicates"
         )
+    }
+
+    t.run("library: large numeric MDD suffixes retain ordering without overflow") {
+        let source = tempRoot.appendingPathComponent("large-part-source")
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        for (fixture, name) in [
+            ("multipart.mdx", "multipart.mdx"),
+            ("multipart.mdd", "multipart.mdd"),
+            ("multipart.1.mdd", "multipart.\(Int.max).mdd"),
+            ("multipart.1.mdd", "multipart.\(UInt64.max).mdd"),
+        ] {
+            try FileManager.default.copyItem(
+                at: fixturesURL.appendingPathComponent(fixture), to: source.appendingPathComponent(name)
+            )
+        }
+        let partLibrary = try DictionaryLibrary(rootURL: tempRoot.appendingPathComponent("large-parts"))
+        let record = try partLibrary.importDictionary(from: source.appendingPathComponent("multipart.mdx"))
+        let duplicate = try partLibrary.resource(path: "duplicate.txt", dictionaryUUID: record.uuid)
+        t.expectEqual(duplicate.map { String(decoding: $0.data, as: UTF8.self) }, "base volume wins")
+        let numbered = try partLibrary.resource(path: "part-one.txt", dictionaryUUID: record.uuid)
+        t.expectEqual(numbered.map { String(decoding: $0.data, as: UTF8.self) }, "numbered volume")
     }
 
     t.run("library: opening an entry and one resource volume leaves other volumes unopened") {
