@@ -85,7 +85,7 @@ if [[ "$SIGNING_IDENTITY" == "-" ]]; then
     # Exercise the same runtime restrictions as the public build even when a
     # local machine does not have a Developer ID certificate.
     codesign --force --options runtime --sign - "$APP"
-    echo "warning: built with an ad-hoc signature; do not publish this bundle as a public release" >&2
+    echo "Signed for local use (ad-hoc; public releases require a Developer ID signature)."
 else
     codesign \
         --force \

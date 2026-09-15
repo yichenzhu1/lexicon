@@ -2,8 +2,8 @@ import SwiftUI
 
 struct TranslationSettingsView: View {
     @ObservedObject var model: TranslationModel
-    @State private var translationAPIKey = ""
-    @State private var activation = 0
+    @ViewState private var translationAPIKey = ""
+    @ViewState private var activation = 0
 
     private struct LanguageCheck: Equatable {
         let provider: TranslationProvider

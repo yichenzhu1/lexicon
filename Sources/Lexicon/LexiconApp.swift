@@ -46,6 +46,11 @@ struct LexiconApp: App {
         .commands {
             LexiconCommands()
         }
+        // Apply the shared choice at the scene level so Settings, sheets and
+        // existing or newly opened windows all inherit the same appearance.
+        .onChange(of: libraryModel.appAppearance, initial: true) { _, appearance in
+            NSApp.appearance = appearance.nsAppearance
+        }
 
         Settings {
             SettingsView()

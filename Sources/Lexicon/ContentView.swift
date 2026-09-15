@@ -6,28 +6,28 @@ struct ContentView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var libraryModel: LibraryModel
     @FocusState private var searchFocused: Bool
-    @State private var sidebarMode: SidebarMode =
+    @ViewState private var sidebarMode: SidebarMode =
         SidebarMode(rawValue: LibraryModel.storedSidebarMode) ?? .lexicon
     /// The section the user was browsing before a query pulled the sidebar
     /// into results; restored when the search field is cleared.
-    @State private var modeBeforeSearch: SidebarMode?
+    @ViewState private var modeBeforeSearch: SidebarMode?
     /// Direction of the sidebar section slide: sections are ordered
     /// Lexicon → History → Starred, so a higher destination slides left.
-    @State private var sidebarSlideForward = true
+    @ViewState private var sidebarSlideForward = true
     @Namespace private var segmentThumb
     /// Identifies toolbar glass buttons so neighbors inside a
     /// GlassEffectContainer merge into one shape and separate on approach.
     @Namespace private var toolbarGlass
-    @State private var sidebarVisible = LibraryModel.storedSidebarVisible
-    @State private var sidebarWidth: CGFloat = LibraryModel.storedSidebarWidth
-    @State private var sidebarDragStartWidth: CGFloat?
+    @ViewState private var sidebarVisible = LibraryModel.storedSidebarVisible
+    @ViewState private var sidebarWidth: CGFloat = LibraryModel.storedSidebarWidth
+    @ViewState private var sidebarDragStartWidth: CGFloat?
     /// Two clicks on the divider within a beat reset the sidebar width.
-    @State private var lastDividerTap: Date?
-    @State private var windowIsFullScreen = false
-    @State private var isDropTargeted = false
-    @State private var zoomHUDVisible = false
-    @State private var zoomHUDTask: Task<Void, Never>?
-    @State private var starPulse = false
+    @ViewState private var lastDividerTap: Date?
+    @ViewState private var windowIsFullScreen = false
+    @ViewState private var isDropTargeted = false
+    @ViewState private var zoomHUDVisible = false
+    @ViewState private var zoomHUDTask: Task<Void, Never>?
+    @ViewState private var starPulse = false
 
     /// True while the lookup field holds a query, in which case the sidebar
     /// shows results rather than one of the saved lists.
@@ -44,9 +44,9 @@ struct ContentView: View {
                     sidebar
                 }
                 .frame(width: sidebarWidth)
-                // A true sidebar material gives the panel its own depth
-                // against the content area instead of the same flat gray.
-                .background(.regularMaterial)
+                .background {
+                    SidebarBackground(isTranslucent: libraryModel.translucentSidebar)
+                }
                 .transition(.move(edge: .leading).combined(with: .opacity))
             }
 
@@ -1157,9 +1157,9 @@ private struct BrowserTabBar: View {
 
     private let spacing: CGFloat = 2
     @Namespace private var activeTabBackground
-    @State private var hoveredTabIDs: Set<UUID> = []
+    @ViewState private var hoveredTabIDs: Set<UUID> = []
     /// The tab a reorder drag is hovering over; drives the insertion indicator.
-    @State private var dropTargetTabID: UUID?
+    @ViewState private var dropTargetTabID: UUID?
 
     var body: some View {
         GeometryReader { proxy in
@@ -1360,7 +1360,7 @@ private struct BrowserIconButtonBody: View {
     let configuration: ButtonStyle.Configuration
     let cornerRadius: CGFloat
     let hitPadding: CGFloat
-    @State private var isHovered = false
+    @ViewState private var isHovered = false
 
     var body: some View {
         configuration.label

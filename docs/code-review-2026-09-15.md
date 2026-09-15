@@ -77,13 +77,18 @@ Local validation uses macOS 27.0, Apple Swift 6.4, and SDK 27.0.
   selection was also rejected with the expected diagnostic.
 - Shell/Perl syntax, workflow YAML parsing, and `git diff --check` passed.
 
-The installed standalone Command Line Tools lacks the `SwiftUIMacros` plugin
-required by SDK 27's SwiftUI `@State`. Consequently a complete GUI build,
-foreground search-focus test, and signed app-bundle validation cannot be
-completed on this installation. The app-core and translation checks use
-standalone harnesses with the real source files, excluding the views that
-require the missing plugin. Use complete Xcode 27 for the full commands in the
-README.
+Native view state now uses `@ViewState`, a type alias for SwiftUI's
+public `State` property wrapper. This avoids the missing macro plugin without
+changing SwiftUI's storage or bindings, and a full release build and signed
+app-bundle validation now pass with the installed Command Line Tools. The
+installed SDK's incorrect testing search paths have also been repaired;
+the original metadata is backed up inside the SDK for rollback.
+
+Regression checks pass for tab state, all 70 translation checks,
+and the WebView suite (26 bridge, 6 lifecycle, and 2 security checks). The
+foreground search-focus test still times out on initial focus with the
+installed SDK, including with the original sidebar material and startup
+focus code. Experimental focus changes did not resolve it and were removed.
 
 Changes are local. A new hosted GitHub Actions run has not been executed, so
 the remote workflow's green status remains to be confirmed after pushing.

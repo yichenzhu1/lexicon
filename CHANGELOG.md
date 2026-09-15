@@ -4,6 +4,16 @@ All notable changes to Lexicon are documented here.
 
 ## Unreleased
 
+- Fixed builds with standalone macOS 27 Command Line Tools by selecting
+  SwiftUI's public `State` property wrapper through `@ViewState`, avoiding
+  the unavailable `SwiftUIMacros` plugin while preserving state and bindings.
+  Local ad-hoc signing is now reported as build information rather than a warning.
+- Added an Appearance pane after General with System, Light, and Dark themes
+  (System by default) and a default-on translucent sidebar with stronger native
+  blur. Appearance changes apply live across windows, Settings, and sheets,
+  persist across launches, and reset with Restore All Defaults. The sidebar
+  uses a solid background when transparency is disabled or accessibility
+  settings require it.
 - Raised the deployment target and app bundle minimum to macOS 27, with
   Swift 6.4 and the macOS 27 SDK. Packaging uses the selected SDK, rejects
   older SDKs, and resolves SwiftPM's binary output directory dynamically.

@@ -7,6 +7,7 @@ struct SettingsView: View {
         // Keep the old raw value so existing users land on General after the
         // Interface pane is renamed.
         case general = "interface"
+        case appearance
         case content
         case translation
         case speech
@@ -14,16 +15,21 @@ struct SettingsView: View {
     }
 
     @EnvironmentObject private var libraryModel: LibraryModel
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @AppStorage("selectedSettingsPane", store: LibraryModel.settings)
     private var selectedPane = Pane.general.rawValue
-    @State private var googleAPIKey = ""
-    @State private var showingRestoreConfirmation = false
+    @ViewState private var googleAPIKey = ""
+    @ViewState private var showingRestoreConfirmation = false
 
     var body: some View {
         TabView(selection: $selectedPane) {
             generalPane
                 .tabItem { Label("General", systemImage: "gearshape") }
                 .tag(Pane.general.rawValue)
+
+            appearancePane
+                .tabItem { Label("Appearance", systemImage: "paintpalette") }
+                .tag(Pane.appearance.rawValue)
 
             contentPane
                 .tabItem { Label("Content", systemImage: "book.closed") }
@@ -108,6 +114,35 @@ struct SettingsView: View {
                         Button("Restore All Defaults…") {
                             showingRestoreConfirmation = true
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    private var appearancePane: some View {
+        settingsPage {
+            Form {
+                Section("Theme") {
+                    Picker("Appearance", selection: $libraryModel.appAppearance) {
+                        ForEach(LibraryModel.AppAppearance.allCases) { appearance in
+                            Text(appearance.title).tag(appearance)
+                        }
+                    }
+
+                    Text("System follows your Mac’s appearance. Changes apply to all Lexicon windows.")
+                        .settingsNote()
+                }
+
+                Section("Sidebar") {
+                    Toggle("Translucent sidebar", isOn: $libraryModel.translucentSidebar)
+
+                    Text("Let colors behind the window show through a frosted sidebar.")
+                        .settingsNote()
+
+                    if reduceTransparency {
+                        Text("Reduce Transparency is enabled in macOS. The sidebar uses a solid background while your preference is kept.")
+                            .settingsNote()
                     }
                 }
             }

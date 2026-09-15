@@ -19,6 +19,29 @@ final class LibraryModel: ObservableObject {
         let message: String
     }
 
+    enum AppAppearance: String, CaseIterable, Identifiable {
+        case system
+        case light
+        case dark
+
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .system: return "System"
+            case .light: return "Light"
+            case .dark: return "Dark"
+            }
+        }
+
+        var nsAppearance: NSAppearance? {
+            switch self {
+            case .system: return nil
+            case .light: return NSAppearance(named: .aqua)
+            case .dark: return NSAppearance(named: .darkAqua)
+            }
+        }
+    }
+
     enum DictionaryNetworkPolicy: String, CaseIterable, Identifiable {
         case offlineOnly
         case allowHTTPS
@@ -307,7 +330,7 @@ final class LibraryModel: ObservableObject {
         contentVersion += 1
     }
 
-    // MARK: - Reading preferences
+    // MARK: - Preferences
 
     /// Settings live in a named suite so they are the same whether the app runs
     /// as `build/Lexicon.app` or as the bare `swift build` executable, which
@@ -342,6 +365,18 @@ final class LibraryModel: ObservableObject {
         }
         return current
     }()
+
+    @Published var appAppearance: AppAppearance = LibraryModel.storedAppAppearance() {
+        didSet { Self.settings.set(appAppearance.rawValue, forKey: Self.appAppearanceKey) }
+    }
+
+    /// The saved choice stays intact when macOS Reduce Transparency temporarily
+    /// replaces the sidebar material with a solid background.
+    @Published var translucentSidebar: Bool = LibraryModel.settings.object(
+        forKey: LibraryModel.translucentSidebarKey
+    ) as? Bool ?? true {
+        didSet { Self.settings.set(translucentSidebar, forKey: Self.translucentSidebarKey) }
+    }
 
     /// Zoom applied to rendered entries, shared by every tab and window and
     /// remembered across launches.
@@ -406,6 +441,8 @@ final class LibraryModel: ObservableObject {
         Self.settings.set(Array(collapsedDictionaries), forKey: Self.collapsedKey)
     }
 
+    private static let appAppearanceKey = "appAppearance"
+    private static let translucentSidebarKey = "translucentSidebar"
     private static let zoomKey = "entryZoom"
     private static let lookUpKey = "lookUpOnDoubleClick"
     private static let collapsedKey = "collapsedDictionaries"
@@ -449,6 +486,11 @@ final class LibraryModel: ObservableObject {
     static let zoomSteps: [Double] = [
         0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
     ]
+
+    private static func storedAppAppearance() -> AppAppearance {
+        guard let raw = settings.string(forKey: appAppearanceKey) else { return .system }
+        return AppAppearance(rawValue: raw) ?? .system
+    }
 
     private static func storedZoom() -> Double {
         let stored = settings.double(forKey: zoomKey)
@@ -520,6 +562,8 @@ final class LibraryModel: ObservableObject {
     }
 
     func restoreDefaultSettings() {
+        appAppearance = .system
+        translucentSidebar = true
         setZoom(1.0)
         lookUpOnDoubleClick = true
         setHistoryLimit(Self.defaultHistoryLimit)

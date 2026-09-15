@@ -5,10 +5,10 @@ import UniformTypeIdentifiers
 struct DictionaryManagerView: View {
     @EnvironmentObject private var libraryModel: LibraryModel
     @Environment(\.dismiss) private var dismiss
-    @State private var showImporter = false
-    @State private var dictionaryPendingRemoval: DictionaryRecord?
-    @State private var dictionaryPendingRename: DictionaryRecord?
-    @State private var draftTitle = ""
+    @ViewState private var showImporter = false
+    @ViewState private var dictionaryPendingRemoval: DictionaryRecord?
+    @ViewState private var dictionaryPendingRename: DictionaryRecord?
+    @ViewState private var draftTitle = ""
 
     private var mdxType: UTType {
         UTType(filenameExtension: "mdx") ?? .data
