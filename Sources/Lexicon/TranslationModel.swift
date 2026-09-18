@@ -10,6 +10,7 @@ final class TranslationModel: ObservableObject {
     enum Status: Equatable {
         case idle
         case testing
+        case ready
         case success(String)
         case failure(String)
     }
@@ -50,6 +51,7 @@ final class TranslationModel: ObservableObject {
     }
 
     @Published private var models: [TranslationProvider: String]
+    @Published private(set) var credentialRevision = 0
     @Published private(set) var hasAPIKey = false
     @Published private(set) var status: Status = .idle
     @Published private(set) var appleAvailability: LanguageAvailability.Status?
@@ -122,19 +124,38 @@ final class TranslationModel: ObservableObject {
         )
     }
 
+    /// Run only while Settings is visible. The view debounces configuration
+    /// edits and cancels its captured task, never a newer configuration's task.
+    func checkHealth() async {
+        guard !Task.isCancelled, provider != .disabled,
+              !provider.requiresAPIKey || hasAPIKey else { return }
+        if provider.isGeneralLanguageModel && selectedModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            status = .failure("Enter a model name to check the connection.")
+            return
+        }
+        testTranslation()
+        let running = testTask
+        await withTaskCancellationHandler {
+            await running?.value
+        } onCancel: {
+            running?.cancel()
+        }
+    }
+
     func testTranslation() {
         cancelTest()
         status = .testing
+        if provider == .apple { appleAvailability = nil }
         testTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let result = try await translate(
+                _ = try await translate(
                     "Translate the following English sentence into Simplified Chinese:\n"
                     + "The dictionary helps us understand how words are used."
                 )
                 try Task.checkCancellation()
                 if provider == .apple { appleAvailability = .installed }
-                status = .success(result)
+                status = .ready
             } catch {
                 guard !Task.isCancelled else { return }
                 if let setup = error as? AppleTranslationSetupError {
@@ -163,6 +184,7 @@ final class TranslationModel: ObservableObject {
         do {
             try credentials.save(provider, value)
             hasAPIKey = true
+            credentialRevision += 1
             status = .success("\(provider.title) API key saved in Keychain.")
             return true
         } catch {
@@ -176,6 +198,7 @@ final class TranslationModel: ObservableObject {
         do {
             try credentials.remove(provider)
             hasAPIKey = false
+            credentialRevision += 1
             status = .success("\(provider.title) API key removed.")
         } catch {
             status = .failure("Could not remove the API key: \(error.localizedDescription)")

@@ -246,22 +246,38 @@ bundled credential or passage leaves the page. Choose a provider in
 
 - **Apple Translation** is the default. It uses the system Translation
   framework on-device with installed English and Simplified Chinese language
-  packs. Settings shows language availability and download instructions inline.
+  packs. Settings runs a small translation automatically and shows its health
+  status. Download instructions appear only when language packs are missing.
   **Manage Translation Languages…** opens **System Settings → General →
   Language & Region → Translation Languages** directly. Download both languages
-  there, then return to Lexicon and retry. Translation uses installed language
-  packs without opening a download window or automatic setup alert. It needs
+  there, then return to Lexicon for an automatic recheck. Translation uses
+  installed language packs without opening a download window or automatic setup alert. It needs
   no API key.
 - **Translation APIs** contains Google Cloud Translation and DeepL. These
   dedicated services translate the extracted source passage. Google Cloud is
   predictable for modern examples; DeepL supports Free and Pro keys and
   preserves OED's supported markup.
-- **AI Models** contains OpenAI (GPT), DeepSeek, Google Gemini, Anthropic
-  Claude, and Alibaba DashScope. These receive the complete contextual prompt
-  for definition-aware and markup-aware translations. Each provider has its
+- **AI Models** lists companies alphabetically: Alibaba Cloud, Anthropic,
+  DeepSeek, Google, and OpenAI. Model identifiers appear in a separate field.
+  These receive the complete contextual prompt for definition-aware and
+  markup-aware translations. Each provider has its
   own editable model name and Keychain credential.
 - **Off** disables network and Apple live translation. Bundled bilingual
   content, including OALD's hidden Chinese examples, still works locally.
+
+The Settings window keeps a consistent width and pane background. Its height
+adapts to the active pane and expanded setup instructions.
+**General → Restore Defaults…** lets you choose Reading, History limit,
+Appearance, Dictionary pages, Translation, or Speech; all start selected.
+Unchecked settings are kept. Dictionaries, starred words, and API keys are
+always kept. Selecting History limit restores 100 recent lookups; the sheet
+explicitly says whether all existing history is kept or how many older entries
+will be permanently deleted. Deselect History limit to preserve all history.
+Translation checks run automatically while the pane is open and after a provider,
+model, region, or saved key changes. A brief debounce avoids requests for every
+keystroke. The check sends a fixed sample, shows readiness instead of the translated
+sample, and is cancelled when you leave the pane. Cloud checks require a saved key
+and may incur a small amount of API usage.
 
 Every cloud provider has a separate credential stored in macOS Keychain; keys
 are never exposed to dictionary JavaScript. General language models receive the
@@ -279,6 +295,8 @@ the user's control even when dictionary-page network access is disabled.
 swift run MdxKitTester
 swift run Lexicon --tab-state-test
 swift run Lexicon --translation-test
+swift run Lexicon --settings-reset-test
+swift run Lexicon --shortcut-test
 swift run Lexicon --tab-webview-test
 swift run Lexicon --search-focus-test
 ```
@@ -321,7 +339,7 @@ The suite also covers several things worth knowing about:
 - **Translation.** Offline request/response tests cover every online provider,
   source extraction, HTTP failures, incomplete output, and cancellation. Apple
   tests cover installed/missing/unsupported languages without downloading packs.
-  Settings tests cover saved preferences, credential errors, independent
+  Settings health checks cover saved preferences, credential errors, independent
   dictionary requests, and cancellation when provider configuration changes.
   WebKit checks exercise the dictionary adapters and request cleanup.
 - **Tab isolation.** The app-state test checks the three-view MRU limit,
@@ -358,7 +376,7 @@ flowchart TB
         Window["Reading windows<br/>AppState + EntryTab / EntryLocation"]
         Settings["Settings and dictionary manager"]
         Shared["LibraryModel<br/>shared library, history, import progress"]
-        Translation["TranslationModel<br/>preferences and Settings test"]
+        Translation["TranslationModel<br/>preferences and Settings health check"]
     end
 
     subgraph Rendering["Page lifecycle and WebKit"]
@@ -431,7 +449,7 @@ recordings and synthesized speech.
 | Window | [`AppState`](Sources/Lexicon/AppState.swift) | Search task and results, tabs, active tab, and resident WebKit views |
 | Tab | `EntryTab` / `EntryLocation` | Word, anchor, preferred dictionary, scroll offset, and back/forward history |
 | Rendered page | [`EntryWebView.Coordinator`](Sources/Lexicon/EntryWebView.swift) | Page loading, dictionary frames, and their translation tasks |
-| Translation settings | [`TranslationModel`](Sources/Lexicon/TranslationModel.swift) | Provider/model preferences, native credential access, and the cancellable Settings test |
+| Translation settings | [`TranslationModel`](Sources/Lexicon/TranslationModel.swift) | Provider/model preferences, native credential access, and the cancellable Settings health check |
 
 ### Search and page lifecycle
 
@@ -499,14 +517,14 @@ flowchart LR
     Dictionary["Dictionary fetch / WebSocket"] --> Adapter["Browser API adapter"]
     Adapter --> Bridge["Isolated bridge + page coordinator"]
     Bridge --> Request["Validated input + captured configuration"]
-    Settings["TranslationModel Settings test"] --> Request
+    Settings["TranslationModel Settings health check"] --> Request
     Request --> Apple["Independent Apple session"]
     Request --> Cloud["Shared HTTP pipeline + provider codecs"]
 ```
 
 Each translation captures its provider, model, region, and credential before
 asynchronous work begins. A dictionary request returns its result or error to
-the originating frame. The Settings test has its own task and status; changing
+the originating frame. The Settings health check has its own task and status; changing
 provider configuration cancels that test, while already-submitted dictionary
 requests retain their captured configuration.
 [`TranslationSettingsView`](Sources/Lexicon/TranslationSettingsView.swift)
@@ -550,3 +568,9 @@ Lexicon is licensed under the
 [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) — see
 `LICENSE` for the full terms. Third-party dependencies and their licenses
 are disclosed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+In Settings → Shortcuts, click a shortcut and press a new key combination to save
+it directly in the row. Escape or a click elsewhere cancels recording. Conflicts
+appear inline. Shortcuts persist across launches; standard editing commands are
+protected. Each row has a reset arrow. To restore all shortcuts, select Keyboard
+shortcuts in General → Restore Defaults.

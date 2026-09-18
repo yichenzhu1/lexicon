@@ -83,7 +83,7 @@ public enum EntryPageBuilder {
         <style>
           :root { color-scheme:light dark; --dictionary-content-indent:16px;
             /* One hairline spec for the whole app: matches NSColor.separatorColor,
-               which the SwiftUI chrome draws at full strength (ChromeMetrics). */
+               which the SwiftUI chrome draws at full strength (LayoutMetrics). */
             --lexicon-hairline:rgba(0,0,0,.10); }
           html { overflow-y:auto; overscroll-behavior:contain; }
           body { font-family:-apple-system,"Helvetica Neue",sans-serif; margin:0; padding:10px 8px 20px; }
@@ -107,7 +107,7 @@ public enum EntryPageBuilder {
             border-bottom:1px solid var(--lexicon-hairline); }
           .lexicon-jump::-webkit-scrollbar { display:none; }
           .lexicon-jump button { flex:0 0 auto; font:inherit; font-size:11px; font-weight:600; color:inherit;
-            opacity:.65; padding:3px 8px; border:1px solid rgba(128,128,128,.35); border-radius:7px;
+            opacity:.65; padding:3px 8px; border:1px solid rgba(128,128,128,.35); border-radius:999px;
             background:transparent; cursor:pointer; }
           .lexicon-jump button:hover,.lexicon-jump button[data-current] { opacity:1; }
           .lexicon-jump button[data-current] { background:rgba(128,128,128,.16); }

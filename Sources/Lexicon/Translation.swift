@@ -16,14 +16,6 @@ enum TranslationProviderCategory: String, CaseIterable, Identifiable {
         case .disabled: return "Off"
         }
     }
-
-    var providerPickerTitle: String {
-        switch self {
-        case .translationAPIs: return "Service"
-        case .languageModels: return "Provider"
-        case .apple, .disabled: return "Provider"
-        }
-    }
 }
 
 enum TranslationProvider: String, CaseIterable, Identifiable, Sendable {
@@ -45,11 +37,11 @@ enum TranslationProvider: String, CaseIterable, Identifiable, Sendable {
         case .disabled: return "Off"
         case .googleCloud: return "Google Cloud Translation"
         case .deepL: return "DeepL"
-        case .openAI: return "OpenAI (GPT)"
+        case .openAI: return "OpenAI"
         case .deepSeek: return "DeepSeek"
-        case .gemini: return "Google Gemini"
-        case .claude: return "Anthropic Claude"
-        case .dashScope: return "Alibaba DashScope"
+        case .gemini: return "Google"
+        case .claude: return "Anthropic"
+        case .dashScope: return "Alibaba Cloud"
         }
     }
 
@@ -91,6 +83,7 @@ enum TranslationProvider: String, CaseIterable, Identifiable, Sendable {
 
     static func providers(in category: TranslationProviderCategory) -> [TranslationProvider] {
         allCases.filter { $0.category == category }
+            .sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
     }
 }
 

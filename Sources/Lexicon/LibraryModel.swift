@@ -89,6 +89,14 @@ final class LibraryModel: ObservableObject {
     /// from view bodies for every history row, tab and starred card, so an
     /// uncached lookup ran a SQL query per row on every keystroke.
     private var displayWordCache: [String: String] = [:]
+    @Published var shortcuts = ShortcutConfiguration.load(from: LibraryModel.settings) {
+        didSet {
+            if let data = try? JSONEncoder().encode(shortcuts) {
+                Self.settings.set(data, forKey: "keyboardShortcuts")
+            }
+        }
+    }
+
     let translation: TranslationModel
 
     nonisolated static var defaultRoot: URL {
@@ -561,22 +569,37 @@ final class LibraryModel: ObservableObject {
         save(history, to: historyURL)
     }
 
-    func restoreDefaultSettings() {
-        appAppearance = .system
-        translucentSidebar = true
-        setZoom(1.0)
-        lookUpOnDoubleClick = true
-        setHistoryLimit(Self.defaultHistoryLimit)
-        dictionaryNetworkPolicy = .allowHTTPS
-        ttsProvider = .system
-        systemBritishVoiceIdentifier = ""
-        systemAmericanVoiceIdentifier = ""
-        googleBritishVoice = "Algieba"
-        googleAmericanVoice = "Algieba"
-        translation.restoreDefaults()
-        if !collapsedDictionaries.isEmpty {
-            collapsedDictionaries.removeAll()
-            Self.settings.removeObject(forKey: Self.collapsedKey)
+    func restoreDefaultSettings(_ selection: Set<SettingsResetSection>) {
+        if selection.contains(.reading) {
+            setZoom(1.0)
+            lookUpOnDoubleClick = true
+        }
+        if selection.contains(.history) {
+            setHistoryLimit(Self.defaultHistoryLimit)
+        }
+        if selection.contains(.appearance) {
+            appAppearance = .system
+            translucentSidebar = true
+        }
+        if selection.contains(.content) {
+            dictionaryNetworkPolicy = .allowHTTPS
+            if !collapsedDictionaries.isEmpty {
+                collapsedDictionaries.removeAll()
+                Self.settings.removeObject(forKey: Self.collapsedKey)
+            }
+        }
+        if selection.contains(.translation) {
+            translation.restoreDefaults()
+        }
+        if selection.contains(.shortcuts) { shortcuts = ShortcutConfiguration() }
+        if selection.contains(.speech) {
+            stopSpeech()
+            ttsStatus = nil
+            ttsProvider = .system
+            systemBritishVoiceIdentifier = ""
+            systemAmericanVoiceIdentifier = ""
+            googleBritishVoice = "Algieba"
+            googleAmericanVoice = "Algieba"
         }
     }
 

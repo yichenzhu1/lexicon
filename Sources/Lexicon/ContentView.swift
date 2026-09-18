@@ -15,9 +15,6 @@ struct ContentView: View {
     /// Lexicon → History → Starred, so a higher destination slides left.
     @ViewState private var sidebarSlideForward = true
     @Namespace private var segmentThumb
-    /// Identifies toolbar glass buttons so neighbors inside a
-    /// GlassEffectContainer merge into one shape and separate on approach.
-    @Namespace private var toolbarGlass
     @ViewState private var sidebarVisible = LibraryModel.storedSidebarVisible
     @ViewState private var sidebarWidth: CGFloat = LibraryModel.storedSidebarWidth
     @ViewState private var sidebarDragStartWidth: CGFloat?
@@ -28,6 +25,7 @@ struct ContentView: View {
     @ViewState private var zoomHUDVisible = false
     @ViewState private var zoomHUDTask: Task<Void, Never>?
     @ViewState private var starPulse = false
+    @ViewState private var confirmingClearHistory = false
 
     /// True while the lookup field holds a query, in which case the sidebar
     /// shows results rather than one of the saved lists.
@@ -81,6 +79,7 @@ struct ContentView: View {
         .sheet(isPresented: $appState.showDictionaryManager) {
             DictionaryManagerView()
                 .environmentObject(libraryModel)
+                .presentationCornerRadius(LayoutMetrics.Corners.panel)
         }
         // Dropping a .mdx on the window imports it, the obvious Mac gesture
         // for "add this dictionary".
@@ -95,7 +94,7 @@ struct ContentView: View {
         }
         .overlay {
             if isDropTargeted {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: LayoutMetrics.Corners.panel - 4, style: .continuous)
                     .strokeBorder(Color.accentColor, lineWidth: 3)
                     .padding(4)
                     .allowsHitTesting(false)
@@ -114,23 +113,24 @@ struct ContentView: View {
             Text(libraryModel.errorMessage ?? "")
         }
         .background {
+            CloseShortcutBridge(configuration: libraryModel.shortcuts) { appState.closeActiveTabOrWindow() }
             Group {
                 // Focused-window shortcuts take precedence over the generic
                 // window menu, matching browser tab behavior.
                 Button("") { searchFocused = true }
-                    .keyboardShortcut("f", modifiers: .command)
-                Button("") { appState.closeActiveTabOrWindow() }
-                    .keyboardShortcut("w", modifiers: .command)
+                    .keyboardShortcut(libraryModel.shortcuts[.focusSearch].shortcut)
                 // ⌘= is the unshifted twin of ⌘+; browsers accept both.
-                Button("") { libraryModel.zoomIn() }
-                    .keyboardShortcut("=", modifiers: .command)
+                if libraryModel.shortcuts.zoomAliasAvailable {
+                    Button("") { libraryModel.zoomIn() }
+                        .keyboardShortcut("=", modifiers: .command)
+                }
                 // Browser-style tab switching: ⌘1…⌘8 by position, ⌘9 = last.
                 ForEach(1 ... 8, id: \.self) { number in
                     Button("") { appState.activateTab(at: number - 1) }
-                        .keyboardShortcut(KeyEquivalent(Character("\(number)")), modifiers: .command)
+                        .keyboardShortcut(libraryModel.shortcuts[ShortcutAction.tabActions[number - 1]].shortcut)
                 }
                 Button("") { appState.activateLastTab() }
-                    .keyboardShortcut("9", modifiers: .command)
+                    .keyboardShortcut(libraryModel.shortcuts[.lastTab].shortcut)
             }
             .hidden()
         }
@@ -208,50 +208,54 @@ struct ContentView: View {
                 sidebarToggleButton
             }
 
-            GlassEffectContainer(spacing: 6) {
-                HStack(spacing: 6) {
-                    Button {
-                        appState.goBack()
-                    } label: {
-                        Image(systemName: "chevron.left")
-                            .frame(
-                                width: ChromeMetrics.toolbarButtonSize,
-                                height: ChromeMetrics.toolbarButtonSize
-                            )
-                            .contentShape(toolbarButtonShape)
-                    }
-                    .buttonStyle(.plain)
-                    .glassEffect(
-                        .regular.interactive(),
-                        in: toolbarButtonShape
-                    )
-                    .glassEffectID("back", in: toolbarGlass)
-                    .help("Back")
-                    .accessibilityLabel("Back")
-                    .disabled(!appState.canGoBack)
-                    .keyboardShortcut("[", modifiers: .command)
-
-                    Button {
-                        appState.goForward()
-                    } label: {
-                        Image(systemName: "chevron.right")
-                            .frame(
-                                width: ChromeMetrics.toolbarButtonSize,
-                                height: ChromeMetrics.toolbarButtonSize
-                            )
-                            .contentShape(toolbarButtonShape)
-                    }
-                    .buttonStyle(.plain)
-                    .glassEffect(
-                        .regular.interactive(),
-                        in: toolbarButtonShape
-                    )
-                    .glassEffectID("forward", in: toolbarGlass)
-                    .help("Forward")
-                    .accessibilityLabel("Forward")
-                    .disabled(!appState.canGoForward)
-                    .keyboardShortcut("]", modifiers: .command)
+            // Keep the shared glass behind ordinary buttons. Uniting glass
+            // on each button can trap macOS 27's initial key-view traversal.
+            HStack(spacing: 0) {
+                Button {
+                    appState.goBack()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .frame(
+                            width: LayoutMetrics.toolbarButtonSize,
+                            height: LayoutMetrics.toolbarButtonSize
+                        )
+                        .contentShape(toolbarButtonShape)
                 }
+                .buttonStyle(BrowserIconButtonStyle(
+                    cornerRadius: LayoutMetrics.Corners.toolbar, hitPadding: 0
+                ))
+                .help("Back")
+                .accessibilityLabel("Back")
+                .disabled(!appState.canGoBack)
+                .keyboardShortcut(libraryModel.shortcuts[.back].shortcut)
+
+                Button {
+                    appState.goForward()
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .frame(
+                            width: LayoutMetrics.toolbarButtonSize,
+                            height: LayoutMetrics.toolbarButtonSize
+                        )
+                        .contentShape(toolbarButtonShape)
+                }
+                .buttonStyle(BrowserIconButtonStyle(
+                    cornerRadius: LayoutMetrics.Corners.toolbar, hitPadding: 0
+                ))
+                .help("Forward")
+                .accessibilityLabel("Forward")
+                .disabled(!appState.canGoForward)
+                .keyboardShortcut(libraryModel.shortcuts[.forward].shortcut)
+            }
+            .background {
+                toolbarButtonShape.fill(.clear)
+                    .glassEffect(.regular, in: toolbarButtonShape)
+            }
+            .overlay {
+                Rectangle()
+                    .fill(LayoutMetrics.separatorColor)
+                    .frame(width: LayoutMetrics.separatorThickness, height: 16)
+                    .allowsHitTesting(false)
             }
 
             WindowDragRegion(minLength: 8)
@@ -264,83 +268,76 @@ struct ContentView: View {
 
             // The star acts on the current entry, so it lives with the entry
             // controls trailing the search field, not with navigation.
-            GlassEffectContainer(spacing: 6) {
-                HStack(spacing: 6) {
-                    Button {
-                        if let word = appState.selectedWord {
-                            libraryModel.toggleStar(word)
-                        }
-                    } label: {
-                        Image(systemName: bookmarkIconName)
-                            .scaleEffect(starPulse ? 1.22 : 1)
-                            .frame(
-                                width: ChromeMetrics.toolbarButtonSize,
-                                height: ChromeMetrics.toolbarButtonSize
-                            )
-                            .contentShape(toolbarButtonShape)
+            HStack(spacing: 0) {
+                Button {
+                    if let word = appState.selectedWord {
+                        libraryModel.toggleStar(word)
                     }
-                    .buttonStyle(.plain)
-                    .glassEffect(
-                        .regular.interactive(),
-                        in: toolbarButtonShape
-                    )
-                    .glassEffectID("bookmark", in: toolbarGlass)
-                    .help(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
-                    .accessibilityLabel(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
-                    .disabled(appState.selectedWord == nil)
-
-                    Button {
-                        appState.showDictionaryManager = true
-                    } label: {
-                        Image(systemName: "books.vertical")
-                            .frame(
-                                width: ChromeMetrics.toolbarButtonSize,
-                                height: ChromeMetrics.toolbarButtonSize
-                            )
-                            .contentShape(toolbarButtonShape)
-                    }
-                    .buttonStyle(.plain)
-                    .glassEffect(
-                        .regular.interactive(),
-                        in: toolbarButtonShape
-                    )
-                    .glassEffectID("dictionaries", in: toolbarGlass)
-                    .help("Manage dictionaries")
-                    .accessibilityLabel("Manage dictionaries")
-
-                    Button {
-                        appState.openNewTab()
-                    } label: {
-                        Image(systemName: "plus")
-                            .frame(
-                                width: ChromeMetrics.toolbarButtonSize,
-                                height: ChromeMetrics.toolbarButtonSize
-                            )
-                            .contentShape(toolbarButtonShape)
-                    }
-                    .buttonStyle(.plain)
-                    .glassEffect(
-                        .regular.interactive(),
-                        in: toolbarButtonShape
-                    )
-                    .glassEffectID("newTab", in: toolbarGlass)
-                    .help("New Tab")
-                    .accessibilityLabel("New Tab")
+                } label: {
+                    Image(systemName: bookmarkIconName)
+                        .scaleEffect(starPulse ? 1.22 : 1)
+                        .frame(
+                            width: LayoutMetrics.toolbarButtonSize,
+                            height: LayoutMetrics.toolbarButtonSize
+                        )
+                        .contentShape(toolbarButtonShape)
                 }
+                .buttonStyle(BrowserIconButtonStyle(
+                    cornerRadius: LayoutMetrics.Corners.toolbar, hitPadding: 0
+                ))
+                .help(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
+                .accessibilityLabel(isCurrentWordStarred ? "Remove from Starred" : "Add to Starred")
+                .disabled(appState.selectedWord == nil)
+
+                Button {
+                    appState.showDictionaryManager = true
+                } label: {
+                    Image(systemName: "books.vertical")
+                        .frame(
+                            width: LayoutMetrics.toolbarButtonSize,
+                            height: LayoutMetrics.toolbarButtonSize
+                        )
+                        .contentShape(toolbarButtonShape)
+                }
+                .buttonStyle(BrowserIconButtonStyle(
+                    cornerRadius: LayoutMetrics.Corners.toolbar, hitPadding: 0
+                ))
+                .help("Manage dictionaries")
+                .accessibilityLabel("Manage dictionaries")
+
+                Button {
+                    appState.openNewTab()
+                } label: {
+                    Image(systemName: "plus")
+                        .frame(
+                            width: LayoutMetrics.toolbarButtonSize,
+                            height: LayoutMetrics.toolbarButtonSize
+                        )
+                        .contentShape(toolbarButtonShape)
+                }
+                .buttonStyle(BrowserIconButtonStyle(
+                    cornerRadius: LayoutMetrics.Corners.toolbar, hitPadding: 0
+                ))
+                .help("New Tab")
+                .accessibilityLabel("New Tab")
+            }
+            .background {
+                toolbarButtonShape.fill(.clear)
+                    .glassEffect(.regular, in: toolbarButtonShape)
             }
         }
         .font(.system(size: 13, weight: .medium))
         .padding(
             .leading,
             sidebarVisible || windowIsFullScreen
-                ? ChromeMetrics.horizontalInset : ChromeMetrics.trafficLightInset
+                ? LayoutMetrics.horizontalInset : LayoutMetrics.trafficLightInset
         )
-        .padding(.trailing, ChromeMetrics.horizontalInset)
+        .padding(.trailing, LayoutMetrics.horizontalInset)
         // A two-point optical correction centers the controls between the
         // window's top edge and the tab pill below while accounting for the
         // tab pill's top margin.
-        .offset(y: ChromeMetrics.toolbarContentVerticalOffset)
-        .frame(height: ChromeMetrics.toolbarRowHeight)
+        .offset(y: LayoutMetrics.toolbarContentVerticalOffset)
+        .frame(height: LayoutMetrics.toolbarRowHeight)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -349,8 +346,8 @@ struct ContentView: View {
     private var tabStripRow: some View {
         BrowserTabBar()
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, ChromeMetrics.horizontalInset)
-            .frame(height: ChromeMetrics.tabStripRowHeight)
+            .padding(.horizontal, LayoutMetrics.horizontalInset)
+            .frame(height: LayoutMetrics.tabStripRowHeight)
             .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -364,9 +361,9 @@ struct ContentView: View {
             WindowDragRegion()
             sidebarToggleButton
         }
-        .padding(.trailing, ChromeMetrics.horizontalInset)
-        .offset(y: ChromeMetrics.toolbarContentVerticalOffset)
-        .frame(height: ChromeMetrics.toolbarRowHeight)
+        .padding(.trailing, LayoutMetrics.horizontalInset)
+        .offset(y: LayoutMetrics.toolbarContentVerticalOffset)
+        .frame(height: LayoutMetrics.toolbarRowHeight)
     }
 
     private var sidebarToggleButton: some View {
@@ -378,8 +375,8 @@ struct ContentView: View {
             Image(systemName: "sidebar.left")
                 .font(.system(size: 13, weight: .medium))
                 .frame(
-                    width: ChromeMetrics.toolbarButtonSize,
-                    height: ChromeMetrics.toolbarButtonSize
+                    width: LayoutMetrics.toolbarButtonSize,
+                    height: LayoutMetrics.toolbarButtonSize
                 )
                 .contentShape(toolbarButtonShape)
         }
@@ -400,7 +397,7 @@ struct ContentView: View {
             Color.clear
             ChromeSeparator(.vertical)
         }
-        .frame(width: ChromeMetrics.splitterHitWidth)
+        .frame(width: LayoutMetrics.splitterHitWidth)
         .contentShape(Rectangle())
         .onHover { hovering in
             if hovering {
@@ -474,7 +471,7 @@ struct ContentView: View {
                         .padding(.vertical, 7)
                         .glassEffect(
                             .regular,
-                            in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            in: RoundedRectangle(cornerRadius: LayoutMetrics.Corners.hud, style: .continuous)
                         )
                         .padding(14)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
@@ -502,40 +499,43 @@ struct ContentView: View {
                 // search handle typos rather than changing the user's text.
                 .autocorrectionDisabled()
                 .focused($searchFocused)
-                .onSubmit { appState.submitSearch() }
-                .onKeyPress(.escape) {
-                    if appState.searchText.isEmpty {
-                        searchFocused = false
-                    } else {
-                        appState.searchText = ""
+                .onKeyPress(phases: .down) { press in
+                    let binding = ShortcutBinding.normalized(String(press.key.character), modifiers:
+                        (press.modifiers.contains(.command) ? 1 : 0)
+                        | (press.modifiers.contains(.option) ? 2 : 0)
+                        | (press.modifiers.contains(.control) ? 4 : 0)
+                        | (press.modifiers.contains(.shift) ? 8 : 0))
+                    guard let action = ShortcutAction.allCases.first(where: {
+                        $0.isSearchAction && libraryModel.shortcuts[$0] == binding
+                    }) else { return .ignored }
+                    switch action {
+                    case .clearSearch:
+                        if appState.searchText.isEmpty { searchFocused = false }
+                        else { appState.searchText = "" }
+                    case .nextResult: appState.moveSearchSelection(by: 1)
+                    case .previousResult: appState.moveSearchSelection(by: -1)
+                    case .openResult: appState.submitSearch()
+                    default: return .ignored
                     }
-                    return .handled
-                }
-                .onKeyPress(.downArrow) {
-                    appState.moveSearchSelection(by: 1)
-                    return .handled
-                }
-                .onKeyPress(.upArrow) {
-                    appState.moveSearchSelection(by: -1)
                     return .handled
                 }
         }
             .padding(.horizontal, 10)
             // Matches the Safari-sized toolbar capsules, so the field and the
             // button groups share one height and one vertical rhythm.
-            .frame(height: ChromeMetrics.toolbarControlHeight)
+            .frame(height: LayoutMetrics.toolbarControlHeight)
             .background {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: LayoutMetrics.Corners.toolbar, style: .continuous)
                     .fill(.clear)
                     .glassEffect(
                         .regular.interactive(),
-                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        in: RoundedRectangle(cornerRadius: LayoutMetrics.Corners.toolbar, style: .continuous)
                     )
             }
             .overlay {
                 // Glass carries the resting state; only focus gets a ring.
                 if searchFocused {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    RoundedRectangle(cornerRadius: LayoutMetrics.Corners.toolbar, style: .continuous)
                         .stroke(Color.accentColor, lineWidth: 2)
                 }
             }
@@ -554,7 +554,7 @@ struct ContentView: View {
 
     private var toolbarButtonShape: RoundedRectangle {
         RoundedRectangle(
-            cornerRadius: ChromeMetrics.toolbarButtonCornerRadius,
+            cornerRadius: LayoutMetrics.Corners.toolbar,
             style: .continuous
         )
     }
@@ -568,9 +568,9 @@ struct ContentView: View {
                 // The selector and result rows share one horizontal edge. Its
                 // 30-point surface matches the tabs, with a one-point optical
                 // lift inside the common 38-point navigation row.
-                .padding(.horizontal, ChromeMetrics.sidebarContentInset)
-                .offset(y: ChromeMetrics.sidebarModeVerticalOffset)
-                .frame(height: ChromeMetrics.tabStripRowHeight)
+                .padding(.horizontal, LayoutMetrics.sidebarContentInset)
+                .offset(y: LayoutMetrics.sidebarModeVerticalOffset)
+                .frame(height: LayoutMetrics.tabStripRowHeight)
                 // Keep section motion inside the control. Animating the whole
                 // sidebar also animates the status bar's insertion/removal,
                 // which makes otherwise identical empty states travel in
@@ -609,7 +609,7 @@ struct ContentView: View {
                                 }
                             }
                         }
-                        .padding(.horizontal, ChromeMetrics.sidebarContentInset)
+                        .padding(.horizontal, LayoutMetrics.sidebarContentInset)
                         .padding(.bottom, 8)
                     }
                     .scrollIndicators(.automatic)
@@ -652,7 +652,7 @@ struct ContentView: View {
         }
         .padding(2)
         .background {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: LayoutMetrics.Corners.segmentContainer, style: .continuous)
                 .fill(Color.primary.opacity(0.06))
         }
         .accessibilityLabel("Sidebar section")
@@ -670,7 +670,7 @@ struct ContentView: View {
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(sidebarMode == mode ? .primary : .secondary)
                 .frame(maxWidth: .infinity)
-                .frame(height: ChromeMetrics.sidebarModeButtonHeight)
+                .frame(height: LayoutMetrics.sidebarModeButtonHeight)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -681,7 +681,7 @@ struct ContentView: View {
             button
                 .glassEffect(
                     .regular,
-                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    in: RoundedRectangle(cornerRadius: LayoutMetrics.Corners.segment, style: .continuous)
                 )
                 .glassEffectID("sidebar-section-thumb", in: segmentThumb)
         } else {
@@ -704,7 +704,7 @@ struct ContentView: View {
                 if sidebarMode != .starred {
                     Button("Clear") {
                         if sidebarMode == .history {
-                            libraryModel.clearHistory()
+                            confirmingClearHistory = true
                         } else {
                             appState.searchText = ""
                         }
@@ -715,6 +715,16 @@ struct ContentView: View {
                     .fixedSize()
                     .disabled(sidebarMode == .history && libraryModel.history.isEmpty)
                     .help(sidebarMode == .history ? "Clear lookup history" : "Clear the search")
+                    .alert("Clear History?", isPresented: $confirmingClearHistory) {
+                        Button("Cancel", role: .cancel) {}
+                            .keyboardShortcut(.defaultAction)
+                        Button("Clear History", role: .destructive) {
+                            libraryModel.clearHistory()
+                        }
+                        .disabled(libraryModel.history.isEmpty)
+                    } message: {
+                        Text("This permanently clears history.\nYour starred words will be kept.\nYour dictionaries will be kept.")
+                    }
                 }
             }
             .padding(.leading, 16)
@@ -845,7 +855,7 @@ struct LibraryNoticeView: View {
                 Image(systemName: "xmark")
                     .frame(width: 20, height: 20)
             }
-            .buttonStyle(BrowserIconButtonStyle(cornerRadius: 6, hitPadding: 2))
+            .buttonStyle(BrowserIconButtonStyle())
             .foregroundStyle(.secondary)
             .help("Dismiss")
             .accessibilityLabel("Dismiss notice")
@@ -854,25 +864,37 @@ struct LibraryNoticeView: View {
         .frame(maxWidth: 420, alignment: .leading)
         .glassEffect(
             .regular,
-            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            in: RoundedRectangle(cornerRadius: LayoutMetrics.Corners.hud, style: .continuous)
         )
         .accessibilityElement(children: .contain)
     }
 }
 
-/// Shared chrome geometry keeps the toolbar, tab strip, and sidebar edge on
+/// Shared layout geometry keeps the toolbar, tab strip, and sidebar edge on
 /// one deliberate rhythm. Separators use the system separator color at full
 /// strength everywhere — SwiftUI chrome and the entry page's CSS hairlines
 /// (`--lexicon-hairline` in EntryPageBuilder) are the same 1pt rule, so the
 /// sidebar edge, the tab-strip baseline, and the jump-bar edges read as one
 /// line. Hit areas may be wider, but the visible rule never changes.
-private enum ChromeMetrics {
+enum LayoutMetrics {
+    /// Controls use half their height; nested surfaces keep concentric curves.
+    enum Corners {
+        static let toolbar: CGFloat = toolbarControlHeight / 2
+        static let tab: CGFloat = 15
+        static let segment: CGFloat = sidebarModeButtonHeight / 2
+        static let segmentContainer: CGFloat = segment + 2
+        static let row: CGFloat = 10
+        static let icon: CGFloat = 8
+        static let smallButton: CGFloat = 10
+        static let hud: CGFloat = 16
+        static let panel: CGFloat = 24
+    }
+
     static let toolbarRowHeight: CGFloat = 50
     static let tabStripRowHeight: CGFloat = 38
     static let toolbarControlHeight: CGFloat = 36
     static let tabStripContentHeight: CGFloat = 32
     static let toolbarButtonSize: CGFloat = 36
-    static let toolbarButtonCornerRadius: CGFloat = 10
     static let toolbarContentVerticalOffset: CGFloat = 2
     static let horizontalInset: CGFloat = 8
     static let sidebarContentInset: CGFloat = 7
@@ -968,14 +990,14 @@ private struct ChromeSeparator: View {
         switch orientation {
         case .horizontal:
             Rectangle()
-                .fill(ChromeMetrics.separatorColor)
+                .fill(LayoutMetrics.separatorColor)
                 .frame(maxWidth: .infinity)
-                .frame(height: ChromeMetrics.separatorThickness)
+                .frame(height: LayoutMetrics.separatorThickness)
                 .allowsHitTesting(false)
         case .vertical:
             Rectangle()
-                .fill(ChromeMetrics.separatorColor)
-                .frame(width: ChromeMetrics.separatorThickness)
+                .fill(LayoutMetrics.separatorColor)
+                .frame(width: LayoutMetrics.separatorThickness)
                 .frame(maxHeight: .infinity)
                 .allowsHitTesting(false)
         }
@@ -1113,8 +1135,8 @@ private final class WindowChromeProbeView: NSView {
                 originalButtonFrames[type] = button.frame
             }
             guard var target = originalButtonFrames[type] else { continue }
-            target.origin.x += ChromeMetrics.trafficLightHorizontalOffset
-            target.origin.y += ChromeMetrics.trafficLightVerticalOffset
+            target.origin.x += LayoutMetrics.trafficLightHorizontalOffset
+            target.origin.y += LayoutMetrics.trafficLightVerticalOffset
 
             if animated {
                 NSAnimationContext.runAnimationGroup { context in
@@ -1215,7 +1237,7 @@ private struct BrowserTabBar: View {
             .frame(width: proxy.size.width, alignment: .leading)
             .animation(.smooth(duration: 0.2), value: appState.tabs.map(\.id))
         }
-        .frame(height: ChromeMetrics.tabStripContentHeight)
+        .frame(height: LayoutMetrics.tabStripContentHeight)
     }
 
     private func tabView(
@@ -1252,9 +1274,8 @@ private struct BrowserTabBar: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 9, weight: .semibold))
                         .frame(width: 20, height: 20)
-                        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
-                .buttonStyle(BrowserIconButtonStyle(cornerRadius: 6, hitPadding: 2))
+                .buttonStyle(BrowserIconButtonStyle())
                 .foregroundStyle(.secondary)
                 .help("Close Tab")
                 .accessibilityLabel("Close Tab")
@@ -1265,23 +1286,23 @@ private struct BrowserTabBar: View {
         .frame(height: 30)
         .background {
             if isActive {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: LayoutMetrics.Corners.tab, style: .continuous)
                     .fill(.clear)
                     .glassEffect(
                         .regular,
-                        in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        in: RoundedRectangle(cornerRadius: LayoutMetrics.Corners.tab, style: .continuous)
                     )
                     .matchedGeometryEffect(id: "active-tab", in: activeTabBackground)
             } else if isHovered {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: LayoutMetrics.Corners.tab, style: .continuous)
                     .fill(Color.primary.opacity(0.055))
             }
         }
         .overlay(alignment: .trailing) {
             if showsTrailingDivider {
                 Rectangle()
-                    .fill(ChromeMetrics.separatorColor)
-                    .frame(width: ChromeMetrics.separatorThickness, height: 15)
+                    .fill(LayoutMetrics.separatorColor)
+                    .frame(width: LayoutMetrics.separatorThickness, height: 15)
                     .offset(x: spacing / 2)
             }
         }
@@ -1344,7 +1365,7 @@ private final class MiddleClickView: NSView {
 }
 
 private struct BrowserIconButtonStyle: ButtonStyle {
-    var cornerRadius: CGFloat = 8
+    var cornerRadius: CGFloat = LayoutMetrics.Corners.smallButton
     var hitPadding: CGFloat = 2
 
     func makeBody(configuration: Configuration) -> some View {
@@ -1361,6 +1382,7 @@ private struct BrowserIconButtonBody: View {
     let cornerRadius: CGFloat
     let hitPadding: CGFloat
     @ViewState private var isHovered = false
+    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
         configuration.label
@@ -1371,13 +1393,14 @@ private struct BrowserIconButtonBody: View {
                     .fill(backgroundColor)
             }
             .scaleEffect(configuration.isPressed ? 0.94 : 1)
-            .opacity(configuration.isPressed ? 0.78 : 1)
+            .opacity(!isEnabled ? 0.35 : configuration.isPressed ? 0.78 : 1)
             .onHover { isHovered = $0 }
             .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
             .animation(.easeOut(duration: 0.12), value: isHovered)
     }
 
     private var backgroundColor: Color {
+        guard isEnabled else { return .clear }
         if configuration.isPressed { return Color.primary.opacity(0.11) }
         if isHovered { return Color.primary.opacity(0.065) }
         return Color.clear
@@ -1392,9 +1415,9 @@ private extension View {
             .padding(.horizontal, 9)
             .frame(minHeight: 28)
             .background {
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                RoundedRectangle(cornerRadius: LayoutMetrics.Corners.row, style: .continuous)
                     .fill(selected ? Color.accentColor.opacity(0.3) : Color.clear)
             }
-            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: LayoutMetrics.Corners.row, style: .continuous))
     }
 }

@@ -263,8 +263,8 @@ private struct DictionaryIconView: View {
             }
         }
         .frame(width: 28, height: 28)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
-        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: LayoutMetrics.Corners.icon, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: LayoutMetrics.Corners.icon, style: .continuous))
         .accessibilityHidden(true)
     }
 }

@@ -4,7 +4,13 @@ import SwiftUI
 @main
 enum Entry {
     static func main() {
-        if CommandLine.arguments.contains("--translation-test") {
+        if CommandLine.arguments.contains("--shortcut-test") {
+            Task { @MainActor in exit(KeyboardShortcutTests.run() ? 0 : 1) }
+            dispatchMain()
+        } else if CommandLine.arguments.contains("--settings-reset-test") {
+            Task { @MainActor in exit(SettingsResetTests.run() ? 0 : 1) }
+            dispatchMain()
+        } else if CommandLine.arguments.contains("--translation-test") {
             Task { @MainActor in
                 let servicePassed = await TranslationServiceTests.run()
                 let applePassed = await AppleTranslationTests.run()
@@ -44,7 +50,10 @@ struct LexiconApp: App {
         // ContentView can move the window instead.
         .windowBackgroundDragBehavior(.disabled)
         .commands {
-            LexiconCommands()
+            LexiconCommands(libraryModel: libraryModel)
+        }
+        .onChange(of: libraryModel.shortcuts, initial: true) { _, shortcuts in
+            DispatchQueue.main.async { updateNativeCloseShortcut(shortcuts[.closeTab]) }
         }
         // Apply the shared choice at the scene level so Settings, sheets and
         // existing or newly opened windows all inherit the same appearance.
@@ -56,6 +65,7 @@ struct LexiconApp: App {
             SettingsView()
                 .environmentObject(libraryModel)
         }
+        .windowResizability(.contentSize)
     }
 }
 
@@ -90,20 +100,27 @@ private extension FocusedValues {
 }
 
 private struct LexiconCommands: Commands {
+    @ObservedObject var libraryModel: LibraryModel
+    @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
     @FocusedValue(\.lexiconAppState) private var appState
 
     var body: some Commands {
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings…") { openSettings() }
+                .keyboardShortcut(libraryModel.shortcuts[.settings].shortcut)
+        }
+
         CommandGroup(replacing: .newItem) {
             Button("New Window") {
                 openWindow(id: "dictionary")
             }
-            .keyboardShortcut("n", modifiers: .command)
+            .keyboardShortcut(libraryModel.shortcuts[.newWindow].shortcut)
 
             Button("New Tab") {
                 appState?.openNewTab()
             }
-            .keyboardShortcut("t", modifiers: .command)
+            .keyboardShortcut(libraryModel.shortcuts[.newTab].shortcut)
             .disabled(appState == nil)
         }
 
@@ -112,23 +129,23 @@ private struct LexiconCommands: Commands {
             Button("Import Dictionaries…") {
                 appState?.showDictionaryManager = true
             }
-            .keyboardShortcut("i", modifiers: [.command, .shift])
+            .keyboardShortcut(libraryModel.shortcuts[.importDictionaries].shortcut)
             .disabled(appState == nil)
         }
 
         CommandGroup(after: .toolbar) {
             Button("Zoom In") { appState?.libraryModel.zoomIn() }
-                .keyboardShortcut("+", modifiers: .command)
+                .keyboardShortcut(libraryModel.shortcuts[.zoomIn].shortcut)
                 .disabled(appState?.libraryModel.canZoomIn != true)
 
             Button("Zoom Out") { appState?.libraryModel.zoomOut() }
-                .keyboardShortcut("-", modifiers: .command)
+                .keyboardShortcut(libraryModel.shortcuts[.zoomOut].shortcut)
                 .disabled(appState?.libraryModel.canZoomOut != true)
 
             Button("Actual Size (\(appState?.libraryModel.zoomDescription ?? "100%"))") {
                 appState?.libraryModel.resetZoom()
             }
-            .keyboardShortcut("0", modifiers: .command)
+            .keyboardShortcut(libraryModel.shortcuts[.actualSize].shortcut)
             .disabled(appState == nil)
 
             Divider()

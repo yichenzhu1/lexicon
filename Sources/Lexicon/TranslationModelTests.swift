@@ -170,7 +170,7 @@ enum TranslationModelTests {
                 _ = try await dictionary.value
                 try expect(model.status == .testing, "dictionary completion replaced the pending Settings test")
                 apple.finish(0, with: .success("settings result"))
-                try await eventually("settings result published") { model.status == .success("settings result") }
+                try await eventually("settings result published") { model.status == .ready }
 
                 let failingDictionary = Task { try await model.translate("Another passage.") }
                 defer { failingDictionary.cancel() }
@@ -182,7 +182,7 @@ enum TranslationModelTests {
                 } catch let error as Fault {
                     try expect(error.message == "dictionary error", "wrong dictionary error")
                 }
-                try expect(model.status == .success("settings result"), "dictionary failure changed Settings status")
+                try expect(model.status == .ready, "dictionary failure changed Settings status")
 
                 let pendingDictionary = Task { try await model.translate("Still reading this passage.") }
                 defer { pendingDictionary.cancel() }
@@ -190,11 +190,11 @@ enum TranslationModelTests {
                 model.testTranslation()
                 try await eventually("new Settings test began") { apple.sources.count == 5 }
                 apple.finish(4, with: .success("new settings result"))
-                try await eventually("new Settings test finished") { model.status == .success("new settings result") }
+                try await eventually("new Settings test finished") { model.status == .ready }
                 apple.finish(3, with: .success("pending dictionary result"))
                 let pendingResult = try await pendingDictionary.value
                 try expect(pendingResult == "pending dictionary result", "Settings test cancelled a dictionary request")
-                try expect(model.status == .success("new settings result"), "older dictionary result changed Settings status")
+                try expect(model.status == .ready, "older dictionary result changed Settings status")
             }
         }
 
@@ -210,13 +210,13 @@ enum TranslationModelTests {
                 model.testTranslation()
                 try await eventually("new test started") { apple.sources.count == 2 }
                 apple.finish(1, with: .success("new translation"))
-                try await eventually("new test finished") { model.status == .success("new translation") }
+                try await eventually("new test finished") { model.status == .ready }
                 // The injected operation deliberately ignores cancellation and
                 // completes late, like an already-running system translation.
                 apple.finish(0, with: .success("obsolete translation"))
                 try await eventually("old operation returned") { apple.returned.contains(0) }
                 await Task.yield()
-                try expect(model.status == .success("new translation"), "late result overwrote the new test")
+                try expect(model.status == .ready, "late result overwrote the new test")
             }
         }
 
@@ -243,7 +243,7 @@ enum TranslationModelTests {
                     model.testTranslation()
                     try await eventually("replacement cloud test started") { ModelHTTP.requests.count == 2 }
                     ModelHTTP.complete(ModelHTTP.requests[1].id, text: "fresh translation")
-                    try await eventually("replacement test succeeded") { model.status == .success("fresh translation") }
+                    try await eventually("replacement test succeeded") { model.status == .ready }
                 }
             }
         }
@@ -268,6 +268,69 @@ enum TranslationModelTests {
                 ModelHTTP.complete(submitted.id, text: "original request result")
                 let result = try await dictionary.value
                 try expect(result == "original request result", "editing Settings cancelled a dictionary request")
+            }
+        }
+
+        await suite.run("automatic health check publishes readiness without sample text") {
+            let apple = ControlledApple()
+            defer { apple.finishRemaining() }
+            try await withModel(apple: apple.service) { model, _, _ in
+                let check = Task { await model.checkHealth() }
+                try await eventually("automatic check started") { apple.sources.count == 1 }
+                apple.finish(0, with: .success("sample translation"))
+                await check.value
+                try expect(model.status == .ready, "successful sample did not report readiness")
+                try expect(model.appleAvailability == .installed, "successful check did not refresh language status")
+            }
+        }
+
+        await suite.run("automatic health check skips disabled and unconfigured providers") {
+            let keys = Keys()
+            keys.values = [:]
+            try await withModel(keys: keys) { model, _, _ in
+                model.provider = .disabled
+                await model.checkHealth()
+                model.provider = .openAI
+                await model.checkHealth()
+                try expect(model.status == .idle, "missing credentials triggered a check")
+                try expect(ModelHTTP.requests.isEmpty, "unconfigured provider made a request")
+            }
+        }
+
+        await suite.run("automatic health check detects missing packs from the actual translation") {
+            let apple = AppleTranslationService(
+                availability: { .installed },
+                translateInstalled: { _ in throw TranslationError.notInstalled }
+            )
+            try await withModel(apple: apple) { model, _, _ in
+                await model.checkHealth()
+                try expect(model.appleAvailability == .supported, "missing languages were reported ready")
+                try expectFailure(model.status, containing: "language packs")
+            }
+        }
+
+        await suite.run("cancelling the automatic check stops its cloud request") {
+            try await withModel(["translationProvider": "openAI"]) { model, _, _ in
+                let check = Task { await model.checkHealth() }
+                try await eventually("automatic cloud check started") { ModelHTTP.requests.count == 1 }
+                let request = ModelHTTP.requests[0].id
+                check.cancel()
+                await check.value
+                try await eventually("automatic cloud check cancelled") { ModelHTTP.stopped.contains(request) }
+                model.cancelTest()
+                try expect(model.status == .idle, "closed pane retained a health result")
+            }
+        }
+
+        await suite.run("replacing a saved key invalidates the automatic health check identity") {
+            try await withModel(["translationProvider": "openAI"]) { model, _, keys in
+                let revision = model.credentialRevision
+                try expect(model.hasAPIKey, "fixture has no saved key")
+                try expect(model.saveAPIKey("replacement"), "replacement was not saved")
+                try expect(model.credentialRevision == revision + 1, "replacement key would not trigger a new check")
+                keys.writeFailure = Fault("write denied")
+                try expect(!model.saveAPIKey("failed replacement"), "failed save was accepted")
+                try expect(model.credentialRevision == revision + 1, "failed save invalidated the credential identity")
             }
         }
 
