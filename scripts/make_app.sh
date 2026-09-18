@@ -46,9 +46,8 @@ BINARY="$(xcrun swift build -c release --product Lexicon --sdk "$LEXICON_BUILD_S
 APP="build/Lexicon.app"
 ICON="Assets/Lexicon.icns"
 
-if [[ ! -f "$ICON" || "Assets/AppIconSource.png" -nt "$ICON" ]]; then
-    scripts/make_icon.sh
-fi
+# Always regenerate so changes to the icon recipe cannot ship a stale set.
+scripts/make_icon.sh
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"

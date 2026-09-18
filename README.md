@@ -88,6 +88,12 @@ scripts/make_app.sh
 open build/Lexicon.app
 ```
 
+Packaging regenerates `Assets/Lexicon.icns` from the opaque, full-bleed
+`Assets/AppIconSource.png` using Apple's `iconutil`. The icon includes all ten
+standard macOS variants: 16, 32, 128, 256, and 512 points, each at 1x and 2x.
+Run `scripts/make_icon.sh` to rebuild just the icon. `Assets/AppIcon.png` is
+the rounded README image, not the app's icon source.
+
 Local builds are ad-hoc signed and are for development or trusted internal
 testing only. Override the default version or build number when needed:
 
