@@ -1177,31 +1177,34 @@ private struct BrowserTabBar: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var libraryModel: LibraryModel
 
-    private let spacing: CGFloat = 2
+    private let spacing = TabStripLayout.spacing
     @Namespace private var activeTabBackground
-    @ViewState private var hoveredTabIDs: Set<UUID> = []
+    @ViewState private var pointerLocation: CGPoint?
+    @ViewState private var closingLayout: TabStripLayout?
     /// The tab a reorder drag is hovering over; drives the insertion indicator.
     @ViewState private var dropTargetTabID: UUID?
 
     var body: some View {
         GeometryReader { proxy in
-            let count = max(1, appState.tabs.count)
-            let interItemSpacing = spacing * CGFloat(max(0, count - 1))
-            let availableForTabs = max(
-                CGFloat(count),
-                proxy.size.width - interItemSpacing
-            )
-            // Tabs share the full strip evenly, like Safari's tab bar — a
-            // single tab spans the whole space instead of hugging the left.
-            let tabWidth = max(56, availableForTabs / CGFloat(count))
+            let tabIDs = appState.tabs.map(\.id)
+            let layout = closingLayout.flatMap {
+                $0.matches(tabIDs: tabIDs, availableWidth: proxy.size.width) ? $0 : nil
+            } ?? TabStripLayout(tabIDs: tabIDs, availableWidth: proxy.size.width)
 
             HStack(spacing: spacing) {
                 ForEach(Array(appState.tabs.enumerated()), id: \.element.id) { index, tab in
+                    let tabWidth = layout.widths[index]
+                    let isHovered = pointerLocation.map {
+                        CGRect(x: layout.origin(at: index), y: 0,
+                               width: tabWidth, height: proxy.size.height).contains($0)
+                    } ?? false
                     let nextTabIsActive = index + 1 < appState.tabs.count
                         && appState.tabs[index + 1].id == appState.activeTabID
                     tabView(
                         tab,
                         width: tabWidth,
+                        isHovered: isHovered,
+                        close: { closeTab(tab.id, layout: layout) },
                         showsTrailingDivider: index + 1 < appState.tabs.count
                             && tab.id != appState.activeTabID
                             && !nextTabIsActive
@@ -1236,18 +1239,53 @@ private struct BrowserTabBar: View {
             }
             .frame(width: proxy.size.width, alignment: .leading)
             .animation(.smooth(duration: 0.2), value: appState.tabs.map(\.id))
+            .contentShape(Rectangle())
+            .overlay {
+                TabStripPointerTracking { location in
+                    pointerLocation = location
+                    if location == nil {
+                        withAnimation(.smooth(duration: 0.2)) { closingLayout = nil }
+                    }
+                }
+            }
+            .onChange(of: tabIDs) { _, ids in
+                if closingLayout?.tabIDs != ids { closingLayout = nil }
+            }
+            .onChange(of: proxy.size.width) { _, _ in closingLayout = nil }
+            .transaction { transaction in
+                if closingLayout?.matches(tabIDs: tabIDs, availableWidth: proxy.size.width) == true {
+                    transaction.animation = nil
+                    transaction.disablesAnimations = true
+                }
+            }
         }
         .frame(height: LayoutMetrics.tabStripContentHeight)
+        .onDisappear {
+            closingLayout = nil
+            pointerLocation = nil
+        }
+    }
+
+    private func closeTab(_ id: UUID, layout: TabStripLayout) {
+        // AppState and the tab backgrounds also supply animations. Disable the
+        // entire transaction so the next button is immediately clickable here.
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            closingLayout = layout.closing(id)
+            appState.closeTab(id)
+        }
     }
 
     private func tabView(
         _ tab: EntryTab,
         width: CGFloat,
+        isHovered: Bool,
+        close: @escaping () -> Void,
         showsTrailingDivider: Bool
     ) -> some View {
         let isActive = tab.id == appState.activeTabID
         let compact = width < 110
-        let isHovered = hoveredTabIDs.contains(tab.id)
         return HStack(spacing: 5) {
             Button {
                 appState.activateTab(tab.id)
@@ -1267,9 +1305,9 @@ private struct BrowserTabBar: View {
             }
             .buttonStyle(.plain)
 
-            if isActive || !compact {
+            if isActive || !compact || isHovered {
                 Button {
-                    appState.closeTab(tab.id)
+                    close()
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 9, weight: .semibold))
@@ -1282,7 +1320,9 @@ private struct BrowserTabBar: View {
             }
         }
         .padding(.leading, compact ? 6 : 9)
-        .padding(.trailing, compact ? 3 : 5)
+        // A constant inset also keeps the close target fixed if the last
+        // surviving compact tab grows during a pointer-close session.
+        .padding(.trailing, 5)
         .frame(height: 30)
         .background {
             if isActive {
@@ -1306,15 +1346,8 @@ private struct BrowserTabBar: View {
                     .offset(x: spacing / 2)
             }
         }
-        .onHover { hovering in
-            if hovering {
-                hoveredTabIDs.insert(tab.id)
-            } else {
-                hoveredTabIDs.remove(tab.id)
-            }
-        }
         .overlay {
-            MiddleClickClose { appState.closeTab(tab.id) }
+            MiddleClickClose(action: close)
         }
         .contextMenu {
             Button("Close Tab") { appState.closeTab(tab.id) }
@@ -1325,6 +1358,99 @@ private struct BrowserTabBar: View {
         }
         .animation(.smooth(duration: 0.18), value: isActive)
         .animation(.easeOut(duration: 0.12), value: isHovered)
+    }
+}
+
+/// Keep one tracking area for the whole strip, including its empty trailing
+/// space. SwiftUI hover regions can exit when the tab under the pointer dies.
+private struct TabStripPointerTracking: NSViewRepresentable {
+    let changed: (CGPoint?) -> Void
+
+    func makeNSView(context: Context) -> TrackingView {
+        let view = TrackingView()
+        view.changed = changed
+        view.install()
+        return view
+    }
+
+    func updateNSView(_ view: TrackingView, context: Context) {
+        view.changed = changed
+    }
+
+    static func dismantleNSView(_ view: TrackingView, coordinator: ()) {
+        view.uninstall()
+    }
+
+    final class TrackingView: NSView {
+        var changed: (CGPoint?) -> Void = { _ in }
+        private var area: NSTrackingArea?
+        private var monitor: Any?
+        private weak var trackedWindow: NSWindow?
+        private var previouslyAcceptedMouseMoved = false
+        override var isFlipped: Bool { true }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            restoreWindowMouseTracking()
+            trackedWindow = window
+            previouslyAcceptedMouseMoved = window?.acceptsMouseMovedEvents ?? false
+            window?.acceptsMouseMovedEvents = true
+        }
+
+        func install() {
+            // Observe without consuming events. This also updates the pointer
+            // before a click, including clicks delivered without a mouse move.
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [
+                .mouseMoved, .leftMouseDown, .rightMouseDown, .otherMouseDown,
+                .leftMouseDragged, .otherMouseDragged,
+            ]) { [weak self] event in
+                MainActor.assumeIsolated {
+                    guard let self, let window = self.window else { return }
+                    if event.window === window {
+                        self.reportPointer(event)
+                    } else {
+                        self.changed(nil)
+                    }
+                }
+                return event
+            }
+        }
+
+        func uninstall() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+            restoreWindowMouseTracking()
+        }
+
+        private func restoreWindowMouseTracking() {
+            trackedWindow?.acceptsMouseMovedEvents = previouslyAcceptedMouseMoved
+            trackedWindow = nil
+        }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let area { removeTrackingArea(area) }
+            // A SwiftUI-hosted view's visibleRect can extend beyond its bounds
+            // to the whole window. Track the strip's actual bounds explicitly.
+            let area = NSTrackingArea(rect: bounds,
+                                      options: [.mouseEnteredAndExited, .mouseMoved,
+                                                .activeAlways],
+                                      owner: self, userInfo: nil)
+            addTrackingArea(area)
+            self.area = area
+        }
+
+        override func mouseEntered(with event: NSEvent) { reportPointer(event) }
+        override func mouseMoved(with event: NSEvent) { reportPointer(event) }
+        override func mouseExited(with event: NSEvent) { reportPointer(event) }
+
+        private func reportPointer(_ event: NSEvent) {
+            let location = convert(event.locationInWindow, from: nil)
+            // Ignore synthetic exits caused by changes beneath the pointer.
+            changed(bounds.contains(location) ? location : nil)
+        }
+
     }
 }
 

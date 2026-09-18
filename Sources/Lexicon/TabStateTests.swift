@@ -28,6 +28,8 @@ enum TabStateTests {
             if !condition() { failures.append(message) }
         }
 
+        expect(TabStripLayoutTests.run(), "tab strip layout regressions")
+
         let initialID = state.activeTabID
         expect(state.residentTabIDs == [initialID], "initial tab was not resident")
 
